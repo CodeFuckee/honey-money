@@ -49,7 +49,7 @@ docker compose up -d --build
 群晖（Container Manager）：项目 → 新建 → 路径选本仓库（或 git 克隆地址）→ 
 使用现有 docker-compose.yml → 按 .env 配好变量后启动。要点：
 
-- **只有 frontend 对外暴露端口**（默认 8080；DSM 自用 5000/5001 已避开），
+- **只有 frontend 对外暴露端口**（默认 28080；DSM 自用 5000/5001 已避开），
   backend/postgres/redis/proxy_pool 仅 compose 内网互通；
 - 数据持久化：`pg_data`、`redis_data` 两个 named volume；
 - **CPU 架构**：编排按 x86_64 常见镜像编写；ARM 机型上 postgres/redis/node 官方
@@ -68,7 +68,7 @@ docker compose up -d --build
    NAS 宿主 docker，容器直接落在 NAS 上持久运行。
 
 前置：项目 CI/CD Variables 已配置 `POSTGRES_PASSWORD`（masked）。
-部署后访问 `http://<NAS>:8080`（默认端口）。手动重部署也可以在 NAS 上
+部署后访问 `http://<NAS>:28080`（默认端口）。手动重部署也可以在 NAS 上
 直接 `docker compose -p honey-money up -d --build`。
 
 ## 路线图（业务迁入顺序）

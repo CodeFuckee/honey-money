@@ -13,7 +13,7 @@ services:
     build: ./frontend
     restart: unless-stopped
     ports:
-      - "${FRONTEND_PORT:-8080}:80"   # 对外唯一端口（DSM 占用 5000/5001，已避开）
+      - "${FRONTEND_PORT:-28080}:80"  # 对外唯一端口（DSM 占 5000/5001，8080 常被群晖其他应用占用）
     depends_on:
       - backend
 
