@@ -28,9 +28,6 @@ deploy-nas:
     - |
       docker info > /dev/null 2>&1 || {
         echo "runner 容器访问不到 docker daemon（socket 映射未生效）"; exit 1; }
-      if [ -z "$POSTGRES_PASSWORD" ]; then
-        echo "缺少 CI/CD 变量 POSTGRES_PASSWORD：项目 Settings → CI/CD → Variables 添加（masked）"; exit 1;
-      fi
   script:
     # 兼容 compose v2 插件与旧版 docker-compose
     - |
@@ -64,3 +61,6 @@ nas-diag:
     - |
       echo "===================== 端到端：backend → proxy_pool /get ====================="
       docker exec honey-money-backend-1 python -c "import httpx; r=httpx.get('http://proxy_pool:5010/get/', timeout=5); print('HTTP', r.status_code, r.text[:200])" 2>&1 || true
+    - |
+      echo "===================== 端到端：backend → PostgreSQL（/api/infra） ====================="
+      docker exec honey-money-backend-1 python -c "import httpx; print(httpx.get('http://127.0.0.1:8000/api/infra', timeout=8).text)" 2>&1 || true

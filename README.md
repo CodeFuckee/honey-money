@@ -50,8 +50,10 @@ docker compose up -d --build
 使用现有 docker-compose.yml → 按 .env 配好变量后启动。要点：
 
 - **只有 frontend 对外暴露端口**（默认 28080；DSM 自用 5000/5001 已避开），
-  backend/postgres/redis/proxy_pool 仅 compose 内网互通；
-- 数据持久化：`pg_data`、`redis_data` 两个 named volume；
+  backend/redis/proxy_pool 仅 compose 内网互通；
+- **PostgreSQL 不由本编排创建**：连接 NAS 上既有 PG 容器（宿主 5433，库/用户
+  honey_money），backend 经 host.docker.internal 访问；数据持久化由该容器自理，
+  本编排仅 `redis_data` 一个 named volume；
 - **CPU 架构**：编排按 x86_64 常见镜像编写；ARM 机型上 postgres/redis/node 官方
   镜像均有 arm64 版，但 `jhao104/proxy_pool` 无官方 ARM 镜像，需在 NAS 上
   `docker build` 其源码仓库后替换 image 名；

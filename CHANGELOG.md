@@ -3,6 +3,14 @@
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，语义化版本。
 （注：本仓库 2026-09-28 重建，v0.1.0 之前的本地历史未迁移。）
 
+## [0.1.1] - 2026-09-28
+
+### Changed
+- PostgreSQL 改用 NAS 上既有容器（宿主 5433，库/用户 honey_money）：
+  移除编排内 postgres 服务与 pg_data 卷，backend 经
+  extra_hosts host.docker.internal:host-gateway 直连；DATABASE_URL 可用
+  .env 覆盖。nas-diag 增加 /api/infra 端到端检查（PG+代理池状态）。
+
 ## [0.1.0] - 2026-09-28
 
 ### Added
