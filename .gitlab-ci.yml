@@ -41,6 +41,7 @@ deploy-nas:
     - echo "使用 $DC 部署到 NAS ..."
     - $DC -p honey-money up -d --build
     - $DC -p honey-money ps
-    - docker image prune -f          # 清理本次构建产生的悬空镜像层
+    # 注：不做 docker image prune——群晖 daemon 上实测会挂起不返回（流水线 3080 卡 30min），
+    # 镜像清理留给 NAS 定期任务（Container Manager 或计划任务手动清理）
   environment:
     name: nas
