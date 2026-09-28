@@ -35,7 +35,8 @@ deploy-nas:
       elif command -v docker-compose > /dev/null 2>&1; then DC="docker-compose";
       else echo "runner 内无 docker compose 可用"; exit 1; fi
     - echo "使用 $DC 部署到 NAS ..."
-    - $DC -p honey-money up -d --build
+    # --remove-orphans：清除已从编排移除但仍在运行的旧服务容器（如内置 postgres）
+    - $DC -p honey-money up -d --build --remove-orphans
     - $DC -p honey-money ps
     # 注：不做 docker image prune——群晖 daemon 上实测会挂起不返回（流水线 3080 卡 30min），
     # 镜像清理留给 NAS 定期任务（Container Manager 或计划任务手动清理）
