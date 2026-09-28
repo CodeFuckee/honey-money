@@ -1,0 +1,62 @@
+# honey-money 本地/群晖 NAS 一键编排
+# 用法：cp .env.example .env （按需改密码/端口）→ docker compose up -d
+# 群晖：Container Manager → 项目 → 指向本仓库目录，同样走 .env + up
+#
+# 拓扑（只有 frontend 对外，其余全部内网互通）：
+#   [外部 :8080] → frontend(nginx) ─┬─ 静态托管 Vue
+#                                  └─ /api 反代 → backend:8000
+#   backend → postgres:5432（数据）；proxy_pool 检活 :5010
+#   proxy_pool → redis:6379（代理存储）
+
+services:
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"   # 对外唯一端口（DSM 占用 5000/5001，已避开）
+    depends_on:
+      - backend
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-honey}:${POSTGRES_PASSWORD:-honey}@postgres:5432/${POSTGRES_DB:-honeymoney}
+      PROXY_POOL_URL: http://proxy_pool:5010
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-honey}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-honey}
+      POSTGRES_DB: ${POSTGRES_DB:-honeymoney}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-honey} -d ${POSTGRES_DB:-honeymoney}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    # 不映射 ports：仅 compose 内网可达
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+
+  proxy_pool:
+    image: jhao104/proxy_pool:latest   # x86_64；ARM 机型需自行构建该镜像（见 README）
+    restart: unless-stopped
+    environment:
+      DB_CONN: redis://redis:6379/0
+    depends_on:
+      - redis
+
+volumes:
+  pg_data:
+  redis_data:

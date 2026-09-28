@@ -1,0 +1,6 @@
+# 构建上下文只需要 app/ 与 requirements.txt，其余全部排除
+tests/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/

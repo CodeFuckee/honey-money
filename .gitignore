@@ -1,0 +1,18 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Node
+node_modules/
+frontend/dist/
+
+# 环境与密钥（.env.example 是模板，可入库）
+.env
+
+# 运行时数据
+data/
+outputs/
+scratch/
+live/
