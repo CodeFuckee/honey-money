@@ -58,10 +58,18 @@ docker compose up -d --build
 - 代理池后台默认无对外端口（内部经 backend 探活）；如需查看其 Web UI，
   在 compose 中给 proxy_pool 加 ports 映射（默认端口 5010）。
 
-## CI
+## CI/CD
 
-推送 main 触发 `backend-test`（python:3.12-slim 跑 backend/tests）。
-测试不绿不部署（compose 手动/脚本部署亦应遵循同一门禁）。
+推送 main 触发两阶段流水线：
+
+1. `backend-test`（任意 runner）：python:3.12-slim 跑 backend/tests；
+2. `deploy-nas`（仅 main，runner #18 "nas"，tags `linux,docker,nas,deploy`）：
+   test 全绿后自动在群晖上 `docker compose up -d --build`——该 runner 映射了
+   NAS 宿主 docker，容器直接落在 NAS 上持久运行。
+
+前置：项目 CI/CD Variables 已配置 `POSTGRES_PASSWORD`（masked）。
+部署后访问 `http://<NAS>:8080`（默认端口）。手动重部署也可以在 NAS 上
+直接 `docker compose -p honey-money up -d --build`。
 
 ## 路线图（业务迁入顺序）
 

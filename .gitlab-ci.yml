@@ -1,6 +1,11 @@
-# main 流水线：后端测试全绿是部署前置条件
+# main 流水线：test 全绿 → 自动部署到群晖 NAS（runner #18 "nas"）
+#
+# 部署原理：#18 runner 运行在群晖 Docker 里且映射了宿主 docker，
+# 作业内执行 docker compose 实际作用对象是 NAS 的 Docker daemon，
+# 容器因此直接落在 NAS 上并持久存在（作业结束后不会被清理）。
 stages:
   - test
+  - deploy
 
 backend-test:
   stage: test
@@ -8,3 +13,31 @@ backend-test:
   script:
     - pip install -r backend/requirements.txt
     - pytest backend/tests -q
+
+deploy-nas:
+  stage: deploy
+  image: docker:27-cli          # shell 执行器下会被忽略，无害
+  tags: [linux, docker, nas, deploy]
+  variables:
+    COMPOSE_PROJECT_NAME: honey-money   # 固定项目名：job 目录每次随机，不固定会残留孤儿项目
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  before_script:
+    - |
+      docker info > /dev/null 2>&1 || {
+        echo "runner 容器访问不到 docker daemon（socket 映射未生效）"; exit 1; }
+      if [ -z "$POSTGRES_PASSWORD" ]; then
+        echo "缺少 CI/CD 变量 POSTGRES_PASSWORD：项目 Settings → CI/CD → Variables 添加（masked）"; exit 1;
+      fi
+  script:
+    # 兼容 compose v2 插件与旧版 docker-compose
+    - |
+      if docker compose version > /dev/null 2>&1; then DC="docker compose";
+      elif command -v docker-compose > /dev/null 2>&1; then DC="docker-compose";
+      else echo "runner 内无 docker compose 可用"; exit 1; fi
+    - echo "使用 $DC 部署到 NAS ..."
+    - $DC -p honey-money up -d --build
+    - $DC -p honey-money ps
+    - docker image prune -f          # 清理本次构建产生的悬空镜像层
+  environment:
+    name: nas
