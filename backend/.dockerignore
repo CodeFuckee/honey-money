@@ -1,5 +1,5 @@
-# 构建上下文只需要 app/ 与 requirements.txt，其余全部排除
-tests/
+# 构建上下文排除项。注意：不要排除 tests/ —— Dockerfile.test 需要它
+# （生产 Dockerfile 只 COPY app/，测试文件不会进生产镜像层）。
 __pycache__/
 *.pyc
 .pytest_cache/
