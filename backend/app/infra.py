@@ -18,9 +18,10 @@ def check_postgres(dsn: str, timeout: float = 1.5) -> dict:
 
 
 def check_proxy_pool(base_url: str, timeout: float = 1.5) -> dict:
-    """GET {base_url}/get 探活（proxy_pool 的标准取代理接口）。"""
+    """GET {base_url}/get/ 探活（proxy_pool 的取代理接口；Flask 路由带尾斜杠，
+    请求 /get 会得到 308 重定向而非 200）。"""
     try:
-        resp = httpx.get(f"{base_url.rstrip('/')}/get", timeout=timeout)
+        resp = httpx.get(f"{base_url.rstrip('/')}/get/", timeout=timeout)
         if resp.status_code == 200:
             return {"status": "up", "detail": resp.text[:120]}
         return {"status": "down", "detail": f"HTTP {resp.status_code}"}
