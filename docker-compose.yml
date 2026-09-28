@@ -51,6 +51,9 @@ services:
 
   proxy_pool:
     image: jhao104/proxy_pool:latest   # x86_64；ARM 机型需自行构建该镜像（见 README）
+    # 官方镜像 bug：基础镜像 alpine 无 bash 而 ENTRYPOINT 执行 bash（exit 127 崩溃循环）。
+    # 覆盖入口改用 alpine 自带的 sh；若脚本将来出现 bashism 再改为自建镜像。
+    entrypoint: ["tini", "--", "sh", "proxy_pool.sh", "start", "--fg"]
     restart: unless-stopped
     environment:
       DB_CONN: redis://redis:6379/0

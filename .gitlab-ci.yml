@@ -62,3 +62,6 @@ nas-diag:
         echo "===================== $c ====================="
         docker logs --tail 40 "$c" 2>&1
       done
+    - |
+      echo "===================== 端到端：backend → proxy_pool /get ====================="
+      docker exec honey-money-backend-1 python -c "import httpx; r=httpx.get('http://proxy_pool:5010/get', timeout=5); print('HTTP', r.status_code, r.text[:200])" 2>&1 || true
