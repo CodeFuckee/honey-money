@@ -1,0 +1,14 @@
+# 测试专用镜像：与生产 Dockerfile 同源，但额外打入 tests/（生产镜像刻意排除）。
+# 由 CI 在 NAS runner 上构建运行——不依赖 runner 宿主的 Python/OS，环境完全确定。
+FROM python:3.12-slim
+
+WORKDIR /srv
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app/ app/
+COPY tests/ tests/
+
+# 容器内工作目录就是 /srv，pytest.ini 在仓库根（挂不进来），故直接指定路径与参数
+CMD ["pytest", "tests", "-q"]

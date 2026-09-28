@@ -9,13 +9,12 @@ stages:
 
 backend-test:
   stage: test
-  image: python:3.12-slim   # docker 执行器生效；shell 执行器（系统 Python）同样可跑
+  # 钉死到 NAS runner（唯一确定有 docker 的 runner）：runner 池异构
+  # （Linux shell / Windows pwsh / NAS），无标签作业随机认领导致环境不可复现。
+  tags: [linux, docker, nas, deploy]
   script:
-    # venv 方式执行器无关：规避 Debian 系统 Python 的 PEP 668 限制，
-    # 也避免依赖 job 被哪种 runner 认领
-    - python3 -m venv /tmp/venv
-    - /tmp/venv/bin/pip install -q -r backend/requirements.txt
-    - /tmp/venv/bin/pytest backend/tests -q
+    - docker build -q -t honey-money-backend-test -f backend/Dockerfile.test backend
+    - docker run --rm honey-money-backend-test
 
 deploy-nas:
   stage: deploy
