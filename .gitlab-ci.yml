@@ -54,6 +54,12 @@ nas-diag:
   allow_failure: true
   script:
     - docker ps -a --filter name=honey-money --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
+    # 完整 ID + 重启策略 + compose 项目标签：核对 Container Manager 界面显示是否与真实状态一致
+    - |
+      echo "===================== 真实状态核对（名称/短ID/重启策略/项目标签） ====================="
+      for c in $(docker ps -a --filter name=honey-money --format '{{.Names}}' | sort); do
+        docker inspect -f '{{.Name}}  short_id={{.Id}}  restart={{.HostConfig.RestartPolicy.Name}}  project={{index .Config.Labels "com.docker.compose.project"}}' "$c"
+      done
     - |
       for c in $(docker ps -a --filter name=honey-money --format '{{.Names}}'); do
         echo "===================== $c ====================="
