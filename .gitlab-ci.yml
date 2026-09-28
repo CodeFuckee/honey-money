@@ -45,3 +45,20 @@ deploy-nas:
     # 镜像清理留给 NAS 定期任务（Container Manager 或计划任务手动清理）
   environment:
     name: nas
+
+# 手动运维工具：在 NAS 上抓 honey-money 全部容器状态与日志（CI 页面手动触发）
+nas-diag:
+  stage: deploy
+  image: docker:27-cli
+  tags: [linux, docker, nas, deploy]
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual
+  allow_failure: true
+  script:
+    - docker ps -a --filter name=honey-money --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
+    - |
+      for c in $(docker ps -a --filter name=honey-money --format '{{.Names}}'); do
+        echo "===================== $c ====================="
+        docker logs --tail 40 "$c" 2>&1
+      done
