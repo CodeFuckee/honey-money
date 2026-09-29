@@ -54,10 +54,12 @@ def servers():
             cwd=ROOT / "backend", env=backend_env,
         ))
         env = {**os.environ, "BACKEND_PORT": str(backend_port)}
+        # Windows 的 npm 是 npm.cmd 需要 shell；POSIX 直接 exec（shell=True+数组
+        # 在 POSIX 下只有首元素生效，preview 参数会全部丢失）
         procs.append(subprocess.Popen(
             ["npm", "run", "preview", "--", "--port", str(frontend_port),
              "--strictPort", "--host", "127.0.0.1"],  # 默认只绑 IPv6 的 ::1
-            cwd=ROOT / "frontend", shell=True, env=env,
+            cwd=ROOT / "frontend", shell=(sys.platform == "win32"), env=env,
         ))
         assert _wait(f"http://127.0.0.1:{backend_port}/healthz"), "后端 30s 内未就绪"
         assert _wait(f"http://127.0.0.1:{frontend_port}/"), "前端 preview 30s 内未就绪"
@@ -72,20 +74,23 @@ def servers():
 
 
 def test_health_dashboard_renders(servers, page):
-    """页面加载：标题可见，三张卡片渲染，本地无 PG/代理池时优雅降级为未连接。"""
+    """页面加载：标题可见，四张卡片渲染，本地无 PG/代理池时优雅降级为未连接。"""
     _, frontend_port = servers
     page.goto(f"http://127.0.0.1:{frontend_port}/")
 
     expect(page.get_by_role("heading", name="honey-money")).to_be_visible()
 
     cards = page.locator(".card")
-    expect(cards).to_have_count(3, timeout=20000)
+    expect(cards).to_have_count(4, timeout=20000)
 
     expect(page.locator(".card", has_text="后端 API")
            .locator(".state")).to_have_text("运行中")
 
-    # 本地无 PG/代理池：两卡应渲染"未连接"且页面不崩溃（优雅降级路径）
+    # 本地无 PG/代理池：三卡应渲染"未连接"且页面不崩溃（优雅降级路径）
     expect(page.locator(".card", has_text="PostgreSQL")
            .locator(".state")).to_have_text("未连接")
     expect(page.locator(".card", has_text="代理池")
+           .locator(".state")).to_have_text("未连接")
+    # 爬虫数据卡：PG 不可达 → 未连接（crawl/stats 接口同样优雅降级）
+    expect(page.locator(".card", has_text="爬虫数据")
            .locator(".state")).to_have_text("未连接")

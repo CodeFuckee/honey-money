@@ -6,6 +6,9 @@
 ## [Unreleased]
 
 ### Added
+- 前端仪表盘新增「爬虫数据」卡片 + 后端 `GET /api/crawl/stats` 接口：
+  已入库 K 线总数、股票覆盖进度条（已爬/清单/待爬）、最近一次运行汇总；
+  爬虫未初始化（表不存在）显示"爬虫未运行"，PG 不可达优雅降级"未连接"。
 - 东财 A 股历史日线爬虫（backend/app/crawler/，CLI：`python -m app.crawler`）：
   - 沪深 A 股全量清单（clist 分页，实测 5561 只）+ 全史日线（push2his
     单请求全史，fqt=0 不复权）；

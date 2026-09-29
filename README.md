@@ -16,7 +16,7 @@ backend/            Python 后端（FastAPI）
                       eastmoney(接口客户端) / store(存储) / runner(编排) / __main__(CLI)
   tests/              63 个离线 pytest 用例（API 骨架 6 + 爬虫 57）
 frontend/           Vue3 + Vite 前端
-  src/App.vue         服务状态仪表盘（三卡：后端 / PostgreSQL / 代理池）
+  src/App.vue         服务状态仪表盘（四卡：后端 / PostgreSQL / 代理池 / 爬虫数据）
   nginx.conf          生产：静态托管 + /api 反代后端
 deploy/             （预留：将来放 NAS 专属编排变体）
 tests/e2e/          Playwright E2E（自拉后端 uvicorn + 前端 vite preview）

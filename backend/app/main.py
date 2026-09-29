@@ -7,6 +7,7 @@
 from fastapi import FastAPI
 
 from . import config
+from .crawl_stats import fetch_crawl_stats
 from .infra import check_postgres, check_proxy_pool
 
 
@@ -30,6 +31,14 @@ def create_app() -> FastAPI:
             "postgres": check_postgres(config.DATABASE_URL),
             "proxy_pool": check_proxy_pool(config.PROXY_POOL_URL),
         }
+
+    @app.get("/api/crawl/stats")
+    def crawl_stats():
+        """爬虫数据统计：K 线总数 / 股票覆盖进度 / 待爬 / 最近运行。
+
+        始终 200；PG 不可达在 status=down 表达（同 /api/infra 的降级约定）。
+        """
+        return fetch_crawl_stats(config.DATABASE_URL)
 
     return app
 
