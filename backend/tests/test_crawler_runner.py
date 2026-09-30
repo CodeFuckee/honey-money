@@ -44,15 +44,18 @@ class FakeStore:
     def __init__(self, max_dates=None):
         self.max_dates = max_dates or {}
         self.upserted: list[tuple[str, int]] = []
+        self.sources: list[str] = []
 
-    def max_trade_dates(self, conn):
+    def max_trade_dates(self, conn, source=None):
         return dict(self.max_dates)
 
-    def upsert_daily_bars(self, conn, code, rows):
+    def upsert_daily_bars(self, conn, code, rows, source=None):
         self.upserted.append((code, len(rows)))
+        self.sources.append(source)
         return len(rows)
 
-    def start_run(self, conn, mode):
+    def start_run(self, conn, mode, source=None):
+        self.run_source = source
         return 1
 
     def finish_run(self, conn, run_id, **stats):
@@ -165,5 +168,65 @@ class TestCli:
             cwd=backend, capture_output=True, text=True, timeout=30,
         )
         assert proc.returncode == 0
-        for flag in ("--mode", "--limit", "--only", "--concurrency"):
+        for flag in ("--mode", "--limit", "--only", "--concurrency", "--source"):
             assert flag in proc.stdout
+
+
+class TestAntiBan:
+    """防封措施：分批批间休眠、连续失败熔停。"""
+
+    def test_batch_pause_between_batches(self):
+        """每 batch_size 只休 batch_pause 秒（注入假 sleep 记录）。"""
+        sleeps: list[float] = []
+
+        async def fake_sleep(sec):
+            sleeps.append(sec)
+
+        runner = CrawlRunner(client=FakeClient(), store=FakeStore(), conn=FakeConn(),
+                             concurrency=1, sleep=fake_sleep)
+        run(runner.run(STOCKS, batch_size=1, batch_pause=30))
+        # 3 只分 3 批，批间歇 2 次（真实时钟下 ≈30s，取近似）
+        pauses = [s for s in sleeps if 29.0 <= s <= 30.5]
+        assert len(pauses) == 2
+
+    def test_no_pause_without_batches(self):
+        sleeps: list[float] = []
+
+        async def fake_sleep(sec):
+            sleeps.append(sec)
+
+        runner = CrawlRunner(client=FakeClient(), store=FakeStore(), conn=FakeConn(),
+                             concurrency=1, sleep=fake_sleep)
+        run(runner.run(STOCKS, batch_pause=30))   # 未开分批
+        assert sleeps == []
+
+    def test_aborts_after_consecutive_failures(self):
+        """连续 N 只失败即熔停：不再派发剩余任务，优雅保存退出。"""
+        client = FakeClient(fail_codes={s["code"] for s in STOCKS})
+        store = FakeStore()
+        runner = CrawlRunner(client=client, store=store, conn=FakeConn(),
+                             concurrency=1)
+        summary = run(runner.run(STOCKS, abort_after_consecutive_failures=2))
+        assert summary.aborted is True
+        assert summary.failed_stocks == 2      # 第 2 只失败后停止，第 3 只未派发
+        assert summary.ok_stocks == 0
+
+    def test_success_resets_abort_counter(self):
+        """失败计数被成功打断：夹着成功的零星失败不触发熔停。"""
+        client = FakeClient(fail_codes={"000001"})   # 第 2 只失败
+        runner = CrawlRunner(client=client, store=FakeStore(), conn=FakeConn(),
+                             concurrency=1)
+        summary = run(runner.run(STOCKS, abort_after_consecutive_failures=2))
+        assert summary.aborted is False
+        assert summary.ok_stocks == 2 and summary.failed_stocks == 1
+
+
+class TestSource:
+    def test_source_passed_to_store_and_run(self):
+        """来源标注贯穿：store 收到 source，run 汇总记录 source。"""
+        client, store = FakeClient(), FakeStore()
+        summary = run(CrawlRunner(client=client, store=store, conn=FakeConn())
+                      .run(STOCKS, source="sina"))
+        assert summary.source == "sina"
+        assert store.sources == ["sina"] * 3
+        assert store.run_source == "sina"

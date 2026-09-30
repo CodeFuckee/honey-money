@@ -9,15 +9,17 @@ import psycopg
 
 _LAST_RUN_SQL = """
 SELECT mode, started_at, finished_at, total_stocks, ok_stocks,
-       failed_stocks, bars_upserted
+       failed_stocks, bars_upserted, source
 FROM crawl_run ORDER BY id DESC LIMIT 1
 """
+
+_BY_SOURCE_SQL = "SELECT source, count(*) FROM daily_bar GROUP BY source"
 
 
 def _zero() -> dict:
     return {"status": "up", "initialized": False, "daily_bars": 0,
             "stocks_listed": 0, "stocks_covered": 0, "stocks_pending": 0,
-            "last_run": None}
+            "by_source": {}, "last_run": None}
 
 
 def fetch_crawl_stats(dsn: str) -> dict:
@@ -31,6 +33,8 @@ def fetch_crawl_stats(dsn: str) -> dict:
                     stocks_listed = cur.fetchone()[0]
                     cur.execute("SELECT count(DISTINCT code) FROM daily_bar")
                     stocks_covered = cur.fetchone()[0]
+                    cur.execute(_BY_SOURCE_SQL)
+                    by_source = {row[0]: row[1] for row in cur.fetchall()}
                     cur.execute(_LAST_RUN_SQL)
                     row = cur.fetchone()
                 except psycopg.errors.UndefinedTable:
@@ -45,8 +49,9 @@ def fetch_crawl_stats(dsn: str) -> dict:
             "finished_at": row[2].isoformat() if row[2] else None,
             "total_stocks": row[3], "ok_stocks": row[4],
             "failed_stocks": row[5], "bars_upserted": row[6],
+            "source": row[7],
         }
     return {"status": "up", "initialized": True, "daily_bars": daily_bars,
             "stocks_listed": stocks_listed, "stocks_covered": stocks_covered,
             "stocks_pending": max(0, stocks_listed - stocks_covered),
-            "last_run": last_run}
+            "by_source": by_source, "last_run": last_run}

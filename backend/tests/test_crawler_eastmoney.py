@@ -91,7 +91,8 @@ class TestParseKlineRow:
         assert row[5] == 805097  # volume(手)
         assert row[6] == 739740988.00  # amount
         assert row[10] == 0.24  # turnover
-        assert len(row) == 11
+        assert len(row) == 12
+        assert row[11] is None  # outstanding_share：东财无此字段，新浪源专有
 
     def test_missing_fields_raises(self):
         with pytest.raises(ValueError):

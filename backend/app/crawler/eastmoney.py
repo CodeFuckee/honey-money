@@ -40,7 +40,7 @@ def secid(market: int, code: str) -> str:
 
 
 def parse_kline_row(line: str) -> tuple:
-    """klines 单行 → 11 元组。
+    """klines 单行 → 12 元组（末位 outstanding_share 东财无、恒 None）。
 
     行格式（fields2=f51..f61）：日期,开,收,高,低,成交量(手),成交额,振幅,涨跌幅,涨跌额,换手率
     """
@@ -55,7 +55,7 @@ def parse_kline_row(line: str) -> tuple:
     except ValueError as exc:
         raise ValueError(f"kline 行含非数值字段: {line[:60]!r}") from exc
     return (date, open_, close, high, low, int(volume), amount,
-            amplitude, pct_chg, change, turnover)
+            amplitude, pct_chg, change, turnover, None)
 
 
 @dataclass
@@ -64,6 +64,7 @@ class DailyBars:
     name: str
     dktotal: int
     rows: list[tuple]
+    source: str = "eastmoney"
 
 
 class EastmoneyClient:

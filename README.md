@@ -65,38 +65,38 @@ docker compose up -d --build
 
 ## 日线数据爬虫（python -m app.crawler）
 
-爬东方财富全市场 A 股历史日线（不复权）入 PostgreSQL，断点续爬、动态限速、可走代理池。
+爬全市场 A 股历史日线（不复权）入 PostgreSQL，多数据源、断点续爬、动态限速、防封保护。
 
 ```bash
-# NAS 部署后，在 backend 容器内运行（编排已注入 DATABASE_URL / PROXY_POOL_URL）
-docker exec honey-money-backend-1 python -m app.crawler --limit 20   # 试跑前 20 只
-docker exec honey-money-backend-1 python -m app.crawler              # 全量/增量
-docker exec honey-money-backend-1 python -m app.crawler --only 600000,000001
+# NAS 部署后，在 backend 容器内运行（编排已注入 DATABASE_URL）
+docker exec honey-money-backend-1 python -m app.crawler --limit 20   # 试跑前 20 只（新浪源）
+docker exec honey-money-backend-1 python -m app.crawler              # 全量/增量（新浪源，默认）
+docker exec honey-money-backend-1 python -m app.crawler --source eastmoney  # 东财源（解封后校验用）
 
 # 常用参数
-#   --mode incremental|full   默认 incremental：按库内断点续爬；full 全量重爬
-#   --proxy-mode pool|direct  默认 pool（空池自动回退直连）；direct 全直连
-#   --initial-qps / --max-qps 每通道限速上下界（AIMD 动态调整，默认 2/20）
-#   --concurrency N           并发抓取协程数（默认 8）
-#   --limit N / --only CODES  试跑 / 指定股票
-# 退出码：0 全部成功；1 有失败（失败清单在 crawl_run.detail 与输出中）
+#   --source sina|eastmoney  默认 sina（直连可用，含换手率/流通股本；东财源见下）
+#   --mode incremental|full  默认 incremental：按库内断点续爬（按源隔离）；full 全量重爬
+#   --initial-qps/--max-qps  每通道限速（默认按源：sina 1→5，AIMD 动态调整）
+#   --jitter 0.3             请求间隔随机抖动 ±30%（防封，默认开）
+#   --batch-size 300 --batch-pause 30   每 300 只歇 30s（防封，默认开）
+#   --abort-after 15         连续 15 只失败自动熔停保存退出（默认开）
+#   --limit N / --only CODES 试跑 / 指定股票
+# 退出码：0 全部成功；1 有失败或熔停（计划任务可据此告警）
 ```
 
-行为要点：
+**数据源与多源对比**：K 线表主键 `(code, trade_date, source)`，不同来源并存不覆盖——
+东财解封后重爬一遍即可直接 SQL 对比两源差异。字段口径已统一（volume 手、换手率
+百分数；新浪源现算振幅/涨跌幅，流通股本为新浪专有字段）。仪表盘「爬虫数据」
+卡片按来源展示 K 线分布。
 
-- **断点续爬**：每只股票按库内最新交易日 +1 续拉，中断重跑自动接续；
-  `(code, trade_date)` 主键幂等覆盖，当日数据盘后重拉会刷新旧值；
-- **动态限速**：按目标域名分通道（`91.push2his` 等数字子域归并同通道），
-  滑动窗口成功率驱动 AIMD 升降速，连续 8 次失败熔断 60s；
-- **失败分类**：代理连不上（ProxyError/ConnectError）只换代理不计降速；
-  对端断连/超时（RemoteProtocolError/Timeout）换代理并计入通道降速；
-- **实测建议**（见 docs/ashare-daily-data-sources.md）：东财 WAF 断连免费代理的
-  机房 IP 段，家宽/办公网直连低频可靠但单 IP 频控严格——NAS 生产建议
-  `--proxy-mode direct --initial-qps 1`；代理池留给未来新浪/腾讯等多源轮换。
+**防封实测背景**（详见 docs/ashare-daily-data-sources.md）：东财 WAF 断连免费代理
+的机房 IP 段且单 IP 频控严格（家宽出口曾被封 15h+）→ 新浪源直连 + 保守限速 +
+抖动 + 分批 + 熔停是当前生产姿态；新浪清单分页有软限流截断现象，已内置空页
+重试 + 官方总数校验（不完整即报错重跑，绝不静默漏爬）。
 
-数据表：`stock_basic`（代码/市场/名称快照）、`daily_bar`（日线，约 5500 股 ×
-全史 ≈ 2500 万行）、`crawl_run`（每次运行汇总与失败清单）。全量首爬约 5600 个
-请求（1 股 1 请求拿全史），1 QPS 下约 1.5 小时；此后每日增量数分钟。
+数据表：`stock_basic`（清单快照）、`daily_bar`（日线，全市场约 2500 万行/源）、
+`crawl_run`（运行汇总与失败清单）。新浪源全量约 5200+ 请求，1 QPS 起步（AIMD
+自动升速）约 1~2 小时；此后每日增量数分钟。
 
 ## CI/CD
 

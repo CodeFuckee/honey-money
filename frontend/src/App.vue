@@ -36,7 +36,15 @@ const lastRunText = computed(() => {
   const t = r.started_at ? new Date(r.started_at).toLocaleString('zh-CN', {
     month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
   }) : '?'
-  return `${t} · ${r.mode === 'full' ? '全量' : '增量'} · 成 ${r.ok_stocks ?? 0} / 败 ${r.failed_stocks ?? 0}`
+  const src = { sina: '新浪', eastmoney: '东财' }[r.source] || r.source || ''
+  return `${t} · ${src} · ${r.mode === 'full' ? '全量' : '增量'} · 成 ${r.ok_stocks ?? 0} / 败 ${r.failed_stocks ?? 0}`
+})
+const sourceText = computed(() => {
+  const bs = crawl.value?.by_source
+  if (!bs || !Object.keys(bs).length) return null
+  const names = { sina: '新浪', eastmoney: '东财' }
+  return Object.entries(bs)
+    .map(([k, v]) => `${names[k] || k} ${fmt(v)}`).join(' · ')
 })
 
 onMounted(refresh)
@@ -85,6 +93,7 @@ onMounted(refresh)
             已爬 {{ fmt(crawl.stocks_covered) }} / {{ fmt(crawl.stocks_listed) }} 只 ·
             待爬 {{ fmt(crawl.stocks_pending) }} 只（{{ coverPct }}%）
           </div>
+          <div class="detail" v-if="sourceText">K线来源：{{ sourceText }}</div>
           <div class="detail" v-else>运行爬虫后开始积累日线数据</div>
           <div class="detail">最近运行：{{ lastRunText }}</div>
         </template>

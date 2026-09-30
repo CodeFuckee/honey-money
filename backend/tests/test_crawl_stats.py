@@ -36,6 +36,9 @@ class FakeCursor:
     def fetchone(self):
         return self._pending
 
+    def fetchall(self):
+        return self.fetchall_rows
+
 
 class FakeConn:
     def __init__(self, results):
@@ -59,14 +62,18 @@ def patch_connect(monkeypatch, results):
 
 class TestFetchCrawlStats:
     def test_up_with_data(self, monkeypatch):
-        """正常路径：各计数与最近 run 汇总正确，待爬 = 清单 - 已覆盖。"""
-        patch_connect(monkeypatch, [
+        """正常路径：各计数与最近 run 汇总正确，待爬 = 清单 - 已覆盖，按来源分组。"""
+        conn = patch_connect(monkeypatch, [
             (2_500_000,),                        # daily_bar count
             (5_561,),                            # stock_basic count
             (1_200,),                            # distinct code
-            ("incremental", dt.datetime(2026, 9, 29, 21, 0, 0),   # last run
-             dt.datetime(2026, 9, 29, 21, 2, 30), 5_561, 5_560, 1, 5_560),
+            None,                                # by_source（execute 占位，数据走 fetchall）
         ])
+        conn._cursor.fetchall_rows = [("sina", 1_500_000), ("eastmoney", 1_000_000)]
+        conn._cursor.results.append(
+            ("incremental", dt.datetime(2026, 9, 29, 21, 0, 0),   # last run
+             dt.datetime(2026, 9, 29, 21, 2, 30), 5_561, 5_560, 1, 5_560, "sina"),
+        )
         got = stats_mod.fetch_crawl_stats("dsn")
         assert got["status"] == "up"
         assert got["initialized"] is True
@@ -74,19 +81,26 @@ class TestFetchCrawlStats:
         assert got["stocks_listed"] == 5_561
         assert got["stocks_covered"] == 1_200
         assert got["stocks_pending"] == 4_361
+        assert got["by_source"] == {"sina": 1_500_000, "eastmoney": 1_000_000}
         assert got["last_run"]["mode"] == "incremental"
         assert got["last_run"]["ok_stocks"] == 5_560
         assert got["last_run"]["failed_stocks"] == 1
+        assert got["last_run"]["source"] == "sina"
 
     def test_no_runs_last_run_null(self, monkeypatch):
-        patch_connect(monkeypatch, [(10,), (100,), (5,), None])
+        conn = patch_connect(monkeypatch, [(10,), (100,), (5,)])
+        conn._cursor.fetchall_rows = [("sina", 10)]
+        conn._cursor.results.append(None)
         got = stats_mod.fetch_crawl_stats("dsn")
         assert got["last_run"] is None
         assert got["stocks_pending"] == 95
+        assert got["by_source"] == {"sina": 10}
 
     def test_pending_never_negative(self, monkeypatch):
         """清库后清单未刷新等场景：已覆盖 > 清单时待爬按 0 展示。"""
-        patch_connect(monkeypatch, [(10,), (5,), (8,), None])
+        conn = patch_connect(monkeypatch, [(10,), (5,), (8,)])
+        conn._cursor.fetchall_rows = []
+        conn._cursor.results.append(None)
         got = stats_mod.fetch_crawl_stats("dsn")
         assert got["stocks_pending"] == 0
 
@@ -118,7 +132,7 @@ class TestApiRoute:
             "app.main.fetch_crawl_stats",
             lambda dsn: {"status": "up", "initialized": False, "daily_bars": 0,
                          "stocks_listed": 0, "stocks_covered": 0, "stocks_pending": 0,
-                         "last_run": None},
+                         "by_source": {}, "last_run": None},
         )
         client = TestClient(create_app())
         resp = client.get("/api/crawl/stats")
@@ -126,4 +140,4 @@ class TestApiRoute:
         body = resp.json()
         assert body["status"] == "up"
         assert set(body) == {"status", "initialized", "daily_bars", "stocks_listed",
-                             "stocks_covered", "stocks_pending", "last_run"}
+                             "stocks_covered", "stocks_pending", "by_source", "last_run"}

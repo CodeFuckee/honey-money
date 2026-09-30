@@ -10,6 +10,7 @@ clock / sleeper 可注入，测试不产生真实等待。
 """
 
 import asyncio
+import random
 import time
 from collections import deque
 
@@ -36,7 +37,10 @@ class RateLimiter:
                  max_qps: float = 20.0, window: int = 30,
                  boost_success_rate: float = 0.98, degrade_success_rate: float = 0.90,
                  circuit_consecutive_failures: int = 8, circuit_cooldown: float = 60.0,
+                 jitter: float = 0.0, rng: random.Random | None = None,
                  clock=time.monotonic, sleeper=asyncio.sleep):
+        """jitter: 间隔随机抖动比例（0.3 = ±30%），消除固定节奏的机器特征；
+        rng 可注入固定种子便于测试。"""
         self.min_qps, self.max_qps = min_qps, max_qps
         self.window = window
         self.boost_success_rate = boost_success_rate
@@ -44,6 +48,8 @@ class RateLimiter:
         self.circuit_consecutive_failures = circuit_consecutive_failures
         self.circuit_cooldown = circuit_cooldown
         self._initial_qps = initial_qps
+        self._jitter = jitter
+        self._rng = rng or random.Random()
         self._clock = clock
         self._sleeper = sleeper
         self._channels: dict[str, ChannelState] = {}
@@ -81,7 +87,10 @@ class RateLimiter:
             gap = ch.next_allow - now
             await self._sleeper(gap)
             waited += gap
-        ch.next_allow = max(self._clock(), ch.next_allow) + 1.0 / ch.qps
+        interval = 1.0 / ch.qps
+        if self._jitter:
+            interval *= self._rng.uniform(1.0 - self._jitter, 1.0 + self._jitter)
+        ch.next_allow = max(self._clock(), ch.next_allow) + interval
         return waited
 
     def report(self, key_or_url: str, ok: bool) -> None:

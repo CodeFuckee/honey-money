@@ -13,12 +13,14 @@ from app.crawler.rate import RateLimiter  # noqa: E402
 
 
 def make_limiter(**kw):
-    """注入假时钟（手动推进）与假 sleeper（记录请求的等待秒数，立即返回）。"""
+    """注入假时钟（手动推进）与假 sleeper（记录等待秒数并同步推进时钟，
+    模拟真实「睡到放行时刻」的行为）。"""
     time_box = {"now": 100.0}
     waits: list[float] = []
 
     async def fake_sleep(sec: float) -> None:
         waits.append(sec)
+        time_box["now"] += sec
 
     limiter = RateLimiter(clock=lambda: time_box["now"], sleeper=fake_sleep, **kw)
     return limiter, time_box, waits
@@ -139,6 +141,25 @@ class TestCircuitBreaker:
         limiter.report("push2.eastmoney.com", ok=False)
         assert t["now"] < limiter.channel("push2.eastmoney.com").circuit_until
         assert run(limiter.acquire("push2his.eastmoney.com")) == 0.0
+
+
+class TestJitter:
+    def test_interval_jitter_within_range(self):
+        """防封措施：间隔加随机抖动，多次采样都落在 [1±jitter]/qps 区间。"""
+        import random
+        limiter, _, _ = make_limiter(initial_qps=1.0, jitter=0.3,
+                                     rng=random.Random(42))
+        for _ in range(6):
+            run(limiter.acquire("vip.stock.finance.sina.com.cn"))
+            waited = run(limiter.acquire("vip.stock.finance.sina.com.cn"))
+            assert 0.7 <= waited <= 1.3, waited
+
+    def test_no_jitter_by_default(self):
+        """jitter=0（默认）行为与原来一致：精确 1/qps。"""
+        limiter, _, _ = make_limiter(initial_qps=2.0)
+        run(limiter.acquire("x.com"))
+        waited = run(limiter.acquire("x.com"))
+        assert abs(waited - 0.5) < 1e-9
 
 
 class TestStats:
