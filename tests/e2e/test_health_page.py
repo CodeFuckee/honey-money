@@ -94,3 +94,27 @@ def test_health_dashboard_renders(servers, page):
     # 爬虫数据卡：PG 不可达 → 未连接（crawl/stats 接口同样优雅降级）
     expect(page.locator(".card", has_text="爬虫数据")
            .locator(".state")).to_have_text("未连接")
+
+
+def test_macos_shell_and_nav(servers, page):
+    """macOS 风格外壳：窗口标题栏红绿灯 + 侧栏导航四项 + 占位页切换。"""
+    _, frontend_port = servers
+    page.goto(f"http://127.0.0.1:{frontend_port}/")
+
+    # 窗口标题栏：红绿灯三颗 + 标题
+    expect(page.locator(".titlebar .tl")).to_have_count(3)
+    expect(page.locator(".titlebar .title")).to_contain_text("honey-money")
+
+    # 侧栏导航：四项，「仪表盘」默认激活
+    nav = page.locator(".sidebar .nav-item")
+    expect(nav).to_have_count(4)
+    expect(page.locator(".sidebar .nav-item.active")).to_have_text("仪表盘")
+
+    # 切到「数据」占位页：标题 + Placeholder 标记可见
+    page.get_by_role("button", name="数据").click()
+    expect(page.get_by_role("heading", name="数据浏览")).to_be_visible()
+    expect(page.locator(".ph-tag").first).to_contain_text("Placeholder")
+
+    # 切回仪表盘：四卡仍在
+    page.get_by_role("button", name="仪表盘").click()
+    expect(page.locator(".card")).to_have_count(4, timeout=20000)
