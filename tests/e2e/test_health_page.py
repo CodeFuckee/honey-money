@@ -97,13 +97,21 @@ def test_health_dashboard_renders(servers, page):
 
 
 def test_macos_shell_and_nav(servers, page):
-    """macOS 风格外壳：窗口标题栏红绿灯 + 侧栏导航四项 + 占位页切换。"""
+    """Web 全幅外壳：标题栏（无红绿灯）+ 侧栏导航四项 + 占位页切换。"""
     _, frontend_port = servers
     page.goto(f"http://127.0.0.1:{frontend_port}/")
 
-    # 窗口标题栏：红绿灯三颗 + 标题
-    expect(page.locator(".titlebar .tl")).to_have_count(3)
+    # 标题栏：web 端不保留 macOS 红绿灯，仅标题
+    expect(page.locator(".titlebar .tl")).to_have_count(0)
     expect(page.locator(".titlebar .title")).to_contain_text("honey-money")
+
+    # 全幅铺满视口：四周无留白（窗口盒 == 视口）
+    vp = page.viewport_size
+    box = page.locator(".window").bounding_box()
+    assert box is not None, ".window 未渲染"
+    assert box["x"] == 0 and box["y"] == 0, f"窗口未贴边: {box['x']},{box['y']}"
+    assert box["width"] == vp["width"] and box["height"] == vp["height"], \
+        f"窗口未铺满视口: {box['width']}x{box['height']} != {vp['width']}x{vp['height']}"
 
     # 侧栏导航：四项，「仪表盘」默认激活
     nav = page.locator(".sidebar .nav-item")

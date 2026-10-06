@@ -54,17 +54,13 @@ onMounted(refresh)
 </script>
 
 <template>
-  <!-- macOS 桌面：壁纸 + 窗口 -->
+  <!-- Web 外壳：全幅铺满视口 -->
   <div class="desktop">
     <div class="window">
 
       <!-- 标题栏 -->
       <div class="titlebar">
-        <div class="traffic">
-          <span class="tl red"></span><span class="tl yellow"></span><span class="tl green"></span>
-        </div>
         <h1 class="title">honey-money — 服务状态</h1>
-        <div class="title-spacer"></div>
       </div>
 
       <div class="body">
@@ -310,43 +306,29 @@ body {
   color: #1d1d1f;
 }
 
-/* ===== 桌面壁纸 + 窗口 ===== */
+/* ===== 外壳：全幅铺满视口（web 端不做桌面浮动窗口） ===== */
 .desktop {
-  min-height: 100vh;
-  background:
-    radial-gradient(1100px 750px at 18% 8%, #dbe7f4 0%, transparent 60%),
-    radial-gradient(950px 700px at 88% 16%, #e6dcf0 0%, transparent 55%),
-    radial-gradient(900px 850px at 72% 92%, #f3e9da 0%, transparent 60%),
-    linear-gradient(160deg, #e9edf3 0%, #e2dfe9 100%);
-  display: flex; align-items: center; justify-content: center;
-  padding: 40px 24px;
+  height: 100vh;
+  background: #f2f2f4;
+  display: flex;
 }
 .window {
-  width: min(1200px, 100%);
-  min-height: 720px;
+  flex: 1; min-width: 0;
   background: rgba(255, 255, 255, .96);
-  border: 1px solid rgba(0, 0, 0, .1);
-  border-radius: 12px;
-  box-shadow: 0 24px 70px rgba(0, 0, 0, .28), 0 3px 14px rgba(0, 0, 0, .1);
   display: flex; flex-direction: column;
   overflow: hidden;
 }
 .titlebar {
   height: 40px; flex: none;
-  display: flex; align-items: center; gap: 12px;
-  padding: 0 14px;
+  display: flex; align-items: center;
+  padding: 0 20px;
   border-bottom: 1px solid #e8e8ed;
   background: rgba(255, 255, 255, .8);
 }
-.traffic { display: flex; gap: 8px; }
-.tl { width: 12px; height: 12px; border-radius: 50%; }
-.tl.red { background: #ff5f57; } .tl.yellow { background: #febc2e; } .tl.green { background: #28c840; }
 .title {
-  flex: 1; text-align: center;
   margin: 0; font-size: 13px; font-weight: 600; color: #6e6e73;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.title-spacer { width: 68px; flex: none; }
 
 .body { flex: 1; display: flex; min-height: 0; }
 
@@ -497,8 +479,6 @@ body {
 
 /* ===== 响应式兜底 ===== */
 @media (max-width: 860px) {
-  .desktop { padding: 12px; align-items: flex-start; }
-  .window { min-height: auto; }
   .body { flex-direction: column; }
   .sidebar { width: 100%; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px; border-right: 0; border-bottom: 1px solid #d8d8dc; }
   .group, .sidebar-foot { display: none; }
