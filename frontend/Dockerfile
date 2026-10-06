@@ -2,7 +2,8 @@
 FROM node:22-alpine AS build
 WORKDIR /app
 COPY package.json ./
-RUN npm install
+# registry.npmjs.org 本网络实测 ~135KB/s，固定 npmmirror（前端依赖小，主要为防拖垮构建）
+RUN npm install --registry=https://registry.npmmirror.com
 COPY . .
 RUN npm run build
 

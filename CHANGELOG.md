@@ -11,6 +11,9 @@
   卡死。CI 在构建/部署前经国内镜像源轮换预取基础镜像并 retag 成规范名
   （Dockerfile/compose 保持官方名不动），backend-test 与 deploy-nas 增加
   40min 作业超时防挂死。
+- **构建期包源龟速**：pypi.org 官方 CDN 实测 ~14KB/s、registry.npmjs.org
+  ~135KB/s，akshare 全家桶根本装不完；Dockerfile 固定 pip 走阿里源、
+  npm 走 npmmirror（实测 MB/s 级）。
 
 ### Changed
 - **外壳适配 web 端**：移除标题栏 macOS 红绿灯三按钮；去掉"桌面壁纸 +
