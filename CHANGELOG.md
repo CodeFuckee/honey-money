@@ -5,6 +5,13 @@
 
 ## [Unreleased]
 
+### Fixed
+- **流水线镜像拉取卡死（3370）**：本网络直连 Docker Hub/公共镜像加速全部
+  挂起，NAS 构建镜像缓存被清理任务清掉后 `docker build` 拉基础镜像无限
+  卡死。CI 在构建/部署前经国内镜像源轮换预取基础镜像并 retag 成规范名
+  （Dockerfile/compose 保持官方名不动），backend-test 与 deploy-nas 增加
+  40min 作业超时防挂死。
+
 ### Changed
 - **外壳适配 web 端**：移除标题栏 macOS 红绿灯三按钮；去掉"桌面壁纸 +
   浮动窗口"的四周留白/圆角/投影，改为全幅铺满视口（内容区内部滚动）。

@@ -3,6 +3,31 @@
 # 部署原理：#18 runner 运行在群晖 Docker 里且映射了宿主 docker，
 # 作业内执行 docker compose 实际作用对象是 NAS 的 Docker daemon，
 # 容器因此直接落在 NAS 上并持久存在（作业结束后不会被清理）。
+
+# —— 基础镜像预取（防外网容器 registry 阻断）——
+# 2026-10-06 流水线 3370 根因：本网络直连 Docker Hub 与公共镜像加速全部挂起
+# （本机实测 60~120s 零字节），NAS 此前构建全靠镜像缓存，缓存被 NAS 清理任务
+# 清掉后 docker build/compose 拉基础镜像无限卡死（job 挂 30min 被手动取消）。
+# 解法：构建/部署前经国内镜像源轮换拉取基础镜像并 retag 成规范名，
+# Dockerfile/compose 保持官方镜像名不动（可移植）。缓存命中时秒过零开销。
+# 注：pypi.org / registry.npmjs.org 直连正常，无需换源；镜像源可用性会漂移，
+# 失败时按此清单顺序换源即可（2026-10 实测 1panel.live 可用但慢，单镜像 3~8 分钟）。
+.mirror-fetch: &mirror-fetch |
+  set -e
+  fetch_base() {
+    canonical="$1"; shift
+    if docker image inspect "$canonical" >/dev/null 2>&1; then echo "缓存命中: $canonical"; return 0; fi
+    PULL="docker pull"; command -v timeout >/dev/null 2>&1 && PULL="timeout 25m docker pull"
+    for m in "$@"; do
+      src="$m/$canonical"
+      case "$canonical" in */*) ;; *) src="$m/library/$canonical";; esac
+      echo "拉取 $src ..."
+      if $PULL "$src"; then docker tag "$src" "$canonical"; return 0; fi
+      echo "镜像源不可用，换下一个: $m"
+    done
+    echo "错误：所有镜像源均拉不到 $canonical"; exit 1
+  }
+
 stages:
   - test
   - deploy
@@ -12,7 +37,10 @@ backend-test:
   # 钉死到 NAS runner（唯一确定有 docker 的 runner）：runner 池异构
   # （Linux shell / Windows pwsh / NAS），无标签作业随机认领导致环境不可复现。
   tags: [linux, docker, nas, deploy]
+  timeout: 40m
   script:
+    - *mirror-fetch
+    - fetch_base python:3.12-slim docker.1panel.live docker.1ms.run docker.m.daocloud.io
     - docker build -q -t honey-money-backend-test -f backend/Dockerfile.test backend
     - docker run --rm honey-money-backend-test
 
@@ -20,6 +48,7 @@ deploy-nas:
   stage: deploy
   image: docker:27-cli          # shell 执行器下会被忽略，无害
   tags: [linux, docker, nas, deploy]
+  timeout: 40m
   variables:
     COMPOSE_PROJECT_NAME: honey-money   # 固定项目名：job 目录每次随机，不固定会残留孤儿项目
   rules:
@@ -29,6 +58,14 @@ deploy-nas:
       docker info > /dev/null 2>&1 || {
         echo "runner 容器访问不到 docker daemon（socket 映射未生效）"; exit 1; }
   script:
+    # 预取构建基础镜像 + 编排现成镜像（防外网 registry 阻断，见文件头说明；
+    # 运行中容器引用的镜像不会被 NAS 清理任务删，此项多为缓存命中秒过）
+    - *mirror-fetch
+    - fetch_base python:3.12-slim docker.1panel.live docker.1ms.run docker.m.daocloud.io
+    - fetch_base node:22-alpine docker.1panel.live docker.1ms.run docker.m.daocloud.io
+    - fetch_base nginx:1.27-alpine docker.1panel.live docker.1ms.run docker.m.daocloud.io
+    - fetch_base redis:7-alpine docker.1panel.live docker.1ms.run docker.m.daocloud.io
+    - fetch_base jhao104/proxy_pool:latest docker.1panel.live docker.1ms.run docker.m.daocloud.io
     # 兼容 compose v2 插件与旧版 docker-compose
     - |
       if docker compose version > /dev/null 2>&1; then DC="docker compose";
