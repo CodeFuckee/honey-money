@@ -30,6 +30,10 @@
   npm 走 npmmirror（实测 MB/s 级）。
 
 ### Changed
+- **代理池切换为 NAS 公共实例**（容器 4→2）：删除编排内自带的
+  proxy_pool/redis 服务，backend `PROXY_POOL_URL` 指向宿主公共代理池
+  （`proxy-pool:2.4.1-aclfix`，5010，多项目共用，`.env` 可覆盖）；
+  CI 预取清单与 nas-diag 端到端探活同步更新。
 - **外壳适配 web 端**：移除标题栏 macOS 红绿灯三按钮；去掉"桌面壁纸 +
   浮动窗口"的四周留白/圆角/投影，改为全幅铺满视口（内容区内部滚动）。
   E2E 外壳断言同步更新（无红绿灯 + 窗口盒等于视口）。

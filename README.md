@@ -53,16 +53,15 @@ docker compose up -d --build
 群晖（Container Manager）：项目 → 新建 → 路径选本仓库（或 git 克隆地址）→ 
 使用现有 docker-compose.yml → 按 .env 配好变量后启动。要点：
 
-- **只有 frontend 对外暴露端口**（默认 28080；DSM 自用 5000/5001 已避开），
-  backend/redis/proxy_pool 仅 compose 内网互通；
+- **编排仅 2 容器**（frontend + backend）：frontend 对外暴露 28080，
+  backend 仅 compose 内网；
 - **PostgreSQL 不由本编排创建**：连接 NAS 上既有 PG 容器（宿主 5433，库/用户
   honey_money），backend 经 host.docker.internal 访问；数据持久化由该容器自理，
   本编排仅 `redis_data` 一个 named volume；
-- **CPU 架构**：编排按 x86_64 常见镜像编写；ARM 机型上 postgres/redis/node 官方
-  镜像均有 arm64 版，但 `jhao104/proxy_pool` 无官方 ARM 镜像，需在 NAS 上
-  `docker build` 其源码仓库后替换 image 名；
-- 代理池后台默认无对外端口（内部经 backend 探活）；如需查看其 Web UI，
-  在 compose 中给 proxy_pool 加 ports 映射（默认端口 5010）。
+- **代理池用 NAS 上的公共实例**（`proxy-pool:2.4.1-aclfix` + 专用 redis 8，
+  宿主 5010，多项目共用）：backend 经 `PROXY_POOL_URL` 取代理与探活，
+  本编排不再自带 proxy_pool/redis（切换前的官方镜像版本见 git 历史；
+  官方镜像有 alpine 无 bash 的入口坑，公共池自建时已修复）。
 
 ## 日线数据爬虫（python -m app.crawler）
 

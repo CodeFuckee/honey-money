@@ -64,8 +64,6 @@ deploy-nas:
     - fetch_base python:3.12-slim docker.1panel.live docker.1ms.run docker.m.daocloud.io
     - fetch_base node:22-alpine docker.1panel.live docker.1ms.run docker.m.daocloud.io
     - fetch_base nginx:1.27-alpine docker.1panel.live docker.1ms.run docker.m.daocloud.io
-    - fetch_base redis:7-alpine docker.1panel.live docker.1ms.run docker.m.daocloud.io
-    - fetch_base jhao104/proxy_pool:latest docker.1panel.live docker.1ms.run docker.m.daocloud.io
     # 兼容 compose v2 插件与旧版 docker-compose
     - |
       if docker compose version > /dev/null 2>&1; then DC="docker compose";
@@ -103,8 +101,8 @@ nas-diag:
         docker logs --tail 40 "$c" 2>&1
       done
     - |
-      echo "===================== 端到端：backend → proxy_pool /get ====================="
-      docker exec honey-money-backend-1 python -c "import httpx; r=httpx.get('http://proxy_pool:5010/get/', timeout=5); print('HTTP', r.status_code, r.text[:200])" 2>&1 || true
+      echo "===================== 端到端：backend → 公共代理池 /get（宿主 5010） ====================="
+      docker exec honey-money-backend-1 python -c "import httpx; r=httpx.get('http://host.docker.internal:5010/get/', timeout=5); print('HTTP', r.status_code, r.text[:200])" 2>&1 || true
     - |
       echo "===================== 端到端：backend → PostgreSQL（/api/infra） ====================="
       docker exec honey-money-backend-1 python -c "import httpx; print(httpx.get('http://127.0.0.1:8000/api/infra', timeout=8).text)" 2>&1 || true

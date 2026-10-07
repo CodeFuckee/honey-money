@@ -2,13 +2,14 @@
 # 用法：cp .env.example .env （按需改端口/连接串）→ docker compose up -d
 # 群晖：Container Manager → 项目 → 指向本仓库目录，同样走 .env + up
 #
-# 拓扑（只有 frontend 对外，其余全部内网互通）：
+# 拓扑（仅两容器；frontend 对外，公共设施走宿主）：
 #   [外部 :28080] → frontend(nginx) ─┬─ 静态托管 Vue
 #                                  └─ /api 反代 → backend:8000
 #   backend ──→ NAS 宿主上的既有 PostgreSQL（host.docker.internal:5433，库 honey_money）
-#          ──→ proxy_pool:5010（检活）；proxy_pool → redis:6379
-# 注意：PostgreSQL 由 NAS 上已有容器提供（本编排不再创建），需确保：
-#   ① 该 PG 在宿主映射了 5433 端口；② 已建库 honey_money 与用户 honey_money。
+#          ──→ NAS 上的公共代理池（host.docker.internal:5010，独立部署的
+#               proxy-pool:2.4.1-aclfix + 专用 redis 8，多项目共用）
+# 注意：PostgreSQL 与代理池均不由本编排创建（容器数 2），需确保：
+#   ① 宿主 5433 有 PG（库/用户 honey_money）；② 宿主 5010 有公共代理池在跑。
 
 services:
   frontend:
@@ -27,24 +28,5 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://honey_money:honey_money@host.docker.internal:5433/honey_money}
-      PROXY_POOL_URL: http://proxy_pool:5010
-
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    volumes:
-      - redis_data:/data
-
-  proxy_pool:
-    image: jhao104/proxy_pool:latest   # x86_64；ARM 机型需自行构建该镜像（见 README）
-    # 官方镜像 bug：基础镜像 alpine 无 bash 而 ENTRYPOINT 执行 bash（exit 127 崩溃循环）。
-    # 覆盖入口改用 alpine 自带的 sh；若脚本将来出现 bashism 再改为自建镜像。
-    entrypoint: ["tini", "--", "sh", "proxy_pool.sh", "start", "--fg"]
-    restart: unless-stopped
-    environment:
-      DB_CONN: redis://redis:6379/0
-    depends_on:
-      - redis
-
-volumes:
-  redis_data:
+      # 公共代理池：NAS 上独立部署（宿主 5010），多项目共用；换私有池时在此覆盖
+      PROXY_POOL_URL: ${PROXY_POOL_URL:-http://host.docker.internal:5010}
