@@ -171,7 +171,9 @@ onMounted(refresh)
                 <div class="card" :class="{ idle: backendDown }">
                   <div class="name">代理池</div>
                   <span class="fbadge"><span class="dot" :class="backendDown ? (theme === 'fluent' ? 'down' : 'idle') : (infra?.proxy_pool?.status === 'up' ? 'up' : 'down')"></span><span class="fb-txt">{{ backendDown ? (theme === 'fluent' ? '数据不可用' : '—') : (infra?.proxy_pool?.status === 'up' ? '已连接' : '未连接') }}</span></span>
-                  <div class="state">{{ backendDown ? '—' : (infra?.proxy_pool?.status === 'up' ? '已连接' : '未连接') }}</div>
+                  <div class="state">{{ backendDown ? '—' : (infra?.proxy_pool?.status === 'up'
+                    ? (infra.proxy_pool.count != null ? `已连接 · 在池 ${infra.proxy_pool.count}` : '已连接')
+                    : '未连接') }}</div>
                   <div class="detail">{{ backendDown ? '等待后端恢复后展示' : (infra?.proxy_pool?.detail || '') }}</div>
                 </div>
               </template>

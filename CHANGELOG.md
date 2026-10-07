@@ -37,6 +37,11 @@
   npm 走 npmmirror（实测 MB/s 级）。
 
 ### Changed
+- **代理池卡片显示在池数量（对齐原型）**：`/api/infra` 探活成功后加取
+  `/count`（jhao104 协议 `[可用, 总数]`），响应新增 `count`/`count_useful`
+  字段、detail 改为「host:port · 在池 N」（原先输出原始 JSON）；计数取不到
+  静默降级 count=null。前端苹果主题状态位显示「已连接 · 在池 N」，Fluent
+  徽章保持短文案、计数在详情行。后端补计数三用例（正常/404/坏格式）。
 - **代理池切换为 NAS 公共实例**（容器 4→2）：删除编排内自带的
   proxy_pool/redis 服务，backend `PROXY_POOL_URL` 指向宿主公共代理池
   （`proxy-pool:2.4.1-aclfix`，5010，多项目共用，`.env` 可覆盖）；
