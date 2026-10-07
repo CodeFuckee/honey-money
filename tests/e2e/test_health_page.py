@@ -95,6 +95,11 @@ def test_health_dashboard_renders(servers, page):
     expect(page.locator(".card", has_text="爬虫数据")
            .locator(".state")).to_have_text("未连接")
 
+    # 回归：苹果主题徽章文字不得与大字状态重复（fbadge 文本节点曾双渲染）
+    for name in ("PostgreSQL", "代理池", "爬虫数据"):
+        txt = page.locator(".card", has_text=name).first.inner_text()
+        assert txt.count("未连接") == 1, f"{name} 卡状态文字重复：{txt!r}"
+
 
 def test_macos_shell_and_nav(servers, page):
     """Web 全幅外壳：标题栏（无红绿灯）+ 侧栏导航四项 + 占位页切换。"""

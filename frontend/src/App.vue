@@ -158,19 +158,19 @@ onMounted(refresh)
               <template v-else>
                 <div class="card">
                   <div class="name">后端 API</div>
-                  <span class="fbadge"><span class="dot" :class="backendDown ? 'down' : 'up'"></span>{{ backendDown ? '不可用' : '运行中' }}</span>
+                  <span class="fbadge"><span class="dot" :class="backendDown ? 'down' : 'up'"></span><span class="fb-txt">{{ backendDown ? '不可用' : '运行中' }}</span></span>
                   <div class="state">{{ backendDown ? '不可用' : '运行中' }}</div>
                   <div class="detail">v{{ backend.version || '0.1.0' }} · FastAPI + uvicorn</div>
                 </div>
                 <div class="card" :class="{ idle: backendDown }">
                   <div class="name">PostgreSQL</div>
-                  <span class="fbadge"><span class="dot" :class="backendDown ? (theme === 'fluent' ? 'down' : 'idle') : (infra?.postgres?.status === 'up' ? 'up' : 'down')"></span>{{ backendDown ? (theme === 'fluent' ? '数据不可用' : '—') : (infra?.postgres?.status === 'up' ? '已连接' : '未连接') }}</span>
+                  <span class="fbadge"><span class="dot" :class="backendDown ? (theme === 'fluent' ? 'down' : 'idle') : (infra?.postgres?.status === 'up' ? 'up' : 'down')"></span><span class="fb-txt">{{ backendDown ? (theme === 'fluent' ? '数据不可用' : '—') : (infra?.postgres?.status === 'up' ? '已连接' : '未连接') }}</span></span>
                   <div class="state">{{ backendDown ? '—' : (infra?.postgres?.status === 'up' ? '已连接' : '未连接') }}</div>
                   <div class="detail">{{ backendDown ? '等待后端恢复后展示' : (infra?.postgres?.detail || '') }}</div>
                 </div>
                 <div class="card" :class="{ idle: backendDown }">
                   <div class="name">代理池</div>
-                  <span class="fbadge"><span class="dot" :class="backendDown ? (theme === 'fluent' ? 'down' : 'idle') : (infra?.proxy_pool?.status === 'up' ? 'up' : 'down')"></span>{{ backendDown ? (theme === 'fluent' ? '数据不可用' : '—') : (infra?.proxy_pool?.status === 'up' ? '已连接' : '未连接') }}</span>
+                  <span class="fbadge"><span class="dot" :class="backendDown ? (theme === 'fluent' ? 'down' : 'idle') : (infra?.proxy_pool?.status === 'up' ? 'up' : 'down')"></span><span class="fb-txt">{{ backendDown ? (theme === 'fluent' ? '数据不可用' : '—') : (infra?.proxy_pool?.status === 'up' ? '已连接' : '未连接') }}</span></span>
                   <div class="state">{{ backendDown ? '—' : (infra?.proxy_pool?.status === 'up' ? '已连接' : '未连接') }}</div>
                   <div class="detail">{{ backendDown ? '等待后端恢复后展示' : (infra?.proxy_pool?.detail || '') }}</div>
                 </div>
@@ -184,7 +184,7 @@ onMounted(refresh)
             </div>
             <div v-else-if="crawl && crawl.status !== 'down'" class="card crawl">
               <div class="name">爬虫数据</div>
-              <span class="fbadge" :class="crawl.initialized ? 'brand' : 'warn'"><span class="dot" :class="crawl.initialized ? 'up' : 'warn'"></span>{{ crawl.initialized ? fmt(crawl.daily_bars) + ' 根K线' : '爬虫未运行' }}</span>
+              <span class="fbadge" :class="crawl.initialized ? 'brand' : 'warn'"><span class="dot" :class="crawl.initialized ? 'up' : 'warn'"></span><span class="fb-txt">{{ crawl.initialized ? fmt(crawl.daily_bars) + ' 根K线' : '爬虫未运行' }}</span></span>
 
               <!-- 空态：微场景插画（显示器 + 爬虫机器人） -->
               <div v-if="!crawl.initialized" class="empty">
@@ -241,7 +241,7 @@ onMounted(refresh)
             </div>
             <div v-else class="card crawl down">
               <div class="name">爬虫数据</div>
-              <span class="fbadge"><span class="dot down"></span>{{ theme === 'fluent' ? '数据不可用' : '未连接' }}</span>
+              <span class="fbadge"><span class="dot down"></span><span class="fb-txt">{{ theme === 'fluent' ? '数据不可用' : '未连接' }}</span></span>
               <div class="state muted">未连接</div>
               <div class="detail">/api/crawl/stats 请求失败 · 恢复后端后点击「重新检测」重试</div>
             </div>
@@ -471,6 +471,7 @@ onMounted(refresh)
 
 /* —— 徽章：apple 仅状态点（display:contents 保持原布局）；fluent 点+文字（原型 Badge）—— */
 .fbadge { display: contents; }
+[data-theme="apple"] .fb-txt { display: none; }
 [data-theme="fluent"] .fbadge {
   position: absolute; top: 18px; right: 18px;
   display: flex; align-items: center; gap: 6px;
