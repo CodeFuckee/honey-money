@@ -21,8 +21,8 @@ def check_proxy_pool(base_url: str, timeout: float = 1.5) -> dict:
     """GET {base_url}/get/ 探活（proxy_pool 的取代理接口；Flask 路由带尾斜杠，
     请求 /get 会得到 308 重定向而非 200）。
 
-    探活成功后再取 /count（jhao104 协议：{"count": [可用数, 总数]}），
-    detail 按原型口径输出「host:port · 在池 N」；计数取不到不致命（count=None）。
+    探活成功后再取 /count（同样必须带尾斜杠，否则 Flask 308），detail 按
+    原型口径输出「host:port · 在池 N」；计数取不到不致命（count=None）。
     """
     host = base_url.split("://", 1)[-1].rstrip("/")
     try:
@@ -40,15 +40,18 @@ def check_proxy_pool(base_url: str, timeout: float = 1.5) -> dict:
 
 
 def _fetch_pool_count(base_url: str, timeout: float) -> tuple:
-    """取 /count 的 [可用, 总]；任何失败都静默降级为 (None, None)（探活已通过）。"""
+    """取 /count（可用, 总）。两种返回格式都兼容：官方 jhao104 为
+    {"count": [可用, 总]}；NAS 自建 2.4.1-aclfix 为 {"count": 总数}。
+    任何失败都静默降级为 (None, None)（探活已通过）。"""
     try:
-        resp = httpx.get(f"{base_url.rstrip('/')}/count", timeout=timeout)
+        resp = httpx.get(f"{base_url.rstrip('/')}/count/", timeout=timeout)
         if resp.status_code != 200:
             return (None, None)
         counts = resp.json().get("count")
         if isinstance(counts, (list, tuple)) and len(counts) >= 2:
-            useful, total = int(counts[0]), int(counts[1])
-            return (useful, total)
+            return (int(counts[0]), int(counts[1]))
+        if isinstance(counts, int):
+            return (None, counts)
     except Exception:
         pass
     return (None, None)

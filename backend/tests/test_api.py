@@ -77,7 +77,7 @@ class TestInfra:
         def fake_get(url, timeout=None):
             if url.endswith("/get/"):
                 return FakeResp(200, text=get_json or '{"proxy": "1.2.3.4:8080"}')
-            if url.endswith("/count"):
+            if url.endswith("/count/"):
                 return FakeResp(count_status, payload=count_json)
             return FakeResp(404)
         monkeypatch.setattr("app.infra.httpx.get", fake_get)
@@ -105,3 +105,11 @@ class TestInfra:
         body = client.get("/api/infra").json()["proxy_pool"]
         assert body["status"] == "up"
         assert body["count"] is None
+
+    def test_proxy_pool_count_int_shape(self, client, monkeypatch):
+        """NAS 自建池格式 {"count": 总数}（单数字）→ count=总数、useful=None。"""
+        self._fake_pool(monkeypatch, count_json={"count": 75, "http_type": {"http": 75}})
+        body = client.get("/api/infra").json()["proxy_pool"]
+        assert body["status"] == "up"
+        assert body["count"] == 75 and body["count_useful"] is None
+        assert body["detail"] == "proxy_pool:5010 · 在池 75"
