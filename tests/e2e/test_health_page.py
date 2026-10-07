@@ -126,3 +126,36 @@ def test_macos_shell_and_nav(servers, page):
     # 切回仪表盘：四卡仍在
     page.get_by_role("button", name="仪表盘").click()
     expect(page.locator(".card")).to_have_count(4, timeout=20000)
+
+
+def test_theme_toggle_and_persistence(servers, page):
+    """风格切换：默认 apple；切 Fluent 2（按原型无标题栏/白侧栏/徽章）；刷新保持；可切回。"""
+    _, frontend_port = servers
+    page.goto(f"http://127.0.0.1:{frontend_port}/")
+
+    # 默认苹果风格：标题栏可见（双主题各有一份切换控件，只操作当前可见的）
+    expect(page.locator("html")).to_have_attribute("data-theme", "apple")
+    expect(page.locator(".titlebar")).to_be_visible()
+
+    # 切到 Fluent 2：无标题栏；侧栏 260px 白底；卡片 8px 圆角；状态徽章带文字
+    page.locator(".theme-toggle:visible").get_by_role("button", name="Fluent 2").click()
+    expect(page.locator("html")).to_have_attribute("data-theme", "fluent")
+    expect(page.locator(".titlebar")).to_be_hidden()
+    page.wait_for_function(
+        "getComputedStyle(document.querySelector('.sidebar')).backgroundColor === 'rgb(255, 255, 255)'")
+    assert page.locator(".sidebar").evaluate(
+        "el => getComputedStyle(el).width") == "260px", "fluent 侧栏应为 260px"
+    assert page.locator(".card").first.evaluate(
+        "el => getComputedStyle(el).borderRadius") == "8px", "fluent 卡片圆角应为 8px"
+    expect(page.locator(".fbadge", has_text="运行中").first).to_be_visible()
+
+    # 刷新后保持 fluent（localStorage 持久化 + 首帧预处理）
+    page.reload()
+    expect(page.locator("html")).to_have_attribute("data-theme", "fluent")
+
+    # 切回苹果风格：标题栏回归 40px
+    page.locator(".theme-toggle:visible").get_by_role("button", name="苹果风格").click()
+    expect(page.locator("html")).to_have_attribute("data-theme", "apple")
+    expect(page.locator(".titlebar")).to_be_visible()
+    assert page.locator(".titlebar").evaluate(
+        "el => getComputedStyle(el).height") == "40px", "apple 标题栏应为 40px"
