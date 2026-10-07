@@ -95,6 +95,15 @@ def test_health_dashboard_renders(servers, page):
     expect(page.locator(".card", has_text="爬虫数据")
            .locator(".state")).to_have_text("未连接")
 
+    # favicon / PWA 图标资产：链接存在且资源可达
+    icon_svg = page.get_attribute('link[rel="icon"]', "href")
+    assert icon_svg == "/favicon.svg", f"SVG favicon 缺失: {icon_svg}"
+    for href in ("/favicon.svg", "/favicon-32.png", "/apple-touch-icon.png",
+                 "/icon-192.png", "/icon-512.png", "/manifest.webmanifest"):
+        r = page.request.get(f"http://127.0.0.1:{frontend_port}{href}")
+        assert r.status == 200, f"图标资产 {href} 返回 {r.status}"
+    assert page.get_attribute('link[rel="manifest"]', "href") == "/manifest.webmanifest"
+
     # 回归：苹果主题徽章文字不得与大字状态重复（fbadge 文本节点曾双渲染）
     for name in ("PostgreSQL", "代理池", "爬虫数据"):
         txt = page.locator(".card", has_text=name).first.inner_text()

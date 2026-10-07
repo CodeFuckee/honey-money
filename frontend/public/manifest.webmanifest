@@ -1,0 +1,14 @@
+{
+  "name": "honey-money",
+  "short_name": "honey-money",
+  "description": "服务状态仪表盘 · A股日线爬虫与量化工程骨架",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#E8E9EA",
+  "theme_color": "#F08C00",
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

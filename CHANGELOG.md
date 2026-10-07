@@ -6,6 +6,10 @@
 ## [Unreleased]
 
 ### Added
+- **应用图标（favicon / PWA）**：按 Penpot「App Icon」设计（蜂蜜金渐变圆角块
+  + 白蜂巢 + 三根上升K线）生成矢量 SVG + 16/32/180/192/512 PNG；接入
+  `index.html`（SVG favicon + PNG 兜底 + apple-touch-icon + theme-color）与
+  `manifest.webmanifest`（PWA 安装图标）。E2E 补图标/manifest 资产断言。
 - **界面风格切换**：一键切换「苹果风格 / Fluent 2」（标题栏/工具栏分段控件，
   apple 与 fluent 各有一份、按主题显示），localStorage 持久化 + index.html
   首帧预处理（刷新不闪回）。全部样式 token 化（html[data-theme] 切 CSS 变量），
