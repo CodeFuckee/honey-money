@@ -137,6 +137,13 @@ def test_macos_shell_and_nav(servers, page):
     expect(page.get_by_role("heading", name="数据浏览")).to_be_visible()
     expect(page.locator(".ph-tag").first).to_contain_text("Placeholder")
 
+    # 回归：搜索框放大镜 SVG 曾无显式尺寸被撑成千像素巨图（整框跟着撑爆）
+    mag = page.locator(".mag").bounding_box()
+    assert mag is not None and mag["width"] <= 20 and mag["height"] <= 20, \
+        f"放大镜图标被撑大: {mag}"
+    sb = page.locator(".ph-search").bounding_box()
+    assert sb is not None and sb["height"] <= 60, f"搜索框高度异常: {sb}"
+
     # 切回仪表盘：四卡仍在
     page.get_by_role("button", name="仪表盘").click()
     expect(page.locator(".card")).to_have_count(4, timeout=20000)
@@ -173,3 +180,77 @@ def test_theme_toggle_and_persistence(servers, page):
     expect(page.locator(".titlebar")).to_be_visible()
     assert page.locator(".titlebar").evaluate(
         "el => getComputedStyle(el).height") == "40px", "apple 标题栏应为 40px"
+
+
+def test_carbon_theme_shell(servers, page):
+    """Carbon 主题（按 Penpot 原型）：深色 UI Shell 头 48px + 256px 白侧栏 +
+    方角 1px 边框卡 + 蓝主按钮 #0F62FE；刷新持久化；可切回。"""
+    _, frontend_port = servers
+    page.goto(f"http://127.0.0.1:{frontend_port}/")
+
+    page.locator(".theme-toggle:visible").get_by_role("button", name="Carbon").click()
+    expect(page.locator("html")).to_have_attribute("data-theme", "carbon")
+
+    # 深色头部：48px #161616（有 0.15s 背景过渡，等终值），菜单/设置图标可见
+    expect(page.locator(".titlebar")).to_be_visible()
+    page.wait_for_function(
+        "getComputedStyle(document.querySelector('.titlebar')).backgroundColor === 'rgb(22, 22, 22)'")
+    assert page.locator(".titlebar").evaluate(
+        "el => getComputedStyle(el).height") == "48px", "carbon 头部应为 48px"
+    expect(page.locator(".titlebar .shell-menu")).to_be_visible()
+    expect(page.locator(".titlebar .shell-set")).to_be_visible()
+    expect(page.locator(".titlebar .title")).to_contain_text("A 股量化研究与交易系统")
+
+    # 侧栏 256px 白底；导航选中项灰底（#E0E0E0）
+    assert page.locator(".sidebar").evaluate(
+        "el => getComputedStyle(el).width") == "256px", "carbon 侧栏应为 256px"
+    page.wait_for_function(
+        "getComputedStyle(document.querySelector('.sidebar')).backgroundColor === 'rgb(255, 255, 255)'")
+    assert page.locator(".sidebar .nav-item.active").evaluate(
+        "el => getComputedStyle(el).backgroundColor") == "rgb(224, 224, 224)", \
+        "carbon 选中导航应为 #E0E0E0 灰底"
+
+    # 卡片方角；主按钮蓝底白字（#0F62FE）
+    assert page.locator(".card").first.evaluate(
+        "el => getComputedStyle(el).borderRadius") == "0px", "carbon 卡片应为方角"
+    btn = page.get_by_role("button", name="重新检测")
+    expect(btn).to_be_visible()
+    assert btn.evaluate("el => getComputedStyle(el).backgroundColor") == "rgb(15, 98, 254)", \
+        "carbon 主按钮应为 #0F62FE"
+    assert btn.evaluate("el => getComputedStyle(el).color") == "rgb(255, 255, 255)", \
+        "carbon 主按钮文字应为白色"
+
+    # 状态徽章：dot + 12px 文字（后端 API 运行中）
+    expect(page.locator(".fbadge", has_text="运行中").first).to_be_visible()
+
+    # 数据页：DataTable 表头 48px 灰字 + 蓝色 Placeholder Tag
+    page.get_by_role("button", name="数据").click()
+    head = page.locator(".ph-table .ph-head")
+    expect(head).to_contain_text("代码")
+    assert head.evaluate("el => getComputedStyle(el).height") == "48px", "carbon 表头行应为 48px"
+    assert head.evaluate("el => getComputedStyle(el).color") == "rgb(82, 82, 82)", \
+        "carbon 表头文字应为 #525252"
+    tag = page.locator(".ph-tag").first
+    assert tag.evaluate("el => getComputedStyle(el).backgroundColor") == "rgb(15, 98, 254)", \
+        "carbon Placeholder Tag 应为蓝底"
+
+    # 刷新持久化；切回苹果风格
+    page.reload()
+    expect(page.locator("html")).to_have_attribute("data-theme", "carbon")
+    page.locator(".theme-toggle:visible").get_by_role("button", name="苹果风格").click()
+    expect(page.locator("html")).to_have_attribute("data-theme", "apple")
+
+
+def test_error_banner_icon_sizing(servers, page):
+    """回归：错误横幅 SVG 警告图标曾无显式尺寸被撑成千像素巨图（三主题共用）。
+    拦截 /healthz 制造后端不可用，断言图标不大于 20px 且横幅高度正常。"""
+    _, frontend_port = servers
+    page.route("**/healthz", lambda r: r.fulfill(status=500, body="x"))
+    page.goto(f"http://127.0.0.1:{frontend_port}/")
+
+    expect(page.locator(".error-banner")).to_be_visible()
+    box = page.locator(".error-banner .warn-icon").first.bounding_box()
+    assert box is not None and box["width"] <= 20 and box["height"] <= 20, \
+        f"警告图标被撑大: {box}"
+    bh = page.locator(".error-banner").evaluate("el => el.getBoundingClientRect().height")
+    assert bh <= 80, f"错误横幅高度异常: {bh}"

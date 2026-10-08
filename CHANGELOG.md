@@ -6,6 +6,20 @@
 ## [Unreleased]
 
 ### Added
+- **IBM Carbon 第三套界面风格**：风格切换扩为「苹果 / Fluent 2 / Carbon」三选，
+  **按 Penpot 原型「honey-money · IBM Carbon 风格仪表盘」逐项落地**（Carbon v11
+  productive 规范 + 原型校准色板）：深色 UI Shell 头 48px #161616（汉堡菜单 +
+  品牌白字 + 副题浅灰 + 设置图标，切换控件入深色头）、侧栏 256px 白底 1px #E0E0E0
+  右边框（48px 导航行、选中灰底 #E0E0E0 + 右缘 chevron、分组分隔线、12px 脚注）、
+  内容区 #F4F4F4 + 28px 常规字重大标题、方角 1px 边框白卡（无阴影无毛玻璃）、
+  状态徽章 点+12px 文字（#24A148/#DA1E28）、爬虫卡实心 Tag（蓝 #0F62FE /
+  黄 #F1C21B / 红 #DA1E28）、8px 方角进度条（#E0E0E0 轨 / #0F62FE 填充）、
+  蓝主按钮 96×40 白字方角（禁用 #C6C6C6）、错误态 #FFF1F1 内联通知（实心红
+  圆叉图标 16px + 加粗标题 + 同行正文 14px）、错误降级卡红 Tag 居中、空态
+  命令 chip 灰底带 `$` 前缀、数据页 DataTable（48px 表头 12/600 #525252 +
+  1px 行线、40px 搜索框 1px #8D8D8D、虚线 K 线占位、蓝色 Placeholder Tag）、
+  字体栈 IBM Plex Sans → 系统回退。index.html 首帧预处理支持 carbon。
+  E2E 新增 Carbon 主题外壳断言（深色头/侧栏/方角/主按钮/表头/Tag/持久化）。
 - **应用图标（favicon / PWA）**：按 Penpot「App Icon」设计（蜂蜜金渐变圆角块
   + 白蜂巢 + 三根上升K线）生成矢量 SVG + 16/32/180/192/512 PNG；接入
   `index.html`（SVG favicon + PNG 兜底 + apple-touch-icon + theme-color）与
@@ -24,6 +38,15 @@
   （搜索 480 / 行情表 / K线图占位条 160）。
 
 ### Fixed
+- **数据页搜索框放大镜图标撑爆搜索框（三主题共用既有 bug，用户过目发现）**：
+  `.mag` SVG 只有 viewBox 无显式宽高，被渲染成 1126×1126 巨图、搜索框跟着
+  撑到 1150px 高。固定 16×16。全量体检页面所有 SVG 尺寸确认无同类漏网；
+  E2E 补数据页图标/搜索框尺寸回归断言。
+- **错误横幅警告图标撑满页面（三主题共用既有 bug）**：`.warn-icon` SVG 只有
+  viewBox 无显式宽高，后端不可用横幅出现时被默认尺寸规则渲染成千像素巨图、
+  挤垮整页布局（本地后端常在线 + E2E 后端在线，从未被看见）。给
+  `.warn-icon`/`.err-filled` 固定 18×16 / 16×16。E2E 补拦截 /healthz 的
+  图标尺寸回归断言。
 - **苹果主题状态文字重复显示**：徽章（fbadge）内的文本节点在
   `display:contents` 下仍随文档流渲染，与大字状态各出现一次；文字包进
   `.fb-txt` 并在苹果主题隐藏，Fluent 徽章不受影响。E2E 补防重复回归断言。

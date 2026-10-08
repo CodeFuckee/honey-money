@@ -11,8 +11,9 @@
   <meta name="theme-color" content="#F08C00">
   <script>
     // 首帧前应用持久化的主题，避免刷新时闪回默认风格
+    var t = localStorage.getItem('hm-theme')
     document.documentElement.dataset.theme =
-      localStorage.getItem('hm-theme') === 'fluent' ? 'fluent' : 'apple'
+      t === 'fluent' || t === 'carbon' ? t : 'apple'
   </script>
 </head>
 <body>

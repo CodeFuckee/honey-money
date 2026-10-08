@@ -8,8 +8,11 @@ const crawl = ref(null)                       // 爬虫数据统计
 const loading = ref(false)
 const activeNav = ref('dash')                 // dash | data | backtest | learn
 
-// ===== 界面风格（apple | fluent），localStorage 持久化，index.html 已做首帧预处理 =====
-const theme = ref(document.documentElement.dataset.theme === 'fluent' ? 'fluent' : 'apple')
+// ===== 界面风格（apple | fluent | carbon），localStorage 持久化，index.html 已做首帧预处理 =====
+const THEMES = ['apple', 'fluent', 'carbon']
+const THEME_LABELS = { apple: '苹果风格', fluent: 'Fluent 2', carbon: 'Carbon' }
+const theme = ref(THEMES.includes(document.documentElement.dataset.theme)
+  ? document.documentElement.dataset.theme : 'apple')
 function setTheme(t) {
   theme.value = t
   document.documentElement.dataset.theme = t
@@ -66,13 +69,23 @@ onMounted(refresh)
   <div class="desktop">
     <div class="window">
 
-      <!-- 标题栏（apple 风格专用；fluent 按原型无标题栏，切换控件移至工具栏） -->
+      <!-- 标题栏（apple 标准标题 / carbon 复用为深色 UI Shell 头；fluent 按原型无标题栏，切换控件移至工具栏） -->
       <div class="titlebar">
-        <h1 class="title">honey-money — 服务状态</h1>
+        <svg class="shell-menu" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <line x1="2" y1="3.5" x2="14" y2="3.5" stroke="currentColor" stroke-width="1.6"/>
+          <line x1="2" y1="8" x2="14" y2="8" stroke="currentColor" stroke-width="1.6"/>
+          <line x1="2" y1="12.5" x2="14" y2="12.5" stroke="currentColor" stroke-width="1.6"/>
+        </svg>
+        <h1 class="title">honey-money<span class="title-sub">{{ theme === 'apple' ? ' — 服务状态' : ' · A 股量化研究与交易系统' }}</span></h1>
         <div class="theme-toggle" role="group" aria-label="界面风格切换">
-          <button class="seg-btn" :class="{ on: theme === 'apple' }" @click="setTheme('apple')">苹果风格</button>
-          <button class="seg-btn" :class="{ on: theme === 'fluent' }" @click="setTheme('fluent')">Fluent 2</button>
+          <button v-for="t in THEMES" :key="t" class="seg-btn" :class="{ on: theme === t }"
+            @click="setTheme(t)">{{ THEME_LABELS[t] }}</button>
         </div>
+        <svg class="shell-set" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <circle cx="8" cy="8" r="2.2" stroke="currentColor" stroke-width="1.4"/>
+          <path d="M8 1.8v2M8 12.2v2M1.8 8h2M12.2 8h2M3.6 3.6 5 5M11 11l1.4 1.4M12.4 3.6 11 5M5 11l-1.4 1.4"
+            stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+        </svg>
       </div>
 
       <div class="body">
@@ -123,7 +136,7 @@ onMounted(refresh)
           <template v-if="activeNav === 'dash'">
             <div class="toolbar">
               <div>
-                <h2 class="h1">{{ backendDown ? (theme === 'fluent' ? '服务状态' : '服务状态 · 后端不可用') : '服务状态' }}</h2>
+                <h2 class="h1">{{ backendDown && theme === 'apple' ? '服务状态 · 后端不可用' : '服务状态' }}</h2>
                 <p class="sub">{{ checking ? '正在检查各服务…' : '工程化骨架 · 仪表盘 · v0.1.0' }}</p>
               </div>
               <div class="toolbar-right">
@@ -131,20 +144,24 @@ onMounted(refresh)
                   {{ checking ? '检查中…' : '重新检测' }}
                 </button>
                 <div class="theme-toggle tb-toggle" role="group" aria-label="界面风格切换">
-                  <button class="seg-btn" :class="{ on: theme === 'apple' }" @click="setTheme('apple')">苹果风格</button>
-                  <button class="seg-btn" :class="{ on: theme === 'fluent' }" @click="setTheme('fluent')">Fluent 2</button>
+                  <button v-for="t in THEMES" :key="t" class="seg-btn" :class="{ on: theme === t }"
+                    @click="setTheme(t)">{{ THEME_LABELS[t] }}</button>
                 </div>
               </div>
             </div>
 
-            <!-- 错误横幅（后端不可用） -->
+            <!-- 错误横幅（后端不可用；carbon 为内联通知样式：实心图标 + 加粗标题 + 同行正文） -->
             <div v-if="backendDown" class="error-banner">
               <svg class="warn-icon" viewBox="0 0 18 16" fill="none">
                 <path d="M9 2 L16 14 L2 14 Z" stroke="#ff3b30" stroke-width="2" stroke-linejoin="round"/>
                 <line x1="9" y1="6" x2="9" y2="10" stroke="#ff3b30" stroke-width="2" stroke-linecap="round"/>
                 <circle cx="9" cy="12.2" r="1.2" fill="#ff3b30"/>
               </svg>
-              <span>后端 API 不可用：Connection refused · 请检查 backend 容器 / uvicorn 进程 / docker compose ps</span>
+              <svg class="warn-icon err-filled" viewBox="0 0 16 16" aria-hidden="true">
+                <circle cx="8" cy="8" r="7" fill="#da1e28"/>
+                <path d="M5.2 5.2l5.6 5.6M10.8 5.2l-5.6 5.6" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/>
+              </svg>
+              <span><b class="eb-title">后端 API 不可用：</b>Connection refused · 请检查 backend 容器 / uvicorn 进程 / docker compose ps</span>
             </div>
 
             <!-- 三张状态卡 -->
@@ -164,13 +181,13 @@ onMounted(refresh)
                 </div>
                 <div class="card" :class="{ idle: backendDown }">
                   <div class="name">PostgreSQL</div>
-                  <span class="fbadge"><span class="dot" :class="backendDown ? (theme === 'fluent' ? 'down' : 'idle') : (infra?.postgres?.status === 'up' ? 'up' : 'down')"></span><span class="fb-txt">{{ backendDown ? (theme === 'fluent' ? '数据不可用' : '—') : (infra?.postgres?.status === 'up' ? '已连接' : '未连接') }}</span></span>
+                  <span class="fbadge"><span class="dot" :class="backendDown ? (theme === 'apple' ? 'idle' : 'down') : (infra?.postgres?.status === 'up' ? 'up' : 'down')"></span><span class="fb-txt">{{ backendDown ? (theme === 'apple' ? '—' : '数据不可用') : (infra?.postgres?.status === 'up' ? '已连接' : '未连接') }}</span></span>
                   <div class="state">{{ backendDown ? '—' : (infra?.postgres?.status === 'up' ? '已连接' : '未连接') }}</div>
                   <div class="detail">{{ backendDown ? '等待后端恢复后展示' : (infra?.postgres?.detail || '') }}</div>
                 </div>
                 <div class="card" :class="{ idle: backendDown }">
                   <div class="name">代理池</div>
-                  <span class="fbadge"><span class="dot" :class="backendDown ? (theme === 'fluent' ? 'down' : 'idle') : (infra?.proxy_pool?.status === 'up' ? 'up' : 'down')"></span><span class="fb-txt">{{ backendDown ? (theme === 'fluent' ? '数据不可用' : '—') : (infra?.proxy_pool?.status === 'up' ? '已连接' : '未连接') }}</span></span>
+                  <span class="fbadge"><span class="dot" :class="backendDown ? (theme === 'apple' ? 'idle' : 'down') : (infra?.proxy_pool?.status === 'up' ? 'up' : 'down')"></span><span class="fb-txt">{{ backendDown ? (theme === 'apple' ? '—' : '数据不可用') : (infra?.proxy_pool?.status === 'up' ? '已连接' : '未连接') }}</span></span>
                   <div class="state">{{ backendDown ? '—' : (infra?.proxy_pool?.status === 'up'
                     ? (infra.proxy_pool.count != null ? `已连接 · 在池 ${infra.proxy_pool.count}` : '已连接')
                     : '未连接') }}</div>
@@ -221,9 +238,9 @@ onMounted(refresh)
                   <circle cx="6" cy="64" r="2" fill="#d1d1d6"/>
                 </svg>
                 <div class="empty-text">
-                  <div class="state">{{ theme === 'fluent' ? '爬虫尚未运行，日线数据为空' : '爬虫未运行' }}</div>
+                  <div class="state">{{ theme === 'apple' ? '爬虫未运行' : '爬虫尚未运行，日线数据为空' }}</div>
                   <div class="detail">运行爬虫后开始积累日线数据（判定：crawl.initialized = false）</div>
-                  <code class="cli">python -m app.crawler --source eastmoney --mode 增量</code>
+                  <code class="cli"><span v-if="theme === 'carbon'" class="cli-ps">$ </span>python -m app.crawler --source eastmoney --mode 增量</code>
                 </div>
               </div>
 
@@ -243,7 +260,7 @@ onMounted(refresh)
             </div>
             <div v-else class="card crawl down">
               <div class="name">爬虫数据</div>
-              <span class="fbadge"><span class="dot down"></span><span class="fb-txt">{{ theme === 'fluent' ? '数据不可用' : '未连接' }}</span></span>
+              <span class="fbadge"><span class="dot down"></span><span class="fb-txt">{{ theme === 'apple' ? '未连接' : '数据不可用' }}</span></span>
               <div class="state muted">未连接</div>
               <div class="detail">/api/crawl/stats 请求失败 · 恢复后端后点击「重新检测」重试</div>
             </div>
@@ -261,8 +278,8 @@ onMounted(refresh)
               <div class="toolbar-right">
                 <span class="ph-tag">Placeholder · v0.2+</span>
                 <div class="theme-toggle tb-toggle" role="group" aria-label="界面风格切换">
-                  <button class="seg-btn" :class="{ on: theme === 'apple' }" @click="setTheme('apple')">苹果风格</button>
-                  <button class="seg-btn" :class="{ on: theme === 'fluent' }" @click="setTheme('fluent')">Fluent 2</button>
+                  <button v-for="t in THEMES" :key="t" class="seg-btn" :class="{ on: theme === t }"
+                    @click="setTheme(t)">{{ THEME_LABELS[t] }}</button>
                 </div>
               </div>
             </div>
@@ -300,8 +317,8 @@ onMounted(refresh)
               <div class="toolbar-right">
                 <span class="ph-tag">Placeholder · v0.2+</span>
                 <div class="theme-toggle tb-toggle" role="group" aria-label="界面风格切换">
-                  <button class="seg-btn" :class="{ on: theme === 'apple' }" @click="setTheme('apple')">苹果风格</button>
-                  <button class="seg-btn" :class="{ on: theme === 'fluent' }" @click="setTheme('fluent')">Fluent 2</button>
+                  <button v-for="t in THEMES" :key="t" class="seg-btn" :class="{ on: theme === t }"
+                    @click="setTheme(t)">{{ THEME_LABELS[t] }}</button>
                 </div>
               </div>
             </div>
@@ -335,8 +352,8 @@ onMounted(refresh)
               <div class="toolbar-right">
                 <span class="ph-tag">Placeholder · v0.2+</span>
                 <div class="theme-toggle tb-toggle" role="group" aria-label="界面风格切换">
-                  <button class="seg-btn" :class="{ on: theme === 'apple' }" @click="setTheme('apple')">苹果风格</button>
-                  <button class="seg-btn" :class="{ on: theme === 'fluent' }" @click="setTheme('fluent')">Fluent 2</button>
+                  <button v-for="t in THEMES" :key="t" class="seg-btn" :class="{ on: theme === t }"
+                    @click="setTheme(t)">{{ THEME_LABELS[t] }}</button>
                 </div>
               </div>
             </div>
@@ -462,14 +479,67 @@ onMounted(refresh)
   --seg-active-bg: #ffffff;
   --seg-active-shadow: 0 1px 2px rgba(0, 0, 0, .1);
 }
+/* IBM Carbon（按 Penpot 原型「honey-money · IBM Carbon 风格仪表盘」校准，2026-10-08）：
+   深色 UI Shell 头 48px #161616、侧栏 256px 白底 1px #E0E0E0、方角 1px 边框白卡、
+   蓝主按钮 #0F62FE 96×40、8px 方角进度条、#FFF1F1 内联错误通知、
+   灰阶 #161616 / #525252 / #A8A8A8，状态色 #24A148 / #DA1E28 / #F1C21B */
+[data-theme="carbon"] {
+  --font: 'IBM Plex Sans', 'Inter', 'Helvetica Neue', Arial,
+    'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+  --fg: #161616; --fg-2: #525252; --fg-3: #a8a8a8;
+  --accent: #0f62fe;
+  --shell-bg: #f4f4f4;
+  --window-bg: #f4f4f4;
+  --titlebar-bg: #161616;
+  --titlebar-border: transparent;
+  --titlebar-h: 48px;
+  --title-color: #f4f4f4;
+  --sidebar-bg: #ffffff;
+  --sidebar-border: #e0e0e0;
+  --sidebar-blur: none;
+  --sidebar-w: 256px;
+  --content-pad: 44px 32px 32px;
+  --h1-size: 28px;
+  --h1-weight: 400;
+  --nav-radius: 0;
+  --nav-hover-bg: #f4f4f4;
+  --nav-active-bg: #e0e0e0;
+  --nav-active-fg: #161616;
+  --card-bg: #ffffff;
+  --card-blur: none;
+  --card-border-color: #e0e0e0;
+  --card-radius: 0px;
+  --card-shadow: none;
+  --card-idle-bg: #ffffff;
+  --card-idle-border: #e0e0e0;
+  --dot-up: #24a148; --dot-up-glow: none;
+  --dot-down: #da1e28; --dot-warn: #f1c21b; --dot-idle: #a8a8a8;
+  --bar-track: #e0e0e0;
+  --bar-fill: #0f62fe;
+  --bar-h: 8px;
+  --btn-fg: #ffffff; --btn-bg: #0f62fe; --btn-hover-bg: #0353e9;
+  --btn-border-color: #0f62fe; --btn-radius: 0px;
+  --error-bg: #fff1f1; --error-border-color: transparent; --error-fg: #161616;
+  --sk: #e5e5e5; --sk-strong: #e5e5e5;
+  --cli-bg: #e0e0e0;
+  --ph-tag-bg: #0f62fe; --ph-tag-fg: #ffffff;
+  --ph-input-border: #8d8d8d; --ph-input-bg: #ffffff;
+  --ph-curve-bg: #f4f4f4;
+  --seg-track: rgba(255, 255, 255, .16);
+  --seg-btn-radius: 0px;
+  --seg-active-bg: #f4f4f4;
+  --seg-active-shadow: none;
+}
 
-/* —— 主题独有元素开关（fluent 原型无标题栏；apple 无侧栏 app item/导航图标）—— */
+/* —— 主题独有元素开关（fluent 原型无标题栏；apple/carbon 无侧栏 app item，
+      carbon 切换控件在深色头部不在工具栏；apple 无导航图标与来源文字行）—— */
 [data-theme="fluent"] .titlebar { display: none; }
-[data-theme="apple"] .tb-toggle { display: none; }
-[data-theme="apple"] .app-item { display: none; }
-[data-theme="apple"] .nav-icon { display: none; }
+[data-theme="apple"] .tb-toggle, [data-theme="carbon"] .tb-toggle { display: none; }
+[data-theme="apple"] .app-item, [data-theme="carbon"] .app-item { display: none; }
+[data-theme="apple"] .nav-icon, [data-theme="carbon"] .nav-icon { display: none; }
 [data-theme="apple"] .src-line { display: none; }
-[data-theme="fluent"] .chips { display: none; }
+[data-theme="fluent"] .chips, [data-theme="carbon"] .chips { display: none; }
+.shell-menu, .shell-set { display: none; flex: none; }
 
 /* —— 徽章：apple 仅状态点（display:contents 保持原布局）；fluent 点+文字（原型 Badge）—— */
 .fbadge { display: contents; }
@@ -672,7 +742,7 @@ body {
   padding: 12px 16px; margin-bottom: 24px;
   font-size: 12px; color: var(--error-fg);
 }
-.warn-icon { flex: none; }
+.warn-icon { flex: none; width: 18px; height: 16px; }
 
 /* ===== 骨架 ===== */
 .sk { display: inline-block; background: var(--sk); border-radius: 5px; height: 10px; }
@@ -706,7 +776,7 @@ body {
   border: 1px solid var(--card-border-color); border-radius: 10px;
   padding: 11px 16px; color: var(--fg-3); font-size: 13px;
 }
-.mag { flex: none; }
+.mag { flex: none; width: 16px; height: 16px; }
 .ph-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 24px; }
 .ph-table, .ph-chart, .ph-form, .ph-result {
   background: var(--card-bg); backdrop-filter: var(--card-blur);
@@ -774,6 +844,149 @@ body {
 [data-theme="fluent"] .ph-table .ph-head {
   background: #f5f5f5; border-radius: 4px; height: 44px; display: flex; align-items: center; padding: 0 12px;
 }
+
+/* ===== IBM Carbon 结构规则（按原型逐项：深色头/侧栏/方角卡/Tag/内联通知/数据表） ===== */
+/* —— 深色 UI Shell 头：菜单图标 + 品牌 + 副题浅灰 + 右侧设置图标 —— */
+[data-theme="carbon"] .titlebar { gap: 16px; }
+[data-theme="carbon"] .title { font-size: 14px; font-weight: 600; }
+[data-theme="carbon"] .title-sub { font-size: 12px; font-weight: 400; color: #a8a8a8; }
+[data-theme="carbon"] .shell-menu,
+[data-theme="carbon"] .shell-set { display: block; width: 16px; height: 16px; color: #f4f4f4; }
+[data-theme="carbon"] .shell-set { margin-left: 8px; }
+[data-theme="carbon"] .seg-btn { color: #c6c6c6; }
+[data-theme="carbon"] .seg-btn.on { color: #161616; }
+
+/* —— 侧栏 256：48px 导航行、选中灰底 + 右缘 chevron、分组分隔线、脚注 —— */
+[data-theme="carbon"] .sidebar { padding: 8px 0 0; }
+[data-theme="carbon"] .group { font-size: 12px; color: #525252; margin: 16px 16px 4px; }
+[data-theme="carbon"] .sidebar .group:nth-of-type(2) {
+  border-top: 1px solid #e0e0e0; padding-top: 16px; margin-top: 16px;
+}
+[data-theme="carbon"] .nav-item {
+  display: flex; align-items: center;
+  height: 48px; margin: 0; padding: 0 16px;
+  font-size: 14px; font-weight: 400; color: #161616;
+}
+[data-theme="carbon"] .nav-item.active { font-weight: 600; }
+[data-theme="carbon"] .nav-item.active::after {
+  content: ''; margin-left: auto; width: 7px; height: 7px;
+  border-top: 2px solid #525252; border-right: 2px solid #525252;
+  transform: rotate(45deg);
+}
+[data-theme="carbon"] .src-item { height: 40px; padding: 0 16px 0 36px; font-size: 14px; color: #525252; }
+[data-theme="carbon"] .sidebar-foot { padding: 0 16px 12px; font-size: 12px; color: #525252; }
+
+/* —— 徽章：状态卡为 点+12px 文字；爬虫卡按原型为实心 Tag（蓝/黄/红） —— */
+[data-theme="carbon"] .fb-txt { display: inline; }
+[data-theme="carbon"] .fbadge {
+  position: absolute; top: 16px; right: 20px;
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12px; line-height: 1; color: #525252;
+}
+[data-theme="carbon"] .fbadge .dot { position: static; width: 8px; height: 8px; }
+[data-theme="carbon"] .fbadge.brand { background: #0f62fe; color: #fff; height: 20px; padding: 0 12px; }
+[data-theme="carbon"] .fbadge.warn { background: #f1c21b; color: #161616; height: 20px; padding: 0 12px; }
+[data-theme="carbon"] .fbadge:has(.dot.down) { background: #da1e28; color: #fff; height: 20px; padding: 0 12px; }
+[data-theme="carbon"] .fbadge.brand .dot,
+[data-theme="carbon"] .fbadge.warn .dot,
+[data-theme="carbon"] .fbadge:has(.dot.down) .dot { display: none; }
+
+/* —— 状态卡 140：标题 14/600、大字状态、详情沉底 12px —— */
+[data-theme="carbon"] .cards { gap: 32px; }
+[data-theme="carbon"] .cards > .card { height: 140px; padding: 16px 20px; }
+[data-theme="carbon"] .cards > .card > .state { font-size: 20px; font-weight: 600; margin: 14px 0 0; }
+[data-theme="carbon"] .cards > .card > .detail {
+  position: absolute; left: 20px; right: 20px; bottom: 16px; margin: 0;
+  font-size: 12px; color: #525252;
+}
+[data-theme="carbon"] .name { font-size: 14px; font-weight: 600; color: #161616; }
+
+/* —— 爬虫卡：标题 16/600、8px 方角进度条、细节 12px —— */
+[data-theme="carbon"] .card.crawl { margin-top: 32px; padding: 20px; }
+[data-theme="carbon"] .card.crawl > .name { font-size: 16px; }
+[data-theme="carbon"] .card.crawl > .state { display: none; }
+[data-theme="carbon"] .card.crawl .bar, [data-theme="carbon"] .card.crawl .bar-fill { border-radius: 0; }
+[data-theme="carbon"] .card.crawl .detail { font-size: 12px; color: #525252; margin-top: 6px; }
+[data-theme="carbon"] .card.crawl .detail.src-line { color: #161616; }
+
+/* —— 空态：无插画 + 警示黄 Tag（fbadge.warn）+ 命令 chip 灰底等宽 —— */
+[data-theme="carbon"] .empty-art { display: none; }
+[data-theme="carbon"] .empty { display: block; padding: 16px 0 0; }
+[data-theme="carbon"] .empty .state { font-size: 16px; font-weight: 600; }
+[data-theme="carbon"] .empty .detail { font-size: 12px; }
+[data-theme="carbon"] .cli {
+  background: #e0e0e0; border-radius: 0; height: 40px;
+  display: inline-flex; align-items: center; padding: 0 16px;
+  font-size: 12px; color: #161616; margin-top: 16px;
+}
+.cli-ps { color: #525252; }
+
+/* —— 错误降级卡：红 Tag 居中 + 说明文字居中 —— */
+[data-theme="carbon"] .card.crawl.down { min-height: 200px; }
+[data-theme="carbon"] .card.crawl.down .fbadge { top: 64px; left: 50%; right: auto; transform: translateX(-50%); }
+[data-theme="carbon"] .card.crawl.down .state { display: none; }
+[data-theme="carbon"] .card.crawl.down .detail {
+  position: absolute; left: 0; right: 0; bottom: 48px;
+  text-align: center; font-size: 12px; color: #525252;
+}
+
+/* —— 内联错误通知：#FFF1F1 + 实心红图标 + 加粗标题同行正文，14px 方角 —— */
+[data-theme="carbon"] .error-banner {
+  border-radius: 0; border-color: transparent; padding: 14px 16px;
+  font-size: 14px; margin-bottom: 32px;
+}
+[data-theme="carbon"] .error-banner .warn-icon:first-of-type { display: none; }
+[data-theme="carbon"] .error-banner .err-filled { display: block; }
+[data-theme="carbon"] .eb-title { font-weight: 600; color: #161616; }
+.err-filled { display: none; flex: none; width: 16px; height: 16px; }
+.eb-title { font-weight: inherit; }
+
+/* —— 主按钮 96×40 蓝底白字方角；占位按钮次级样式 —— */
+[data-theme="carbon"] .btn {
+  min-width: 96px; height: 40px; padding: 0 16px;
+  font-size: 14px; box-shadow: none;
+}
+[data-theme="carbon"] .btn:disabled { background: #c6c6c6; border-color: #c6c6c6; color: #f4f4f4; }
+[data-theme="carbon"] .ph-btn {
+  background: #fff; border-color: #161616; color: #161616;
+  min-width: 96px; height: 40px; padding: 0 16px; font-size: 14px;
+}
+
+/* —— 占位页：蓝色 Tag、40px 搜索框、DataTable 表头/48px 行、虚线 K 线占位 —— */
+[data-theme="carbon"] .sub { font-size: 12px; }
+[data-theme="carbon"] .note { font-size: 12px; color: #525252; }
+[data-theme="carbon"] .ph-tag {
+  border-radius: 0; height: 20px; display: inline-flex; align-items: center;
+  padding: 0 12px; font-size: 12px; line-height: 1;
+}
+[data-theme="carbon"] .ph-tag.small { background: #e0e0e0; color: #161616; padding: 0 8px; }
+[data-theme="carbon"] .ph-search {
+  height: 40px; border-radius: 0; border-color: #8d8d8d;
+  padding: 0 12px; font-size: 14px; background: #fff;
+}
+[data-theme="carbon"] .ph-grid { grid-template-columns: 1fr; gap: 32px; margin-top: 32px; }
+[data-theme="carbon"] .ph-table, [data-theme="carbon"] .ph-chart,
+[data-theme="carbon"] .ph-form, [data-theme="carbon"] .ph-result,
+[data-theme="carbon"] .ph-course { border-radius: 0; box-shadow: none; }
+[data-theme="carbon"] .ph-table { padding: 0; overflow: hidden; }
+[data-theme="carbon"] .ph-table .ph-head {
+  height: 48px; display: flex; align-items: center; padding: 0 16px;
+  font-size: 12px; font-weight: 600; color: #525252;
+  border-bottom: 1px solid #e0e0e0; margin-bottom: 0;
+}
+[data-theme="carbon"] .ph-row {
+  height: 48px; align-items: center; margin: 0; padding: 0 16px;
+  border-bottom: 1px solid #e0e0e0;
+}
+[data-theme="carbon"] .ph-row:last-child { border-bottom: 0; }
+[data-theme="carbon"] .ph-row .sk { height: 8px; }
+[data-theme="carbon"] .ph-chart { min-height: 200px; border-style: dashed; border-color: #a8a8a8; }
+[data-theme="carbon"] .ph-candle { display: none; }
+[data-theme="carbon"] .ph-chart-label { color: #525252; font-size: 12px; }
+[data-theme="carbon"] .ph-input, [data-theme="carbon"] .ph-curve { border-radius: 0; }
+
+/* —— 骨架卡：白卡 + #E5E5E5 灰条 —— */
+[data-theme="carbon"] .cards > .card.skeleton-card { height: 140px; }
 
 /* ===== 响应式兜底 ===== */
 @media (max-width: 860px) {

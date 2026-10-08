@@ -16,8 +16,10 @@ backend/            Python 后端（FastAPI）
                       eastmoney(接口客户端) / store(存储) / runner(编排) / __main__(CLI)
   tests/              63 个离线 pytest 用例（API 骨架 6 + 爬虫 57）
 frontend/           Vue3 + Vite 前端
-  src/App.vue         macOS 风格服务仪表盘（窗口壳+侧栏导航+毛玻璃卡；四状态：
-                      加载骨架/空态插画/错误横幅/降级占位；数据·回测·教学占位页）
+  src/App.vue         服务仪表盘，三套界面风格一键切换（苹果 / Fluent 2 /
+                      IBM Carbon，与 Penpot 三版原型对齐，localStorage 持久化）：
+                      四状态（加载骨架/空态插画/错误横幅/降级占位）+
+                      数据·回测·教学占位页
   nginx.conf          生产：静态托管 + /api 反代后端
 deploy/             （预留：将来放 NAS 专属编排变体）
 tests/e2e/          Playwright E2E（自拉后端 uvicorn + 前端 vite preview）
