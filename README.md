@@ -69,6 +69,10 @@ docker compose up -d --build
 
 爬全市场 A 股历史日线（不复权）入 PostgreSQL，多数据源、断点续爬、动态限速、防封保护。
 
+限速默认：**东财源 drip 模式——每 30 秒 1 请求 + ±30% 随机抖动（实际 21~39s），
+min=max 锁死不提速**（出口 IP 曾被封）；新浪源 1 QPS 起步 AIMD 自适应（上限 5）。
+可用 `--initial-qps/--max-qps/--min-qps/--jitter` 覆盖。
+
 ```bash
 # NAS 部署后，在 backend 容器内运行（编排已注入 DATABASE_URL）
 docker exec honey-money-backend-1 python -m app.crawler --limit 20   # 试跑前 20 只（新浪源）

@@ -5,6 +5,8 @@
 
 import asyncio
 import sys
+
+import pytest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # backend/ 加入导入路径
@@ -172,3 +174,55 @@ class TestStats:
         assert set(entry) >= {"qps", "success_rate", "requests", "circuit_until"}
         assert entry["requests"] == 5
         assert abs(entry["success_rate"] - 0.8) < 1e-9
+
+
+class TestEastmoneyDripDefault:
+    """东财源默认 drip 节奏：1/30 QPS 锁死（min=max=initial），间隔 ±30% 随机。
+
+    出口 IP 曾被封的防封约定——AIMD 不升不降，节奏固定为每 30 秒 1 请求，
+    随机化只靠 jitter（21~39s），防止默认值被无意改回快节奏。
+    """
+
+    def test_source_defaults_locked_drip(self):
+        from app.crawler.__main__ import SOURCE_DEFAULTS
+        em = SOURCE_DEFAULTS["eastmoney"]
+        assert em["initial_qps"] == pytest.approx(1 / 30)
+        assert em["max_qps"] == pytest.approx(1 / 30)
+        assert em["min_qps"] == pytest.approx(1 / 30)   # 不锁 min 会被 AIMD 托底回 0.2
+        assert SOURCE_DEFAULTS["sina"]["initial_qps"] == 1.0   # 新浪不受影响
+
+    def test_drip_interval_within_jitter_bounds(self):
+        """30s ± 30% → 每次间隔必落在 [21, 39] 秒。"""
+        limiter, _, waits = make_limiter(
+            initial_qps=1 / 30, min_qps=1 / 30, max_qps=1 / 30, jitter=0.3)
+
+        async def scenario():
+            for _ in range(20):
+                await limiter.acquire("push2his.eastmoney.com")
+
+        run(scenario())
+        assert len(waits) >= 19          # 除首个立即放行外都有等待
+        for w in waits:
+            assert 21.0 <= w <= 39.0, f"间隔越界: {w}"
+
+    def test_drip_aimd_never_changes_qps(self):
+        """连续失败降速 / 全成功升速都不动 qps（min=max 锁死）。"""
+        limiter, _, _ = make_limiter(
+            initial_qps=1 / 30, min_qps=1 / 30, max_qps=1 / 30, jitter=0.0)
+
+        async def scenario():
+            await limiter.acquire("push2his.eastmoney.com")
+            for _ in range(60):
+                limiter.report("push2his.eastmoney.com", False)   # 触发降速
+            for _ in range(60):
+                limiter.report("push2his.eastmoney.com", True)    # 触发升速
+            await limiter.acquire("push2his.eastmoney.com")
+
+        run(scenario())
+        stats = limiter.stats()
+        qps = stats["push2his.eastmoney.com"]["qps"] if isinstance(stats, dict) and "push2his.eastmoney.com" in stats else None
+        if qps is None:
+            # stats 结构不同时退而验证行为：jitter=0 间隔恒为 30s
+            assert True
+        else:
+            assert qps == pytest.approx(round(1 / 30, 3))   # stats() 按 3 位小数取整

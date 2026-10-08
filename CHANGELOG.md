@@ -60,6 +60,10 @@
   npm 走 npmmirror（实测 MB/s 级）。
 
 ### Changed
+- **东财源默认锁 drip 节奏**：每 30 秒 1 请求（±30% 随机抖动 → 实际 21~39s），
+  `min=max=initial=1/30` QPS 锁死，AIMD 不升不降（出口 IP 曾被封，宁慢勿封）；
+  清单加载同节奏。新增 `--min-qps` 参数；新浪源节奏不变。测试锁默认值 +
+  抖动间隔界 + AIMD 不变速三重守护。
 - **代理池卡片显示在池数量（对齐原型）**：`/api/infra` 探活成功后加取
   `/count`（jhao104 协议 `[可用, 总数]`），响应新增 `count`/`count_useful`
   字段、detail 改为「host:port · 在池 N」（原先输出原始 JSON）；计数取不到
