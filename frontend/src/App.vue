@@ -1,5 +1,10 @@
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
+import DataTable from 'primevue/datatable'
+import Column from 'primevue/column'
+import InputText from 'primevue/inputtext'
+import Button from 'primevue/button'
+import Paginator from 'primevue/paginator'
 
 // ===== 数据层（沿用原仪表盘逻辑：三接口并发 + 优雅降级）=====
 const backend = ref({ status: 'checking' })   // 后端进程本身
@@ -13,17 +18,6 @@ const SRC_ITEMS = [
   { id: 'src-sina', label: '新浪财经', field: 'sina', tagCls: 'src-sina' },
   { id: 'src-ef', label: '东方财富', field: 'eastmoney', tagCls: 'src-ef' },
 ]
-
-// ===== 界面风格（apple | fluent | carbon），localStorage 持久化，index.html 已做首帧预处理 =====
-const THEMES = ['apple', 'fluent', 'carbon']
-const THEME_LABELS = { apple: '苹果风格', fluent: 'Fluent 2', carbon: 'Carbon' }
-const theme = ref(THEMES.includes(document.documentElement.dataset.theme)
-  ? document.documentElement.dataset.theme : 'apple')
-function setTheme(t) {
-  theme.value = t
-  document.documentElement.dataset.theme = t
-  localStorage.setItem('hm-theme', t)
-}
 
 async function refresh() {
   loading.value = true
@@ -90,10 +84,8 @@ async function loadBrowse() {
   }
 }
 function browseSearch() { browsePage.value = 0; loadBrowse() }
-function browseGo(delta) {
-  const next = browsePage.value + delta
-  if (next < 0 || next >= browseTotalPages.value) return
-  browsePage.value = next; loadBrowse()
+function onPage(e) {
+  browsePage.value = e.page; loadBrowse()
 }
 watch([activeNav, srcPage], ([nav]) => {
   if (nav === 'data' || srcPage.value) loadBrowse()
@@ -123,11 +115,8 @@ onMounted(refresh)
           <line x1="2" y1="8" x2="14" y2="8" stroke="currentColor" stroke-width="1.6"/>
           <line x1="2" y1="12.5" x2="14" y2="12.5" stroke="currentColor" stroke-width="1.6"/>
         </svg>
-        <h1 class="title">honey-money<span class="title-sub">{{ theme === 'apple' ? ' — 服务状态' : ' · A 股量化研究与交易系统' }}</span></h1>
-        <div class="theme-toggle" role="group" aria-label="界面风格切换">
-          <button v-for="t in THEMES" :key="t" class="seg-btn" :class="{ on: theme === t }"
-            @click="setTheme(t)">{{ THEME_LABELS[t] }}</button>
-        </div>
+        <h1 class="title">honey-money<span class="title-sub"> · A 股量化研究与交易系统</span></h1>
+
         <svg class="shell-set" viewBox="0 0 16 16" fill="none" aria-hidden="true">
           <circle cx="8" cy="8" r="2.2" stroke="currentColor" stroke-width="1.4"/>
           <path d="M8 1.8v2M8 12.2v2M1.8 8h2M12.2 8h2M3.6 3.6 5 5M11 11l1.4 1.4M12.4 3.6 11 5M5 11l-1.4 1.4"
@@ -184,17 +173,14 @@ onMounted(refresh)
           <template v-if="activeNav === 'dash'">
             <div class="toolbar">
               <div>
-                <h2 class="h1">{{ backendDown && theme === 'apple' ? '服务状态 · 后端不可用' : '服务状态' }}</h2>
+                <h2 class="h1">服务状态</h2>
                 <p class="sub">{{ checking ? '正在检查各服务…' : '工程化骨架 · 仪表盘 · v0.1.0' }}</p>
               </div>
               <div class="toolbar-right">
-                <button class="btn" :disabled="checking" @click="refresh">
+                <button class="btn btn-primary" :disabled="checking" @click="refresh">
                   {{ checking ? '检查中…' : '重新检测' }}
                 </button>
-                <div class="theme-toggle tb-toggle" role="group" aria-label="界面风格切换">
-                  <button v-for="t in THEMES" :key="t" class="seg-btn" :class="{ on: theme === t }"
-                    @click="setTheme(t)">{{ THEME_LABELS[t] }}</button>
-                </div>
+
               </div>
             </div>
 
@@ -229,13 +215,13 @@ onMounted(refresh)
                 </div>
                 <div class="card" :class="{ idle: backendDown }">
                   <div class="name">PostgreSQL</div>
-                  <span class="fbadge"><span class="dot" :class="backendDown ? (theme === 'apple' ? 'idle' : 'down') : (infra?.postgres?.status === 'up' ? 'up' : 'down')"></span><span class="fb-txt">{{ backendDown ? (theme === 'apple' ? '—' : '数据不可用') : (infra?.postgres?.status === 'up' ? '已连接' : '未连接') }}</span></span>
+                  <span class="fbadge"><span class="dot" :class="backendDown ? 'down' : (infra?.postgres?.status === 'up' ? 'up' : 'down')"></span><span class="fb-txt">{{ backendDown ? '数据不可用' : (infra?.postgres?.status === 'up' ? '已连接' : '未连接') }}</span></span>
                   <div class="state">{{ backendDown ? '—' : (infra?.postgres?.status === 'up' ? '已连接' : '未连接') }}</div>
                   <div class="detail">{{ backendDown ? '等待后端恢复后展示' : (infra?.postgres?.detail || '') }}</div>
                 </div>
                 <div class="card" :class="{ idle: backendDown }">
                   <div class="name">代理池</div>
-                  <span class="fbadge"><span class="dot" :class="backendDown ? (theme === 'apple' ? 'idle' : 'down') : (infra?.proxy_pool?.status === 'up' ? 'up' : 'down')"></span><span class="fb-txt">{{ backendDown ? (theme === 'apple' ? '—' : '数据不可用') : (infra?.proxy_pool?.status === 'up' ? '已连接' : '未连接') }}</span></span>
+                  <span class="fbadge"><span class="dot" :class="backendDown ? 'down' : (infra?.proxy_pool?.status === 'up' ? 'up' : 'down')"></span><span class="fb-txt">{{ backendDown ? '数据不可用' : (infra?.proxy_pool?.status === 'up' ? '已连接' : '未连接') }}</span></span>
                   <div class="state">{{ backendDown ? '—' : (infra?.proxy_pool?.status === 'up'
                     ? (infra.proxy_pool.count != null ? `已连接 · 在池 ${infra.proxy_pool.count}` : '已连接')
                     : '未连接') }}</div>
@@ -286,9 +272,9 @@ onMounted(refresh)
                   <circle cx="6" cy="64" r="2" fill="#d1d1d6"/>
                 </svg>
                 <div class="empty-text">
-                  <div class="state">{{ theme === 'apple' ? '爬虫未运行' : '爬虫尚未运行，日线数据为空' }}</div>
+                  <div class="state">爬虫尚未运行，日线数据为空</div>
                   <div class="detail">运行爬虫后开始积累日线数据（判定：crawl.initialized = false）</div>
-                  <code class="cli"><span v-if="theme === 'carbon'" class="cli-ps">$ </span>python -m app.crawler --source eastmoney --mode 增量</code>
+                  <code class="cli"><span class="cli-ps">$ </span>python -m app.crawler --source eastmoney --mode 增量</code>
                 </div>
               </div>
 
@@ -308,7 +294,7 @@ onMounted(refresh)
             </div>
             <div v-else class="card crawl down">
               <div class="name">爬虫数据</div>
-              <span class="fbadge"><span class="dot down"></span><span class="fb-txt">{{ theme === 'apple' ? '未连接' : '数据不可用' }}</span></span>
+              <span class="fbadge"><span class="dot down"></span><span class="fb-txt">数据不可用</span></span>
               <div class="state muted">未连接</div>
               <div class="detail">/api/crawl/stats 请求失败 · 恢复后端后点击「重新检测」重试</div>
             </div>
@@ -325,52 +311,49 @@ onMounted(refresh)
               </div>
               <div class="toolbar-right">
                 <span v-if="srcPage" class="ph-tag" :class="srcPage.tagCls">{{ srcPage.label }}</span>
-                <div class="theme-toggle tb-toggle" role="group" aria-label="界面风格切换">
-                  <button v-for="t in THEMES" :key="t" class="seg-btn" :class="{ on: theme === t }"
-                    @click="setTheme(t)">{{ THEME_LABELS[t] }}</button>
-                </div>
+
               </div>
             </div>
             <div class="ph-search">
-              <svg class="mag" viewBox="0 0 16 16" fill="none">
-                <circle cx="6.5" cy="6.5" r="4.5" stroke="#aeaeb2" stroke-width="2"/>
-                <line x1="10" y1="10" x2="14" y2="14" stroke="#aeaeb2" stroke-width="2.5" stroke-linecap="round"/>
-              </svg>
-              <input class="browse-input" v-model="browseQuery" placeholder="搜索代码 / 名称，如 600519 或 贵州茅台"
-                @keydown.enter="browseSearch" />
-              <button class="btn browse-btn" @click="browseSearch">搜索</button>
+              <span class="p-inputtext-icon-wrap"><i class="pi pi-search"></i></span>
+              <InputText v-model="browseQuery" placeholder="搜索代码 / 名称，如 600519 或 贵州茅台"
+                class="browse-input" @keydown.enter="browseSearch" />
+              <Button label="搜索" size="small" severity="secondary" outlined @click="browseSearch" />
             </div>
-            <div class="browse-table">
-              <div class="browse-head">
-                <span>代码</span><span>名称</span><span class="num">最新价</span><span class="num">涨跌幅</span>
-                <span class="num">K线数</span><span class="date">最新交易日</span><span class="src">来源</span>
-              </div>
-              <template v-if="browse.status === 'loading' || browseLoading">
-                <div v-for="i in 8" :key="'sk' + i" class="browse-row"><span class="sk" style="width:80%"></span></div>
-              </template>
-              <template v-else-if="browse.status === 'down'">
-                <div class="browse-empty">数据库不可达：{{ browse.detail }}</div>
-              </template>
-              <template v-else-if="!browse.stocks.length">
-                <div class="browse-empty">无匹配股票（清单 {{ fmt(crawl?.stocks_listed || 0) }} 只中搜索）</div>
-              </template>
-              <template v-else>
-                <div v-for="st in browse.stocks" :key="st.code" class="browse-row" :class="{ 'no-data': st.bars === 0 }">
-                  <span class="code">{{ st.code }}</span>
-                  <span>{{ st.name }}</span>
-                  <span class="num">{{ st.close ?? '—' }}</span>
-                  <span class="num" :class="(st.pct_chg ?? 0) >= 0 ? 'up' : 'down'">
-                    {{ st.pct_chg != null ? (st.pct_chg >= 0 ? '+' : '') + st.pct_chg + '%' : '—' }}</span>
-                  <span class="num">{{ st.bars || 0 }}</span>
-                  <span class="date">{{ st.last_date || '—' }}</span>
-                  <span class="src">{{ st.sources || '—' }}</span>
-                </div>
-              </template>
-            </div>
-            <div class="browse-pager" v-if="browse.status === 'up'">
-              <button class="btn" :disabled="browsePage === 0 || browseLoading" @click="browseGo(-1)">上一页</button>
-              <span>第 {{ browsePage + 1 }} / {{ browseTotalPages }} 页 · 共 {{ fmt(browse.total) }} 只</span>
-              <button class="btn" :disabled="browsePage + 1 >= browseTotalPages || browseLoading" @click="browseGo(1)">下一页</button>
+            <div class="browse-pv">
+              <DataTable :value="browse.stocks || []" lazy paginator :rows="50"
+                :totalRecords="browse.total || 0" :loading="browseLoading"
+                dataKey="code" stripedRows size="small"
+                @page="onPage">
+                <template #empty>
+                  <div class="browse-empty">
+                    {{ browse.status === 'down' ? '数据库不可达：' + (browse.detail || '') : '无匹配股票' }}
+                  </div>
+                </template>
+                <Column field="code" header="代码" style="width: 100px">
+                  <template #body="{ data }"><span class="mono">{{ data.code }}</span></template>
+                </Column>
+                <Column field="name" header="名称" />
+                <Column field="close" header="最新价" style="width: 100px" bodyClass="num-col">
+                  <template #body="{ data }">{{ data.close ?? '—' }}</template>
+                </Column>
+                <Column field="pct_chg" header="涨跌幅" style="width: 100px">
+                  <template #body="{ data }">
+                    <span v-if="data.pct_chg != null" :class="data.pct_chg >= 0 ? 'chg-up' : 'chg-down'">
+                      {{ (data.pct_chg >= 0 ? '+' : '') + data.pct_chg + '%' }}</span>
+                    <span v-else>—</span>
+                  </template>
+                </Column>
+                <Column field="bars" header="K线数" style="width: 90px">
+                  <template #body="{ data }">{{ data.bars || 0 }}</template>
+                </Column>
+                <Column field="last_date" header="最新交易日" style="width: 120px">
+                  <template #body="{ data }">{{ data.last_date || '—' }}</template>
+                </Column>
+                <Column field="sources" header="来源" style="width: 90px">
+                  <template #body="{ data }"><span class="src-txt">{{ data.sources || '—' }}</span></template>
+                </Column>
+              </DataTable>
             </div>
             <p class="note">数据源：本地 PG（新浪/东财）· 爬虫持续入库中 · 单股K线明细接口已就绪（/api/stocks/{code}/bars），图表待选型</p>
           </template>
@@ -384,10 +367,7 @@ onMounted(refresh)
               </div>
               <div class="toolbar-right">
                 <span class="ph-tag">Placeholder · v0.2+</span>
-                <div class="theme-toggle tb-toggle" role="group" aria-label="界面风格切换">
-                  <button v-for="t in THEMES" :key="t" class="seg-btn" :class="{ on: theme === t }"
-                    @click="setTheme(t)">{{ THEME_LABELS[t] }}</button>
-                </div>
+
               </div>
             </div>
             <div class="ph-grid">
@@ -419,10 +399,7 @@ onMounted(refresh)
               </div>
               <div class="toolbar-right">
                 <span class="ph-tag">Placeholder · v0.2+</span>
-                <div class="theme-toggle tb-toggle" role="group" aria-label="界面风格切换">
-                  <button v-for="t in THEMES" :key="t" class="seg-btn" :class="{ on: theme === t }"
-                    @click="setTheme(t)">{{ THEME_LABELS[t] }}</button>
-                </div>
+
               </div>
             </div>
             <div class="ph-courses">
@@ -447,236 +424,128 @@ onMounted(refresh)
 </template>
 
 <style>
-/* ===== 主题 token：apple（默认）+ fluent，html[data-theme] 切换 ===== */
+/* ===== Carbon 主题 token（IBM Carbon Design：#0F62FE / #F4F4F4 / #161616，方角）===== */
 :root { color-scheme: light; }
-:root,
-[data-theme="apple"] {
-  --font: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC',
-    'Noto Sans SC', 'Microsoft YaHei', sans-serif;
-  --fg: #1d1d1f; --fg-2: #6e6e73; --fg-3: #aeaeb2;
-  --accent: #007aff;
-  --shell-bg: #f2f2f4;
-  --window-bg: rgba(255, 255, 255, .96);
-  --titlebar-bg: rgba(255, 255, 255, .8);
-  --titlebar-border: #e8e8ed;
-  --titlebar-h: 40px;
-  --title-color: #6e6e73;
-  --sidebar-bg: rgba(242, 242, 244, .72);
-  --sidebar-border: #d8d8dc;
-  --sidebar-blur: blur(20px) saturate(1.4);
-  --nav-radius: 8px;
-  --nav-hover-bg: rgba(0, 0, 0, .05);
-  --nav-active-bg: #007aff;
-  --nav-active-fg: #fff;
-  --nav-active-bar: none;
-  --card-bg: rgba(255, 255, 255, .85);
-  --card-blur: blur(30px) saturate(1.8);
-  --card-border-color: rgba(0, 0, 0, .07);
-  --card-radius: 12px;
-  --card-shadow: 0 3px 14px rgba(0, 0, 0, .08);
-  --card-idle-bg: rgba(247, 247, 248, .8);
-  --card-idle-border: #c7c7cc;
-  --dot-up: #34c759; --dot-up-glow: 0 0 6px rgba(52, 199, 89, .55);
-  --dot-down: #ff3b30; --dot-warn: #aeaeb2; --dot-idle: #aeaeb2;
-  --bar-track: #ececf0;
-  --bar-fill: linear-gradient(90deg, #34d399, #059669);
-  --chip-ef-bg: #ECFDF5; --chip-ef-fg: #047857;
-  --chip-sina-bg: #EFF6FF; --chip-sina-fg: #1D4ED8;
-  --btn-fg: #007aff; --btn-bg: rgba(255, 255, 255, .9); --btn-hover-bg: #fff;
-  --btn-border-color: #c7c7cc; --btn-radius: 8px;
-  --error-bg: #ffebee; --error-border-color: #ffcdd2; --error-fg: #c62828;
-  --sk: #ececf0; --sk-strong: #e5e5ea;
-  --cli-bg: #f5f5f7;
-  --ph-tag-bg: #fff8e6; --ph-tag-fg: #9a6700;
-  --ph-input-border: #c7c7cc; --ph-input-bg: #fff;
-  --ph-curve-bg: #f0f0f3;
-  --seg-track: rgba(120, 120, 128, .12);
-  --seg-btn-radius: 6px;
-  --seg-active-bg: #fff;
-  --seg-active-shadow: 0 1px 3px rgba(0, 0, 0, .12);
-}
-/* Fluent 2（按 Penpot 原型「04 · Fluent 2 风格仪表盘」校准，2026-10-07）：
-   无标题栏、侧栏 260 白底、导航浅灰行 + 左侧品牌蓝横条选中、状态徽章化、
-   2px 细进度条、无边框阴影卡、内容区 #E8E9EA */
-[data-theme="fluent"] {
-  --font: 'Segoe UI Variable Text', 'Segoe UI Variable', 'Segoe UI', system-ui,
-    'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
-  --fg: #242424; --fg-2: #616161; --fg-3: #707070;
-  --accent: #0f6cbd;
-  --shell-bg: #e8e9ea;
-  --window-bg: #e8e9ea;
-  --titlebar-bg: #e8e9ea;
-  --titlebar-border: #e5e5e5;
-  --titlebar-h: 44px;
-  --title-color: #242424;
-  --sidebar-bg: #ffffff;
-  --sidebar-border: #e5e5e5;
-  --sidebar-blur: none;
-  --sidebar-w: 260px;
-  --content-pad: 40px 32px 24px;
-  --h1-size: 28px;
-  --h1-weight: 400;
-  --nav-radius: 4px;
-  --nav-hover-bg: #eaeaea;
-  --nav-active-bg: #f0f0f0;
-  --nav-active-fg: #242424;
-  --card-bg: #ffffff;
-  --card-blur: none;
-  --card-border-color: transparent;
-  --card-radius: 8px;
-  --card-shadow: 0 1.6px 3.6px rgba(0, 0, 0, .16), 0 0.3px 0.9px rgba(0, 0, 0, .12);
-  --card-idle-bg: #fafafa;
-  --card-idle-border: transparent;
-  --dot-up: #107c10; --dot-up-glow: none;
-  --dot-down: #c50f1f; --dot-warn: #8a3707; --dot-idle: #616161;
-  --bar-track: #e6e6e6;
-  --bar-fill: #0f6cbd;
-  --bar-h: 2px;
-  --chip-ef-bg: #e9f4e9; --chip-ef-fg: #0f7b0f;
-  --chip-sina-bg: #eaf3fb; --chip-sina-fg: #0f6cbd;
-  --btn-fg: #242424; --btn-bg: #ffffff; --btn-hover-bg: #f5f5f5;
-  --btn-border-color: #d1d1d1; --btn-radius: 4px;
-  --error-bg: #fdf3f4; --error-border-color: transparent; --error-fg: #c50f1f;
-  --sk: #f0f0f0; --sk-strong: #e6e6e6;
-  --cli-bg: #f5f5f5;
-  --ph-tag-bg: #fff4ce; --ph-tag-fg: #615500;
-  --ph-input-border: #a19f9d; --ph-input-bg: #ffffff;
-  --ph-curve-bg: #f5f5f5;
-  --seg-track: rgba(0, 0, 0, .05);
-  --seg-btn-radius: 4px;
-  --seg-active-bg: #ffffff;
-  --seg-active-shadow: 0 1px 2px rgba(0, 0, 0, .1);
-}
-/* IBM Carbon（按 Penpot 原型「honey-money · IBM Carbon 风格仪表盘」校准，2026-10-08）：
-   深色 UI Shell 头 48px #161616、侧栏 256px 白底 1px #E0E0E0、方角 1px 边框白卡、
-   蓝主按钮 #0F62FE 96×40、8px 方角进度条、#FFF1F1 内联错误通知、
-   灰阶 #161616 / #525252 / #A8A8A8，状态色 #24A148 / #DA1E28 / #F1C21B */
-[data-theme="carbon"] {
-  --font: 'IBM Plex Sans', 'Inter', 'Helvetica Neue', Arial,
-    'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+:root {
+  --font: 'IBM Plex Sans', 'Segoe UI', system-ui, 'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
   --fg: #161616; --fg-2: #525252; --fg-3: #a8a8a8;
   --accent: #0f62fe;
   --shell-bg: #f4f4f4;
   --window-bg: #f4f4f4;
   --titlebar-bg: #161616;
-  --titlebar-border: transparent;
+  --titlebar-border: #161616;
   --titlebar-h: 48px;
   --title-color: #f4f4f4;
+  --sidebar-w: 256px;
+  --content-pad: 32px 40px 24px;
+  --h1-size: 28px;
+  --h1-weight: 400;
+  --bar-h: 6px;
+  --nav-active-bar: none;
   --sidebar-bg: #ffffff;
   --sidebar-border: #e0e0e0;
   --sidebar-blur: none;
-  --sidebar-w: 256px;
-  --content-pad: 44px 32px 32px;
-  --h1-size: 28px;
-  --h1-weight: 400;
   --nav-radius: 0;
-  --nav-hover-bg: #f4f4f4;
+  --nav-hover-bg: #e8e8e8;
   --nav-active-bg: #e0e0e0;
   --nav-active-fg: #161616;
   --card-bg: #ffffff;
   --card-blur: none;
   --card-border-color: #e0e0e0;
-  --card-radius: 0px;
+  --card-radius: 2px;
   --card-shadow: none;
-  --card-idle-bg: #ffffff;
-  --card-idle-border: #e0e0e0;
-  --dot-up: #24a148; --dot-up-glow: none;
+  --card-idle-bg: #fafafa;
+  --card-idle-border: #c6c6c6;
+  --dot-up: #198038; --dot-up-glow: none;
   --dot-down: #da1e28; --dot-warn: #f1c21b; --dot-idle: #a8a8a8;
   --bar-track: #e0e0e0;
   --bar-fill: #0f62fe;
-  --bar-h: 8px;
-  --btn-fg: #ffffff; --btn-bg: #0f62fe; --btn-hover-bg: #0353e9;
-  --btn-border-color: #0f62fe; --btn-radius: 0px;
-  --error-bg: #fff1f1; --error-border-color: transparent; --error-fg: #161616;
-  --sk: #e5e5e5; --sk-strong: #e5e5e5;
-  --cli-bg: #e0e0e0;
-  --ph-tag-bg: #0f62fe; --ph-tag-fg: #ffffff;
+  --chip-ef-bg: #e9f4e9; --chip-ef-fg: #198038;
+  --chip-sina-bg: #eaf1fb; --chip-sina-fg: #0f62fe;
+  --btn-fg: #161616; --btn-bg: #ffffff; --btn-hover-bg: #e8e8e8;
+  --btn-border-color: #c6c6c6; --btn-radius: 0;
+  --error-bg: #fff1f1; --error-border-color: #da1e28; --error-fg: #a2191f;
+  --sk: #e0e0e0; --sk-strong: #c6c6c6;
+  --cli-bg: #f4f4f4;
+  --ph-tag-bg: #fff8e6; --ph-tag-fg: #615500;
   --ph-input-border: #8d8d8d; --ph-input-bg: #ffffff;
   --ph-curve-bg: #f4f4f4;
-  --seg-track: rgba(255, 255, 255, .16);
-  --seg-btn-radius: 0px;
-  --seg-active-bg: #f4f4f4;
+  --seg-track: rgba(0, 0, 0, .05);
+  --seg-btn-radius: 0;
+  --seg-active-bg: #ffffff;
   --seg-active-shadow: none;
 }
+/* IBM Carbon（按 Penpot 原型「honey-money · IBM Carbon 风格仪表盘」校准，2026-10-08）：
+   深色 UI Shell 头 48px #161616、侧栏 256px 白底 1px #E0E0E0、方角 1px 边框白卡、
+   蓝主按钮 #0F62FE 96×40、8px 方角进度条、#FFF1F1 内联错误通知、
+   灰阶 #161616 / #525252 / #A8A8A8，状态色 #24A148 / #DA1E28 / #F1C21B */
 
-/* —— 主题独有元素开关（fluent 原型无标题栏；apple/carbon 无侧栏 app item，
-      carbon 切换控件在深色头部不在工具栏；apple 无导航图标与来源文字行）—— */
-[data-theme="fluent"] .titlebar { display: none; }
-[data-theme="apple"] .tb-toggle, [data-theme="carbon"] .tb-toggle { display: none; }
-[data-theme="apple"] .app-item, [data-theme="carbon"] .app-item { display: none; }
-[data-theme="apple"] .nav-icon, [data-theme="carbon"] .nav-icon { display: none; }
-[data-theme="apple"] .src-line { display: none; }
-[data-theme="fluent"] .chips, [data-theme="carbon"] .chips { display: none; }
+/* —— Carbon 固定形态：无标题栏（应用名在侧栏 app item），工具栏带切换位 —— */
+.titlebar { display: none; }
+.tb-toggle { display: none; }
+.src-line { display: none; }
 .shell-menu, .shell-set { display: none; flex: none; }
 
-/* —— 徽章：apple 仅状态点（display:contents 保持原布局）；fluent 点+文字（原型 Badge）—— */
-.fbadge { display: contents; }
-[data-theme="apple"] .fb-txt { display: none; }
-[data-theme="fluent"] .fbadge {
+/* —— 徽章（Carbon 原型 Badge：点 + 文字，右上角）—— */
+.fbadge {
   position: absolute; top: 18px; right: 18px;
   display: flex; align-items: center; gap: 6px;
   font-size: 10px; line-height: 1; color: var(--fg-2);
 }
-[data-theme="fluent"] .fbadge .dot { position: static; width: 12px; height: 12px; }
-[data-theme="fluent"] .fbadge.brand { color: var(--accent); }
-[data-theme="fluent"] .fbadge.brand .dot { background: var(--accent); box-shadow: none; }
-[data-theme="fluent"] .fbadge:has(.dot.up) { color: var(--dot-up); }
-[data-theme="fluent"] .fbadge:has(.dot.down) { color: var(--dot-down); }
-[data-theme="fluent"] .fbadge:has(.dot.warn) { color: var(--dot-warn); }
+.fbadge .dot { position: static; width: 12px; height: 12px; }
+.fbadge.brand { color: var(--accent); background: #eaf1fb; padding: 2px 8px; white-space: nowrap; }
+.fbadge.brand .dot { background: var(--accent); box-shadow: none; }
+.fbadge:has(.dot.up) { color: var(--dot-up); }
+.fbadge:has(.dot.down) { color: var(--dot-down); }
+.fbadge:has(.dot.warn) { color: var(--dot-warn); }
 
 /* —— fluent 状态卡：标题左上 + 徽章右上 + 详情沉底（原型 364×132）—— */
-[data-theme="fluent"] .cards > .card { height: 132px; }
-[data-theme="fluent"] .cards > .card > .state { display: none; }
-[data-theme="fluent"] .cards > .card > .detail {
-  position: absolute; left: 20px; bottom: 20px; margin: 0; font-size: 12px; color: var(--fg-2);
+.cards > .card { height: 132px; }
+.cards > .card > .state { display: none; }
+.cards > .card > .detail { position: absolute; left: 20px; bottom: 20px; margin: 0; font-size: 12px; color: var(--fg-2);
 }
-[data-theme="fluent"] .name { font-size: 14px; font-weight: 400; color: var(--fg); }
+.name { font-size: 14px; font-weight: 400; color: var(--fg); }
 
 /* —— fluent 侧栏导航（原型 NavNode 40 高浅灰行 + 左侧品牌蓝横条选中指示）—— */
 .nav-item { position: relative; }
-[data-theme="fluent"] .sidebar { padding: 10px 8px 16px; }
-[data-theme="fluent"] .app-item {
-  display: flex; align-items: center; gap: 12px;
+.sidebar { padding: 10px 8px 16px; }
+.app-item { display: flex; align-items: center; gap: 12px;
   height: 48px; padding: 0 10px 0 12px; margin-bottom: 18px;
   background: #f0f0f0; border-radius: 4px;
   font-size: 16px; color: var(--fg);
 }
 .app-item-icon { width: 26px; height: 26px; flex: none; color: var(--fg); }
-[data-theme="fluent"] .group { font-size: 12px; margin: 18px 24px 4px; }
-[data-theme="fluent"] .nav-item {
-  display: flex; align-items: center; gap: 16px;
+.group { font-size: 12px; margin: 18px 24px 4px; }
+.nav-item { display: flex; align-items: center; gap: 16px;
   height: 40px; margin: 0 10px; padding: 0 10px;
   font-size: 14px; color: #424242;
 }
-[data-theme="fluent"] .nav-item.active { color: #242424; }
+.nav-item.active { color: #242424; }
 .nav-icon { width: 20px; height: 20px; flex: none; color: #616161; }
-[data-theme="fluent"] .nav-item.active .nav-icon { color: var(--accent); }
-[data-theme="fluent"] .nav-item.active::before {
-  content: ''; position: absolute; left: -6px; top: 50%;
+.nav-item.active .nav-icon { color: var(--accent); }
+.nav-item.active::before { content: ''; position: absolute; left: -6px; top: 50%;
   transform: translateY(-50%);
   width: 4px; height: 16px; border-radius: 2px; background: var(--accent);
 }
-[data-theme="fluent"] .src-item {
-  display: flex; align-items: center; height: 32px;
+.src-item { display: flex; align-items: center; height: 32px;
   padding: 0 10px 0 46px; font-size: 14px; color: #424242;
 }
-[data-theme="fluent"] .sidebar-foot { padding: 0 24px 12px; font-size: 11px; }
+.sidebar-foot { padding: 0 24px 12px; font-size: 11px; }
 
 /* —— fluent 工具栏/标题排版（28px 常规字重大标题）—— */
 .toolbar-right { display: flex; align-items: center; gap: 12px; flex: none; }
-[data-theme="fluent"] .h1 { font-size: var(--h1-size); font-weight: var(--h1-weight); }
-[data-theme="fluent"] .sub { font-size: 13px; }
+.h1 { font-size: var(--h1-size); font-weight: var(--h1-weight); }
+.sub { font-size: 13px; }
 
 /* —— fluent 空态 / 命令 chip / 错误条 —— */
-[data-theme="fluent"] .empty-art { display: none; }
-[data-theme="fluent"] .empty { display: block; padding: 40px 0 0 80px; }
-[data-theme="fluent"] .empty .state { font-size: 14px; font-weight: 400; }
-[data-theme="fluent"] .cli {
-  background: #f5f5f5; border-radius: 6px; height: 36px;
+.empty-art { display: none; }
+.empty { display: block; padding: 40px 0 0 80px; }
+.empty .state { font-size: 14px; font-weight: 400; }
+.cli { background: #f5f5f5; border-radius: 6px; height: 36px;
   display: inline-flex; align-items: center; padding: 0 14px;
   font-size: 12px; color: var(--fg); margin-top: 14px;
 }
-[data-theme="fluent"] .error-banner { padding: 8px 12px; border-radius: 4px; }
+.error-banner { padding: 8px 12px; border-radius: 4px; }
 
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; }
@@ -712,27 +581,6 @@ body {
 }
 
 /* ===== 风格切换（分段控件，apple/macOS 分段与 Fluent 圆角4两种质感） ===== */
-.theme-toggle {
-  flex: none;
-  display: flex;
-  background: var(--seg-track);
-  border-radius: calc(var(--seg-btn-radius) + 2px);
-  padding: 2px;
-}
-.seg-btn {
-  border: 0; background: transparent; cursor: pointer; font: inherit;
-  font-size: 12px; line-height: 1;
-  color: var(--fg-2);
-  padding: 5px 12px;
-  border-radius: var(--seg-btn-radius);
-}
-.seg-btn:hover { color: var(--fg); }
-.seg-btn.on {
-  background: var(--seg-active-bg);
-  color: var(--fg);
-  font-weight: 600;
-  box-shadow: var(--seg-active-shadow);
-}
 
 .body { flex: 1; display: flex; min-height: 0; }
 
@@ -776,6 +624,9 @@ body {
   padding: 7px 18px; border-radius: var(--btn-radius); cursor: pointer; flex: none;
 }
 .btn:hover { background: var(--btn-hover-bg); }
+.btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn-primary:hover { background: #0353e9; border-color: #0353e9; }
+.btn-primary:disabled { background: var(--accent); opacity: .5; color: #fff; }
 .btn:disabled { color: var(--fg-3); cursor: default; }
 
 /* ===== 卡片（apple 毛玻璃 / fluent 实色描边卡） ===== */
@@ -893,187 +744,165 @@ body {
 .ph-course p { margin: 0 0 14px; font-size: 12px; color: var(--fg-2); }
 
 /* —— 第二轮真稿对比修正（导航行底色/卡片间距/骨架灰块/错误降级卡/数据页单列）—— */
-[data-theme="fluent"] .nav-item { background: #f0f0f0; }
-[data-theme="fluent"] .src-item { background: #f0f0f0; margin: 0 10px 4px; border-radius: 4px; }
-[data-theme="fluent"] .src-item.active { background: #eaeaea; }
-[data-theme="fluent"] .sidebar .group:nth-of-type(2) {
-  border-top: 1px solid #e5e5e5; padding-top: 14px; margin: 14px 14px 4px; width: 232px;
+.nav-item { background: #f0f0f0; }
+.src-item { background: #f0f0f0; margin: 0 10px 4px; border-radius: 4px; }
+.src-item.active { background: #eaeaea; }
+.sidebar .group:nth-of-type(2) { border-top: 1px solid #e5e5e5; padding-top: 14px; margin: 14px 14px 4px; width: 232px;
 }
-[data-theme="fluent"] .cards { gap: 12px; }
-[data-theme="fluent"] .card.crawl .detail { font-size: 13px; color: var(--fg-2); }
-[data-theme="fluent"] .card.crawl > .state { display: none; }
-[data-theme="fluent"] .skeleton-card { background: #f0f0f0; border-color: transparent; box-shadow: none; }
-[data-theme="fluent"] .cards > .card.skeleton-card { height: 132px; }
-[data-theme="fluent"] .skeleton-card .sk,
-[data-theme="fluent"] .skeleton-card .sk-title,
-[data-theme="fluent"] .skeleton-card .sk-main { background: #fafafa; }
-[data-theme="fluent"] .warn-icon path,
-[data-theme="fluent"] .warn-icon line { stroke: var(--dot-down); }
-[data-theme="fluent"] .warn-icon circle { fill: var(--dot-down); }
-[data-theme="fluent"] .card.crawl.down { background: #fafafa; box-shadow: none; height: 220px; }
-[data-theme="fluent"] .card.crawl.down .fbadge { top: 78px; left: 50%; right: auto; transform: translateX(-50%); }
-[data-theme="fluent"] .card.crawl.down .detail { display: none; }
-[data-theme="fluent"] .ph-search { width: 480px; }
-[data-theme="fluent"] .ph-grid { grid-template-columns: 1fr; }
-[data-theme="fluent"] .ph-chart { min-height: 160px; background: #fafafa; border-color: transparent; box-shadow: none; }
-[data-theme="fluent"] .ph-candle { display: none; }
-[data-theme="fluent"] .ph-table .ph-head {
-  background: #f5f5f5; border-radius: 4px; height: 44px; display: flex; align-items: center; padding: 0 12px;
+.cards { gap: 12px; }
+.card.crawl .detail { font-size: 13px; color: var(--fg-2); }
+.card.crawl > .state { display: none; }
+.skeleton-card { background: #f0f0f0; border-color: transparent; box-shadow: none; }
+.cards > .card.skeleton-card { height: 132px; }
+.skeleton-card .sk,
+ .skeleton-card .sk-title,
+ .skeleton-card .sk-main { background: #fafafa; }
+.warn-icon path,
+ .warn-icon line { stroke: var(--dot-down); }
+.warn-icon circle { fill: var(--dot-down); }
+.card.crawl.down { background: #fafafa; box-shadow: none; height: 220px; }
+.card.crawl.down .fbadge { top: 78px; left: 50%; right: auto; transform: translateX(-50%); }
+.card.crawl.down .detail { display: none; }
+.ph-search { width: 480px; }
+.ph-grid { grid-template-columns: 1fr; }
+.ph-chart { min-height: 160px; background: #fafafa; border-color: transparent; box-shadow: none; }
+.ph-candle { display: none; }
+.ph-table .ph-head { background: #f5f5f5; border-radius: 4px; height: 44px; display: flex; align-items: center; padding: 0 12px;
 }
 
 /* ===== IBM Carbon 结构规则（按原型逐项：深色头/侧栏/方角卡/Tag/内联通知/数据表） ===== */
 /* —— 深色 UI Shell 头：菜单图标 + 品牌 + 副题浅灰 + 右侧设置图标 —— */
-[data-theme="carbon"] .titlebar { gap: 16px; }
-[data-theme="carbon"] .title { font-size: 14px; font-weight: 600; }
-[data-theme="carbon"] .title-sub { font-size: 12px; font-weight: 400; color: #a8a8a8; }
-[data-theme="carbon"] .shell-menu,
-[data-theme="carbon"] .shell-set { display: block; width: 16px; height: 16px; color: #f4f4f4; }
-[data-theme="carbon"] .shell-set { margin-left: 8px; }
-[data-theme="carbon"] .seg-btn { color: #c6c6c6; }
-[data-theme="carbon"] .seg-btn.on { color: #161616; }
+.titlebar { gap: 16px; }
+.title { font-size: 14px; font-weight: 600; }
+.title-sub { font-size: 12px; font-weight: 400; color: #a8a8a8; }
+.shell-menu, .shell-set { display: block; width: 16px; height: 16px; color: #f4f4f4; }
+.shell-set { margin-left: 8px; }
+.seg-btn { color: #c6c6c6; }
+.seg-btn.on { color: #161616; }
 
 /* —— 侧栏 256：48px 导航行、选中灰底 + 右缘 chevron、分组分隔线、脚注 —— */
-[data-theme="carbon"] .sidebar { padding: 8px 0 0; }
-[data-theme="carbon"] .group { font-size: 12px; color: #525252; margin: 16px 16px 4px; }
-[data-theme="carbon"] .sidebar .group:nth-of-type(2) {
-  border-top: 1px solid #e0e0e0; padding-top: 16px; margin-top: 16px;
+.sidebar { padding: 8px 0 0; }
+.group { font-size: 12px; color: #525252; margin: 16px 16px 4px; }
+.sidebar .group:nth-of-type(2) { border-top: 1px solid #e0e0e0; padding-top: 16px; margin-top: 16px;
 }
-[data-theme="carbon"] .nav-item {
-  display: flex; align-items: center;
+.nav-item { display: flex; align-items: center;
   height: 48px; margin: 0; padding: 0 16px;
   font-size: 14px; font-weight: 400; color: #161616;
 }
-[data-theme="carbon"] .nav-item.active { font-weight: 600; }
-[data-theme="carbon"] .nav-item.active::after {
-  content: ''; margin-left: auto; width: 7px; height: 7px;
+.nav-item.active { font-weight: 600; }
+.nav-item.active::after { content: ''; margin-left: auto; width: 7px; height: 7px;
   border-top: 2px solid #525252; border-right: 2px solid #525252;
   transform: rotate(45deg);
 }
-[data-theme="carbon"] .src-item {
-  display: flex; align-items: center;
+.src-item { display: flex; align-items: center;
   height: 32px; padding: 0 16px 0 36px; font-size: 14px; color: #525252;
 }
-[data-theme="carbon"] .src-item:hover { background: #f4f4f4; }
-[data-theme="carbon"] .src-item.active { background: #e0e0e0; color: #161616; }
-[data-theme="carbon"] .src-item.active::after {
-  content: ''; margin-left: auto; width: 7px; height: 7px;
+.src-item:hover { background: #f4f4f4; }
+.src-item.active { background: #e0e0e0; color: #161616; }
+.src-item.active::after { content: ''; margin-left: auto; width: 7px; height: 7px;
   border-top: 2px solid #525252; border-right: 2px solid #525252;
   transform: rotate(45deg);
 }
-[data-theme="carbon"] .nav-item.sub-active { background: #e0e0e0; }
-[data-theme="carbon"] .sidebar-foot { padding: 0 16px 12px; font-size: 12px; color: #525252; }
+.nav-item.sub-active { background: #e0e0e0; }
+.sidebar-foot { padding: 0 16px 12px; font-size: 12px; color: #525252; }
 
 /* —— 徽章：状态卡为 点+12px 文字；爬虫卡按原型为实心 Tag（蓝/黄/红） —— */
-[data-theme="carbon"] .fb-txt { display: inline; }
-[data-theme="carbon"] .fbadge {
-  position: absolute; top: 16px; right: 20px;
+.fb-txt { display: inline; }
+.fbadge { position: absolute; top: 16px; right: 20px;
   display: flex; align-items: center; gap: 8px;
   font-size: 12px; line-height: 1; color: #525252;
 }
-[data-theme="carbon"] .fbadge .dot { position: static; width: 8px; height: 8px; }
-[data-theme="carbon"] .fbadge.brand { background: #0f62fe; color: #fff; height: 20px; padding: 0 12px; }
-[data-theme="carbon"] .fbadge.warn { background: #f1c21b; color: #161616; height: 20px; padding: 0 12px; }
-[data-theme="carbon"] .fbadge:has(.dot.down) { background: #da1e28; color: #fff; height: 20px; padding: 0 12px; }
-[data-theme="carbon"] .fbadge.brand .dot,
-[data-theme="carbon"] .fbadge.warn .dot,
-[data-theme="carbon"] .fbadge:has(.dot.down) .dot { display: none; }
+.fbadge .dot { position: static; width: 8px; height: 8px; }
 
+.fbadge.brand .dot,
+ .fbadge.warn .dot,
+ 
 /* —— 状态卡 140：标题 14/600、大字状态、详情沉底 12px —— */
-[data-theme="carbon"] .cards { gap: 32px; }
-[data-theme="carbon"] .cards > .card { height: 140px; padding: 16px 20px; }
-[data-theme="carbon"] .cards > .card > .state { font-size: 20px; font-weight: 600; margin: 14px 0 0; }
-[data-theme="carbon"] .cards > .card > .detail {
-  position: absolute; left: 20px; right: 20px; bottom: 16px; margin: 0;
+.cards { gap: 32px; }
+.cards > .card { height: 140px; padding: 16px 20px; }
+.cards > .card > .state { font-size: 20px; font-weight: 600; margin: 14px 0 0; }
+.cards > .card > .detail { position: absolute; left: 20px; right: 20px; bottom: 16px; margin: 0;
   font-size: 12px; color: #525252;
 }
-[data-theme="carbon"] .name { font-size: 14px; font-weight: 600; color: #161616; }
+.name { font-size: 14px; font-weight: 600; color: #161616; }
 
 /* —— 爬虫卡：标题 16/600、8px 方角进度条、细节 12px —— */
-[data-theme="carbon"] .card.crawl { margin-top: 32px; padding: 20px; }
-[data-theme="carbon"] .card.crawl > .name { font-size: 16px; }
-[data-theme="carbon"] .card.crawl > .state { display: none; }
-[data-theme="carbon"] .card.crawl .bar, [data-theme="carbon"] .card.crawl .bar-fill { border-radius: 0; }
-[data-theme="carbon"] .card.crawl .detail { font-size: 12px; color: #525252; margin-top: 6px; }
-[data-theme="carbon"] .card.crawl .detail.src-line { color: #161616; }
+.card.crawl { margin-top: 32px; padding: 20px; }
+.card.crawl > .name { font-size: 16px; }
+.card.crawl > .state { display: none; }
+.card.crawl .bar,  .card.crawl .bar-fill { border-radius: 0; }
+.card.crawl .detail { font-size: 12px; color: #525252; margin-top: 6px; }
+.card.crawl .detail.src-line { color: #161616; }
 
 /* —— 空态：无插画 + 警示黄 Tag（fbadge.warn）+ 命令 chip 灰底等宽 —— */
-[data-theme="carbon"] .empty-art { display: none; }
-[data-theme="carbon"] .empty { display: block; padding: 16px 0 0; }
-[data-theme="carbon"] .empty .state { font-size: 16px; font-weight: 600; }
-[data-theme="carbon"] .empty .detail { font-size: 12px; }
-[data-theme="carbon"] .cli {
-  background: #e0e0e0; border-radius: 0; height: 40px;
+.empty-art { display: none; }
+.empty { display: block; padding: 16px 0 0; }
+.empty .state { font-size: 16px; font-weight: 600; }
+.empty .detail { font-size: 12px; }
+.cli { background: #e0e0e0; border-radius: 0; height: 40px;
   display: inline-flex; align-items: center; padding: 0 16px;
   font-size: 12px; color: #161616; margin-top: 16px;
 }
 .cli-ps { color: #525252; }
 
 /* —— 错误降级卡：红 Tag 居中 + 说明文字居中 —— */
-[data-theme="carbon"] .card.crawl.down { min-height: 200px; }
-[data-theme="carbon"] .card.crawl.down .fbadge { top: 64px; left: 50%; right: auto; transform: translateX(-50%); }
-[data-theme="carbon"] .card.crawl.down .state { display: none; }
-[data-theme="carbon"] .card.crawl.down .detail {
-  position: absolute; left: 0; right: 0; bottom: 48px;
+.card.crawl.down { min-height: 200px; }
+.card.crawl.down .fbadge { top: 64px; left: 50%; right: auto; transform: translateX(-50%); }
+.card.crawl.down .state { display: none; }
+.card.crawl.down .detail { position: absolute; left: 0; right: 0; bottom: 48px;
   text-align: center; font-size: 12px; color: #525252;
 }
 
 /* —— 内联错误通知：#FFF1F1 + 实心红图标 + 加粗标题同行正文，14px 方角 —— */
-[data-theme="carbon"] .error-banner {
-  border-radius: 0; border-color: transparent; padding: 14px 16px;
+.error-banner { border-radius: 0; border-color: transparent; padding: 14px 16px;
   font-size: 14px; margin-bottom: 32px;
 }
-[data-theme="carbon"] .error-banner .warn-icon:first-of-type { display: none; }
-[data-theme="carbon"] .error-banner .err-filled { display: block; }
-[data-theme="carbon"] .eb-title { font-weight: 600; color: #161616; }
+.error-banner .warn-icon:first-of-type { display: none; }
+.error-banner .err-filled { display: block; }
+.eb-title { font-weight: 600; color: #161616; }
 .err-filled { display: none; flex: none; width: 16px; height: 16px; }
 .eb-title { font-weight: inherit; }
 
 /* —— 主按钮 96×40 蓝底白字方角；占位按钮次级样式 —— */
-[data-theme="carbon"] .btn {
-  min-width: 96px; height: 40px; padding: 0 16px;
+.btn { min-width: 96px; height: 40px; padding: 0 16px;
   font-size: 14px; box-shadow: none;
 }
-[data-theme="carbon"] .btn:disabled { background: #c6c6c6; border-color: #c6c6c6; color: #f4f4f4; }
-[data-theme="carbon"] .ph-btn {
-  background: #fff; border-color: #161616; color: #161616;
+.btn:disabled { background: #c6c6c6; border-color: #c6c6c6; color: #f4f4f4; }
+.ph-btn { background: #fff; border-color: #161616; color: #161616;
   min-width: 96px; height: 40px; padding: 0 16px; font-size: 14px;
 }
 
 /* —— 占位页：蓝色 Tag、40px 搜索框、DataTable 表头/48px 行、虚线 K 线占位 —— */
-[data-theme="carbon"] .sub { font-size: 12px; }
-[data-theme="carbon"] .note { font-size: 12px; color: #525252; }
-[data-theme="carbon"] .ph-tag {
-  border-radius: 0; height: 20px; display: inline-flex; align-items: center;
+.sub { font-size: 12px; }
+.note { font-size: 12px; color: #525252; }
+.ph-tag { border-radius: 0; height: 20px; display: inline-flex; align-items: center;
   padding: 0 12px; font-size: 12px; line-height: 1;
 }
-[data-theme="carbon"] .ph-tag.small { background: #e0e0e0; color: #161616; padding: 0 8px; }
-[data-theme="carbon"] .ph-search {
-  height: 40px; border-radius: 0; border-color: #8d8d8d;
+.ph-tag.small { background: #e0e0e0; color: #161616; padding: 0 8px; }
+.ph-search { height: 40px; border-radius: 0; border-color: #8d8d8d;
   padding: 0 12px; font-size: 14px; background: #fff;
 }
-[data-theme="carbon"] .ph-grid { grid-template-columns: 1fr; gap: 32px; margin-top: 32px; }
-[data-theme="carbon"] .ph-table, [data-theme="carbon"] .ph-chart,
-[data-theme="carbon"] .ph-form, [data-theme="carbon"] .ph-result,
-[data-theme="carbon"] .ph-course { border-radius: 0; box-shadow: none; }
-[data-theme="carbon"] .ph-table { padding: 0; overflow: hidden; }
-[data-theme="carbon"] .ph-table .ph-head {
-  height: 48px; display: flex; align-items: center; padding: 0 16px;
+.ph-grid { grid-template-columns: 1fr; gap: 32px; margin-top: 32px; }
+.ph-table, .ph-chart,
+ .ph-form,  .ph-result,
+ .ph-course { border-radius: 0; box-shadow: none; }
+.ph-table { padding: 0; overflow: hidden; }
+.ph-table .ph-head { height: 48px; display: flex; align-items: center; padding: 0 16px;
   font-size: 12px; font-weight: 600; color: #525252;
   border-bottom: 1px solid #e0e0e0; margin-bottom: 0;
 }
-[data-theme="carbon"] .ph-row {
-  height: 48px; align-items: center; margin: 0; padding: 0 16px;
+.ph-row { height: 48px; align-items: center; margin: 0; padding: 0 16px;
   border-bottom: 1px solid #e0e0e0;
 }
-[data-theme="carbon"] .ph-row:last-child { border-bottom: 0; }
-[data-theme="carbon"] .ph-row .sk { height: 8px; }
-[data-theme="carbon"] .ph-chart { min-height: 200px; border-style: dashed; border-color: #a8a8a8; }
-[data-theme="carbon"] .ph-candle { display: none; }
-[data-theme="carbon"] .ph-chart-label { color: #525252; font-size: 12px; }
-[data-theme="carbon"] .ph-input, [data-theme="carbon"] .ph-curve { border-radius: 0; }
+.ph-row:last-child { border-bottom: 0; }
+.ph-row .sk { height: 8px; }
+.ph-chart { min-height: 200px; border-style: dashed; border-color: #a8a8a8; }
+.ph-candle { display: none; }
+.ph-chart-label { color: #525252; font-size: 12px; }
+.ph-input, .ph-curve { border-radius: 0; }
 
 /* —— 骨架卡：白卡 + #E5E5E5 灰条 —— */
-[data-theme="carbon"] .cards > .card.skeleton-card { height: 140px; }
+.cards > .card.skeleton-card { height: 140px; }
 
 /* ===== 数据浏览真数据表 ===== */
 .browse-input {
@@ -1113,10 +942,10 @@ body {
   display: flex; align-items: center; justify-content: center; gap: 18px;
   margin-top: 16px; font-size: 12px; color: var(--fg-2);
 }
-[data-theme="fluent"] .browse-head { background: #f5f5f5; }
-[data-theme="carbon"] .browse-head { height: 48px; padding: 0 16px; background: #f4f4f4; color: #525252; }
-[data-theme="fluent"] .browse-row.up { color: #c50f1f; }
-[data-theme="fluent"] .browse-row.down { color: #0f7b0f; }
+.browse-head { background: #f5f5f5; }
+.browse-head { height: 48px; padding: 0 16px; background: #f4f4f4; color: #525252; }
+.browse-row.up { color: #c50f1f; }
+.browse-row.down { color: #0f7b0f; }
 
 /* ===== 响应式兜底 ===== */
 @media (max-width: 860px) {

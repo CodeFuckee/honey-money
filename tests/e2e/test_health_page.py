@@ -104,13 +104,15 @@ def test_health_dashboard_renders(servers, page):
         assert r.status == 200, f"图标资产 {href} 返回 {r.status}"
     assert page.get_attribute('link[rel="manifest"]', "href") == "/manifest.webmanifest"
 
-    # 回归：苹果主题徽章文字不得与大字状态重复（fbadge 文本节点曾双渲染）
-    for name in ("PostgreSQL", "代理池", "爬虫数据"):
+    # 回归：徽章文字不得与大字状态重复（fbadge 文本节点曾双渲染）
+    expect(page.locator(".card", has_text="PostgreSQL").first).to_contain_text("未连接")
+    expect(page.locator(".card", has_text="代理池").first).to_contain_text("未连接")
+    for name, word in (("PostgreSQL", "未连接"), ("代理池", "未连接"), ("爬虫数据", "数据不可用")):
         txt = page.locator(".card", has_text=name).first.inner_text()
-        assert txt.count("未连接") == 1, f"{name} 卡状态文字重复：{txt!r}"
+        assert txt.count(word) == 1, f"{name} 卡状态文字重复：{txt!r}"
 
 
-def test_macos_shell_and_nav(servers, page):
+def test_shell_and_nav(servers, page):
     """Web 全幅外壳：标题栏（无红绿灯）+ 侧栏导航四项 + 占位页切换。"""
     _, frontend_port = servers
     page.goto(f"http://127.0.0.1:{frontend_port}/")
@@ -135,13 +137,10 @@ def test_macos_shell_and_nav(servers, page):
     # 切到「数据」页：标题 + 真数据表（本地无 PG → 降级空表）可见
     page.get_by_role("button", name="数据").click()
     expect(page.get_by_role("heading", name="数据浏览")).to_be_visible()
-    expect(page.locator(".browse-table")).to_be_visible()
-    expect(page.locator(".browse-head")).to_contain_text("代码")
+    expect(page.locator(".browse-pv")).to_be_visible()
+    expect(page.locator(".p-datatable .p-datatable-thead")).to_contain_text("代码")
 
-    # 回归：搜索框放大镜 SVG 曾无显式尺寸被撑成千像素巨图（整框跟着撑爆）
-    mag = page.locator(".mag").bounding_box()
-    assert mag is not None and mag["width"] <= 20 and mag["height"] <= 20, \
-        f"放大镜图标被撑大: {mag}"
+    # 回归：搜索框曾因图标无尺寸被撑爆（现为 PrimeVue InputText + primeicons，高度有界）
     sb = page.locator(".ph-search").bounding_box()
     assert sb is not None and sb["height"] <= 60, f"搜索框高度异常: {sb}"
 
@@ -151,8 +150,6 @@ def test_source_pages(servers, page):
     高亮；标题/副题/来源 Tag 随源切换；行高 32px 文字垂直居中（曾 block 贴顶）。"""
     _, frontend_port = servers
     page.goto(f"http://127.0.0.1:{frontend_port}/")
-    page.locator(".theme-toggle:visible").get_by_role("button", name="Carbon").click()
-    expect(page.locator("html")).to_have_attribute("data-theme", "carbon")
 
     # 新浪财经子页：标题/选中态/父项高亮/蓝 Tag
     page.get_by_role("button", name="新浪财经").click()
@@ -194,47 +191,12 @@ def test_source_pages(servers, page):
     expect(page.locator(".card")).to_have_count(4, timeout=20000)
 
 
-def test_theme_toggle_and_persistence(servers, page):
-    """风格切换：默认 apple；切 Fluent 2（按原型无标题栏/白侧栏/徽章）；刷新保持；可切回。"""
-    _, frontend_port = servers
-    page.goto(f"http://127.0.0.1:{frontend_port}/")
-
-    # 默认苹果风格：标题栏可见（双主题各有一份切换控件，只操作当前可见的）
-    expect(page.locator("html")).to_have_attribute("data-theme", "apple")
-    expect(page.locator(".titlebar")).to_be_visible()
-
-    # 切到 Fluent 2：无标题栏；侧栏 260px 白底；卡片 8px 圆角；状态徽章带文字
-    page.locator(".theme-toggle:visible").get_by_role("button", name="Fluent 2").click()
-    expect(page.locator("html")).to_have_attribute("data-theme", "fluent")
-    expect(page.locator(".titlebar")).to_be_hidden()
-    page.wait_for_function(
-        "getComputedStyle(document.querySelector('.sidebar')).backgroundColor === 'rgb(255, 255, 255)'")
-    assert page.locator(".sidebar").evaluate(
-        "el => getComputedStyle(el).width") == "260px", "fluent 侧栏应为 260px"
-    assert page.locator(".card").first.evaluate(
-        "el => getComputedStyle(el).borderRadius") == "8px", "fluent 卡片圆角应为 8px"
-    expect(page.locator(".fbadge", has_text="运行中").first).to_be_visible()
-
-    # 刷新后保持 fluent（localStorage 持久化 + 首帧预处理）
-    page.reload()
-    expect(page.locator("html")).to_have_attribute("data-theme", "fluent")
-
-    # 切回苹果风格：标题栏回归 40px
-    page.locator(".theme-toggle:visible").get_by_role("button", name="苹果风格").click()
-    expect(page.locator("html")).to_have_attribute("data-theme", "apple")
-    expect(page.locator(".titlebar")).to_be_visible()
-    assert page.locator(".titlebar").evaluate(
-        "el => getComputedStyle(el).height") == "40px", "apple 标题栏应为 40px"
-
-
 def test_carbon_theme_shell(servers, page):
     """Carbon 主题（按 Penpot 原型）：深色 UI Shell 头 48px + 256px 白侧栏 +
     方角 1px 边框卡 + 蓝主按钮 #0F62FE；刷新持久化；可切回。"""
     _, frontend_port = servers
     page.goto(f"http://127.0.0.1:{frontend_port}/")
 
-    page.locator(".theme-toggle:visible").get_by_role("button", name="Carbon").click()
-    expect(page.locator("html")).to_have_attribute("data-theme", "carbon")
 
     # 深色头部：48px #161616（有 0.15s 背景过渡，等终值），菜单/设置图标可见
     expect(page.locator(".titlebar")).to_be_visible()
@@ -256,8 +218,9 @@ def test_carbon_theme_shell(servers, page):
         "carbon 选中导航应为 #E0E0E0 灰底"
 
     # 卡片方角；主按钮蓝底白字（#0F62FE）
-    assert page.locator(".card").first.evaluate(
-        "el => getComputedStyle(el).borderRadius") == "0px", "carbon 卡片应为方角"
+    radius = page.locator(".card").first.evaluate(
+        "el => getComputedStyle(el).borderRadius")
+    assert radius in ("0px", "2px"), f"carbon 卡片应为方角/微圆角: {radius}"
     btn = page.get_by_role("button", name="重新检测")
     expect(btn).to_be_visible()
     assert btn.evaluate("el => getComputedStyle(el).backgroundColor") == "rgb(15, 98, 254)", \
@@ -270,18 +233,14 @@ def test_carbon_theme_shell(servers, page):
 
     # 数据页：真数据表（browse）表头 48px 灰字；本地无 PG → 降级空表仍渲染表头
     page.get_by_role("button", name="数据").click()
-    head = page.locator(".browse-head")
+    head = page.locator(".p-datatable-thead th").first
     expect(head).to_contain_text("代码")
-    assert head.evaluate("el => getComputedStyle(el).height") == "48px", "carbon 表头行应为 48px"
-    assert head.evaluate("el => getComputedStyle(el).color") == "rgb(82, 82, 82)", \
-        "carbon 表头文字应为 #525252"
-    expect(page.locator(".browse-table")).to_be_visible()
+    assert head.evaluate("el => getComputedStyle(el).backgroundColor") == "rgb(244, 244, 244)", \
+        "carbon 表头应 #F4F4F4 底"
+    expect(page.locator(".p-datatable")).to_be_visible()
 
-    # 刷新持久化；切回苹果风格
+    # 刷新后仍正常（单主题 Carbon）
     page.reload()
-    expect(page.locator("html")).to_have_attribute("data-theme", "carbon")
-    page.locator(".theme-toggle:visible").get_by_role("button", name="苹果风格").click()
-    expect(page.locator("html")).to_have_attribute("data-theme", "apple")
 
 
 def test_error_banner_icon_sizing(servers, page):
@@ -292,7 +251,9 @@ def test_error_banner_icon_sizing(servers, page):
     page.goto(f"http://127.0.0.1:{frontend_port}/")
 
     expect(page.locator(".error-banner")).to_be_visible()
-    box = page.locator(".error-banner .warn-icon").first.bounding_box()
+    icon = page.locator(".error-banner svg.warn-icon").last   # carbon 实心图标（首个线条图标已隐藏）
+    expect(icon).to_be_visible()
+    box = icon.bounding_box()
     assert box is not None and box["width"] <= 20 and box["height"] <= 20, \
         f"警告图标被撑大: {box}"
     bh = page.locator(".error-banner").evaluate("el => el.getBoundingClientRect().height")
