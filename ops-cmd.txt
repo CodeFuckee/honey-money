@@ -1,1 +1,73 @@
-docker rm -f hm-crawler 2>&1 ; docker exec honey-money-backend-1 sh -c "for p in \$(ls /proc | grep -E \"^[0-9]+\$\" | grep -v ^1\$); do grep -q app.crawler /proc/\$p/cmdline 2>/dev/null && kill -9 \$p && echo ZKILL \$p; done; true" ; docker exec honey-money-backend-1 python -c "import psycopg,os; c=psycopg.connect(os.environ[\"DATABASE_URL\"]); c.execute(\"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND xact_start < now() - interval \x273 minutes\x27\"); print(\"locks-cleared\")" ; docker run -d --name hm-crawler --network honey-money_default --add-host host.docker.internal:host-gateway -e DATABASE_URL="postgresql://honey_money:honey_money@host.docker.internal:5433/honey_money" -e PYTHONUNBUFFERED=1 honey-money-backend python -m app.crawler --source sina 2>&1 ; sleep 420 ; echo ===LOG=== ; docker logs hm-crawler --tail 8 2>&1 ; echo ===DB=== ; docker exec honey-money-backend-1 python -c "import psycopg,os; c=psycopg.connect(os.environ[\"DATABASE_URL\"]); print(\"BARS:\", c.execute(\"SELECT count(*) FROM daily_bar\").fetchone()[0]); print(\"COVERED:\", c.execute(\"SELECT count(DISTINCT code) FROM daily_bar\").fetchone()[0])"
+docker rm -f hm-diag 2>/dev/null ; docker run -d --name hm-diag --network honey-money_default --add-host host.docker.internal:host-gateway -e DATABASE_URL="postgresql://honey_money:honey_money@host.docker.internal:5433/honey_money" -e PYTHONUNBUFFERED=1 honey-money-backend sh -c 'python - <<PYEOF
+import asyncio, sys, time, httpx
+sys.path.insert(0, "/srv")
+from app import config
+from app.crawler.rate import RateLimiter
+from app.crawler.sina import SinaClient
+from app.crawler.runner import CrawlRunner
+from app.crawler.store import Store
+import psycopg
+
+# 逐股心跳版：包装 SinaClient.fetch_daily_bars，每只必打一行
+class HeartbeatClient:
+    def __init__(self, inner):
+        self._inner = inner
+        self._n = 0
+    async def fetch_stock_list(self):
+        return await self._inner.fetch_stock_list()
+    async def fetch_daily_bars(self, market, code, **kw):
+        self._n += 1
+        t0 = time.monotonic()
+        print(f"[hb] #{self._n} {code} 开始", flush=True)
+        try:
+            bars = await asyncio.wait_for(
+                self._inner.fetch_daily_bars(market, code, **kw), timeout=90)
+            print(f"[hb] #{self._n} {code} OK rows={len(bars.rows)} {time.monotonic()-t0:.1f}s", flush=True)
+            return bars
+        except asyncio.TimeoutError:
+            print(f"[hb] #{self._n} {code} TIMEOUT-90s <<< 挂起点", flush=True)
+            raise
+        except Exception as e:
+            print(f"[hb] #{self._n} {code} ERR {type(e).__name__}: {str(e)[:60]}", flush=True)
+            raise
+    async def aclose(self):
+        pass
+
+async def heartbeat_every(sec=30):
+    while True:
+        await asyncio.sleep(sec)
+        print(f"[tick] loop-alive {time.strftime('%H:%M:%S')}", flush=True)
+
+async def main():
+    hb_task = asyncio.create_task(heartbeat_every(30))
+    rate = RateLimiter(initial_qps=1.0, max_qps=5.0, jitter=0.3)
+    direct = httpx.AsyncClient(timeout=30.0)
+    client = HeartbeatClient(SinaClient(rate=rate, http=direct))
+    store = Store()
+    try:
+        stocks = await client.fetch_stock_list()
+        print(f"[diag] 清单 {len(stocks)} 只，开始 50 只", flush=True)
+        conn = psycopg.connect(config.DATABASE_URL)
+        store.init_schema(conn)
+        conn.commit()
+        runner = CrawlRunner(client=client, store=store, conn=conn, concurrency=2)
+        def batch_commit(done):
+            conn.commit()
+            print(f"[commit] {done}", flush=True)
+        summary = await asyncio.wait_for(
+            runner.run(stocks[:50], mode="incremental", source="sina",
+                       batch_size=25, on_batch=batch_commit),
+            timeout=1500)
+        conn.commit()
+        print(f"[diag] DONE ok={summary.ok_stocks} fail={summary.failed_stocks} bars={summary.bars_upserted}", flush=True)
+    except asyncio.TimeoutError:
+        print("[diag] RUNNER-TIMEOUT-1500s <<< 整体超时", flush=True)
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        print(f"[diag] FATAL {type(e).__name__}: {e}", flush=True)
+    finally:
+        hb_task.cancel()
+        print("[diag] exit", flush=True)
+
+asyncio.run(main())
+PYEOF' 2>&1 ; sleep 2 ; docker logs hm-diag --tail 5 2>&1
