@@ -230,3 +230,21 @@ class TestSource:
         assert summary.source == "sina"
         assert store.sources == ["sina"] * 3
         assert store.run_source == "sina"
+
+
+class TestBatchCommit:
+    """批级提交钩子：每个 batch_size 边界必须回调（含最后一个边界），
+    库内进度可见/锁及时释放——全 run 单事务的教训修复。"""
+
+    def test_on_batch_called_at_boundaries(self):
+        calls = []
+        runner = make_runner()
+        summary = run(runner.run(STOCKS, batch_size=1, on_batch=calls.append))
+        assert calls == [1, 2, 3], f"批边界回调异常: {calls}"   # STOCKS 3 只
+        assert summary.ok_stocks == 3
+
+    def test_on_batch_none_when_no_batch(self):
+        calls = []
+        runner = make_runner()
+        run(runner.run(STOCKS, batch_size=None, on_batch=calls.append))
+        assert calls == []

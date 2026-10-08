@@ -121,11 +121,18 @@ async def amain(args) -> int:
                 client=client, store=store, conn=conn,
                 concurrency=args.concurrency, progress=progress,
             )
+            summary_total = len(stocks)
+
+            def batch_commit(done: int) -> None:
+                conn.commit()
+                print(f"[commit] 已提交 {done}/{summary_total} 只")
+
             summary = await runner.run(
                 stocks, mode=args.mode, limit=args.limit, source=args.source,
                 batch_size=args.batch_size or None,
                 batch_pause=args.batch_pause,
                 abort_after_consecutive_failures=args.abort_after or None,
+                on_batch=batch_commit,
             )
 
         print(f"[done] source={summary.source} 总数={summary.total_stocks} "

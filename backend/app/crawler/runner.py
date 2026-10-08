@@ -57,9 +57,12 @@ class CrawlRunner:
     async def run(self, stocks: list[dict], *, mode: str = "incremental",
                   limit: int | None = None, source: str = "eastmoney",
                   batch_size: int | None = None, batch_pause: float = 0.0,
-                  abort_after_consecutive_failures: int | None = None) -> CrawlSummary:
+                  abort_after_consecutive_failures: int | None = None,
+                  on_batch=None) -> CrawlSummary:
         """batch_size/batch_pause：每爬 N 只歇 M 秒（防封节奏）；
-        abort_after_consecutive_failures：连续 N 只失败熔停，保存进度退出。"""
+        abort_after_consecutive_failures：连续 N 只失败熔停，保存进度退出。
+        on_batch：每个批次边界回调（__main__ 里传 conn.commit —— 批级提交，
+        之前全run单事务导致：库内进度长期不可见 + 锁持有到结束 + 崩溃全丢）。"""
         if limit is not None:
             stocks = stocks[:limit]
         max_dates = (self._store.max_trade_dates(self._conn, source)
@@ -113,10 +116,12 @@ class CrawlRunner:
                 state["done"] += 1
                 if self._progress:
                     self._progress(state["done"], summary.total_stocks)
-                if (batch_size and state["done"] % batch_size == 0
-                        and state["done"] < summary.total_stocks
-                        and not state["abort"]):
-                    state["pause_until"] = self._clock() + batch_pause
+                if batch_size and state["done"] % batch_size == 0:
+                    if on_batch:
+                        on_batch(state["done"])      # 批级提交：进度可见/锁释放/可断点
+                    if (state["done"] < summary.total_stocks
+                            and not state["abort"]):
+                        state["pause_until"] = self._clock() + batch_pause
 
         workers = [asyncio.create_task(worker()) for _ in range(
             min(self._concurrency, max(1, len(stocks))))]
