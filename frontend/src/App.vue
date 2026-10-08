@@ -6,7 +6,13 @@ const backend = ref({ status: 'checking' })   // 后端进程本身
 const infra = ref(null)                       // PostgreSQL / 代理池
 const crawl = ref(null)                       // 爬虫数据统计
 const loading = ref(false)
-const activeNav = ref('dash')                 // dash | data | backtest | learn
+const activeNav = ref('dash')                 // dash | data | src-sina | src-ef | backtest | learn
+
+// 数据源子页（对应 Carbon 原型 ⑥⑦ 屏）：按来源筛选的数据浏览占位页
+const SRC_ITEMS = [
+  { id: 'src-sina', label: '新浪财经', field: 'sina', tagCls: 'src-sina' },
+  { id: 'src-ef', label: '东方财富', field: 'eastmoney', tagCls: 'src-ef' },
+]
 
 // ===== 界面风格（apple | fluent | carbon），localStorage 持久化，index.html 已做首帧预处理 =====
 const THEMES = ['apple', 'fluent', 'carbon']
@@ -60,6 +66,15 @@ const sources = computed(() => {
   const names = { sina: '新浪', eastmoney: '东财' }
   return Object.entries(bs).map(([k, v]) => ({ name: names[k] || k, count: fmt(v) }))
 })
+const srcPage = computed(() => SRC_ITEMS.find(s => s.id === activeNav.value) || null)
+const srcSubText = computed(() => {
+  const p = srcPage.value
+  if (!p) return ''
+  const n = crawl.value?.by_source?.[p.field]
+  return n != null
+    ? `按来源筛选 · ${p.label}源 K线 ${fmt(n)} 根 · v0.2+ 规划`
+    : `按来源筛选 · 仅显示${p.label}源 K线 · v0.2+ 规划`
+})
 
 onMounted(refresh)
 </script>
@@ -102,7 +117,8 @@ onMounted(refresh)
           <button v-for="n in [
               { id: 'dash', label: '仪表盘' }, { id: 'data', label: '数据' },
               { id: 'backtest', label: '回测' }, { id: 'learn', label: '教学' }]"
-            :key="n.id" class="nav-item" :class="{ active: activeNav === n.id }"
+            :key="n.id" class="nav-item"
+            :class="{ active: activeNav === n.id, 'sub-active': activeNav.startsWith('src-') && n.id === 'data' }"
             @click="activeNav = n.id">
             <svg v-if="n.id === 'dash'" class="nav-icon" viewBox="0 0 20 20" fill="none">
               <rect x="2.5" y="2.5" width="6.5" height="6.5" rx="1.2" stroke="currentColor" stroke-width="1.5"/>
@@ -124,8 +140,8 @@ onMounted(refresh)
               <path d="M10 4.2v11.6" stroke="currentColor" stroke-width="1.5"/>
             </svg>{{ n.label }}</button>
           <div class="group">数据源</div>
-          <div class="src-item">新浪财经</div>
-          <div class="src-item">东方财富</div>
+          <button v-for="s in SRC_ITEMS" :key="s.id" class="src-item"
+            :class="{ active: activeNav === s.id }" @click="activeNav = s.id">{{ s.label }}</button>
           <div class="sidebar-foot">v0.1.0 · 工程骨架</div>
         </aside>
 
@@ -268,15 +284,16 @@ onMounted(refresh)
             <p class="note">数据流：进入页面并发拉取 /healthz · /api/infra · /api/crawl/stats</p>
           </template>
 
-          <!-- ===== 数据浏览（占位） ===== -->
-          <template v-else-if="activeNav === 'data'">
+          <!-- ===== 数据浏览（占位；数据源子页为按来源筛选变体） ===== -->
+          <template v-else-if="activeNav === 'data' || srcPage">
             <div class="toolbar">
               <div>
-                <h2 class="h1">数据浏览</h2>
-                <p class="sub">K线查询与浏览 · v0.2+ 规划</p>
+                <h2 class="h1">{{ srcPage ? `数据浏览 · ${srcPage.label}` : '数据浏览' }}</h2>
+                <p class="sub">{{ srcPage ? srcSubText : 'K线查询与浏览 · v0.2+ 规划' }}</p>
               </div>
               <div class="toolbar-right">
-                <span class="ph-tag">Placeholder · v0.2+</span>
+                <span v-if="srcPage" class="ph-tag" :class="srcPage.tagCls">{{ srcPage.label }}</span>
+                <span v-else class="ph-tag">Placeholder · v0.2+</span>
                 <div class="theme-toggle tb-toggle" role="group" aria-label="界面风格切换">
                   <button v-for="t in THEMES" :key="t" class="seg-btn" :class="{ on: theme === t }"
                     @click="setTheme(t)">{{ THEME_LABELS[t] }}</button>
@@ -689,7 +706,12 @@ body {
   background: var(--nav-active-bg); color: var(--nav-active-fg); font-weight: 600;
   box-shadow: var(--nav-active-bar);
 }
-.src-item { font-size: 13px; color: var(--fg); padding: 5px 10px; }
+.src-item {
+  border: 0; background: transparent; text-align: left; cursor: pointer; font: inherit;
+  font-size: 13px; color: var(--fg); padding: 5px 10px;
+}
+.src-item:hover { background: var(--nav-hover-bg); }
+.src-item.active { font-weight: 600; background: var(--nav-hover-bg); }
 .sidebar-foot { margin-top: auto; font-size: 11px; color: var(--fg-3); padding: 0 10px 4px; }
 
 /* ===== 内容区 ===== */
@@ -770,6 +792,8 @@ body {
   background: var(--ph-tag-bg); color: var(--ph-tag-fg);
 }
 .ph-tag.small { padding: 2px 10px; }
+.ph-tag.src-sina { background: #0f62fe; color: #fff; }
+.ph-tag.src-ef { background: #24a148; color: #fff; }
 .ph-search {
   display: flex; align-items: center; gap: 12px;
   background: var(--card-bg); backdrop-filter: var(--card-blur);
@@ -820,6 +844,7 @@ body {
 /* —— 第二轮真稿对比修正（导航行底色/卡片间距/骨架灰块/错误降级卡/数据页单列）—— */
 [data-theme="fluent"] .nav-item { background: #f0f0f0; }
 [data-theme="fluent"] .src-item { background: #f0f0f0; margin: 0 10px 4px; border-radius: 4px; }
+[data-theme="fluent"] .src-item.active { background: #eaeaea; }
 [data-theme="fluent"] .sidebar .group:nth-of-type(2) {
   border-top: 1px solid #e5e5e5; padding-top: 14px; margin: 14px 14px 4px; width: 232px;
 }
@@ -873,7 +898,18 @@ body {
   border-top: 2px solid #525252; border-right: 2px solid #525252;
   transform: rotate(45deg);
 }
-[data-theme="carbon"] .src-item { height: 40px; padding: 0 16px 0 36px; font-size: 14px; color: #525252; }
+[data-theme="carbon"] .src-item {
+  display: flex; align-items: center;
+  height: 32px; padding: 0 16px 0 36px; font-size: 14px; color: #525252;
+}
+[data-theme="carbon"] .src-item:hover { background: #f4f4f4; }
+[data-theme="carbon"] .src-item.active { background: #e0e0e0; color: #161616; }
+[data-theme="carbon"] .src-item.active::after {
+  content: ''; margin-left: auto; width: 7px; height: 7px;
+  border-top: 2px solid #525252; border-right: 2px solid #525252;
+  transform: rotate(45deg);
+}
+[data-theme="carbon"] .nav-item.sub-active { background: #e0e0e0; }
 [data-theme="carbon"] .sidebar-foot { padding: 0 16px 12px; font-size: 12px; color: #525252; }
 
 /* —— 徽章：状态卡为 点+12px 文字；爬虫卡按原型为实心 Tag（蓝/黄/红） —— */

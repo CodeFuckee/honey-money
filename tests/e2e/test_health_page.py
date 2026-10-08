@@ -144,6 +144,50 @@ def test_macos_shell_and_nav(servers, page):
     sb = page.locator(".ph-search").bounding_box()
     assert sb is not None and sb["height"] <= 60, f"搜索框高度异常: {sb}"
 
+
+def test_source_pages(servers, page):
+    """数据源子页（Carbon 原型 ⑥⑦ 屏）：子项选中灰底+右箭头、父项「数据」保留
+    高亮；标题/副题/来源 Tag 随源切换；行高 32px 文字垂直居中（曾 block 贴顶）。"""
+    _, frontend_port = servers
+    page.goto(f"http://127.0.0.1:{frontend_port}/")
+    page.locator(".theme-toggle:visible").get_by_role("button", name="Carbon").click()
+    expect(page.locator("html")).to_have_attribute("data-theme", "carbon")
+
+    # 新浪财经子页：标题/选中态/父项高亮/蓝 Tag
+    page.get_by_role("button", name="新浪财经").click()
+    expect(page.get_by_role("heading", name="数据浏览 · 新浪财经")).to_be_visible()
+    sina = page.locator(".src-item.active")
+    expect(sina).to_have_text("新浪财经")
+    assert sina.evaluate("el => getComputedStyle(el).backgroundColor") == "rgb(224, 224, 224)", \
+        "数据源选中行应为 #E0E0E0 灰底"
+    box = sina.bounding_box()
+    assert box is not None and box["height"] == 32, f"数据源行高应为 32px: {box}"
+    off = sina.evaluate("""el => {
+        const r = el.getBoundingClientRect();
+        const range = document.createRange(); range.selectNodeContents(el);
+        const t = range.getBoundingClientRect();
+        return Math.abs((t.top + t.bottom) / 2 - (r.top + r.bottom) / 2);
+    }""")
+    assert off <= 2, f"数据源文字未垂直居中，偏差 {off}px"
+    parent = page.locator(".nav-item.sub-active")
+    expect(parent).to_have_text("数据")
+    assert parent.evaluate("el => getComputedStyle(el).backgroundColor") == "rgb(224, 224, 224)", \
+        "父项「数据」应保留选中灰底"
+    assert page.locator(".ph-tag.src-sina").evaluate(
+        "el => getComputedStyle(el).backgroundColor") == "rgb(15, 98, 254)", "新浪 Tag 应蓝底"
+
+    # 东方财富子页：绿 Tag、选中切换
+    page.get_by_role("button", name="东方财富").click()
+    expect(page.get_by_role("heading", name="数据浏览 · 东方财富")).to_be_visible()
+    assert page.locator(".ph-tag.src-ef").evaluate(
+        "el => getComputedStyle(el).backgroundColor") == "rgb(36, 161, 72)", "东财 Tag 应绿底"
+    expect(page.locator(".src-item.active")).to_have_text("东方财富")
+
+    # 回到「数据」父页：占位 Tag 回归、子项无选中
+    page.get_by_role("button", name="数据", exact=True).click()
+    expect(page.get_by_role("heading", name="数据浏览", exact=True)).to_be_visible()
+    expect(page.locator(".src-item.active")).to_have_count(0)
+
     # 切回仪表盘：四卡仍在
     page.get_by_role("button", name="仪表盘").click()
     expect(page.locator(".card")).to_have_count(4, timeout=20000)

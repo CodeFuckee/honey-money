@@ -19,7 +19,7 @@ frontend/           Vue3 + Vite 前端
   src/App.vue         服务仪表盘，三套界面风格一键切换（苹果 / Fluent 2 /
                       IBM Carbon，与 Penpot 三版原型对齐，localStorage 持久化）：
                       四状态（加载骨架/空态插画/错误横幅/降级占位）+
-                      数据·回测·教学占位页
+                      数据·回测·教学占位页 + 数据源子页（新浪/东财来源筛选变体）
   nginx.conf          生产：静态托管 + /api 反代后端
 deploy/             （预留：将来放 NAS 专属编排变体）
 tests/e2e/          Playwright E2E（自拉后端 uvicorn + 前端 vite preview）
