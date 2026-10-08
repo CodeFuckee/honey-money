@@ -343,7 +343,7 @@ onMounted(refresh)
             <div class="browse-table">
               <div class="browse-head">
                 <span>代码</span><span>名称</span><span class="num">最新价</span><span class="num">涨跌幅</span>
-                <span class="num">K线数</span><span>最新交易日</span><span class="src">来源</span>
+                <span class="num">K线数</span><span class="date">最新交易日</span><span class="src">来源</span>
               </div>
               <template v-if="browse.status === 'loading' || browseLoading">
                 <div v-for="i in 8" :key="'sk' + i" class="browse-row"><span class="sk" style="width:80%"></span></div>
@@ -1095,14 +1095,14 @@ body {
   font-size: 12px; font-weight: 600; color: var(--fg-2);
   background: var(--bar-track); border-bottom: 1px solid var(--card-border-color);
 }
-.browse-head .num { text-align: right; }
+.browse-head .num, .browse-row .num { text-align: center; }
 .browse-head .src { font-size: 12px; }
 .browse-row { font-size: 13px; color: var(--fg); border-bottom: 1px solid var(--card-border-color); }
 .browse-row:last-child { border-bottom: 0; }
 .browse-row:hover:not(.empty) { background: var(--nav-hover-bg); }
 .browse-row.empty { color: var(--fg-3); }
 .browse-row .code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-.browse-row .num { text-align: right; font-variant-numeric: tabular-nums; }
+.browse-row .num { text-align: center; font-variant-numeric: tabular-nums; }
 .browse-row .up { color: var(--dot-down); font-weight: 600; }   /* A 股红涨 */
 .browse-row .down { color: var(--dot-up); font-weight: 600; }   /* 绿跌 */
 .browse-row .src { font-size: 11px; color: var(--fg-3); }
