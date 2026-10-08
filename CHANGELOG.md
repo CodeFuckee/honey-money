@@ -46,6 +46,10 @@
   （搜索 480 / 行情表 / K线图占位条 160）。
 
 ### Fixed
+- **新浪日线爬虫在 NAS 上永久停摆**：akshare 同步库内部 requests 不带超时，
+  特定请求在 NAS 网络下挂起 → `to_thread` 永久阻塞 → 事件循环停摆 + PG
+  事务悬空锁表（后续实例全部卡在 init_schema 等锁）。外层加
+  `asyncio.wait_for` 60s 兜底，挂起降级为单股失败交熔停机制。
 - **Carbon 侧栏数据源行文字贴顶/行距过大（用户过目发现）**：`src-item` 曾
   `display:block`，40px 行内文字贴顶不居中，且两行行距观感过大。改
   `display:flex; align-items:center` 并按原型行高 40→32px（与 Fluent 行为一致）。
