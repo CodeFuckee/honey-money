@@ -132,10 +132,11 @@ def test_macos_shell_and_nav(servers, page):
     expect(nav).to_have_count(4)
     expect(page.locator(".sidebar .nav-item.active")).to_have_text("仪表盘")
 
-    # 切到「数据」占位页：标题 + Placeholder 标记可见
+    # 切到「数据」页：标题 + 真数据表（本地无 PG → 降级空表）可见
     page.get_by_role("button", name="数据").click()
     expect(page.get_by_role("heading", name="数据浏览")).to_be_visible()
-    expect(page.locator(".ph-tag").first).to_contain_text("Placeholder")
+    expect(page.locator(".browse-table")).to_be_visible()
+    expect(page.locator(".browse-head")).to_contain_text("代码")
 
     # 回归：搜索框放大镜 SVG 曾无显式尺寸被撑成千像素巨图（整框跟着撑爆）
     mag = page.locator(".mag").bounding_box()
@@ -267,16 +268,14 @@ def test_carbon_theme_shell(servers, page):
     # 状态徽章：dot + 12px 文字（后端 API 运行中）
     expect(page.locator(".fbadge", has_text="运行中").first).to_be_visible()
 
-    # 数据页：DataTable 表头 48px 灰字 + 蓝色 Placeholder Tag
+    # 数据页：真数据表（browse）表头 48px 灰字；本地无 PG → 降级空表仍渲染表头
     page.get_by_role("button", name="数据").click()
-    head = page.locator(".ph-table .ph-head")
+    head = page.locator(".browse-head")
     expect(head).to_contain_text("代码")
     assert head.evaluate("el => getComputedStyle(el).height") == "48px", "carbon 表头行应为 48px"
     assert head.evaluate("el => getComputedStyle(el).color") == "rgb(82, 82, 82)", \
         "carbon 表头文字应为 #525252"
-    tag = page.locator(".ph-tag").first
-    assert tag.evaluate("el => getComputedStyle(el).backgroundColor") == "rgb(15, 98, 254)", \
-        "carbon Placeholder Tag 应为蓝底"
+    expect(page.locator(".browse-table")).to_be_visible()
 
     # 刷新持久化；切回苹果风格
     page.reload()

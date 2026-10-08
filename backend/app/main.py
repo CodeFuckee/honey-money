@@ -7,6 +7,7 @@
 from fastapi import FastAPI
 
 from . import config
+from .browse import fetch_stock_bars, fetch_stock_list
 from .crawl_stats import fetch_crawl_stats
 from .infra import check_postgres, check_proxy_pool
 
@@ -31,6 +32,19 @@ def create_app() -> FastAPI:
             "postgres": check_postgres(config.DATABASE_URL),
             "proxy_pool": check_proxy_pool(config.PROXY_POOL_URL),
         }
+
+    @app.get("/api/stocks")
+    def stocks(q: str = "", limit: int = 50, offset: int = 0):
+        """数据浏览：股票列表（最新价/涨跌幅/K线数/区间/来源），q 模糊搜索。
+
+        始终 200；PG 不可达在 status=down 表达（同 /api/infra 降级约定）。
+        """
+        return fetch_stock_list(config.DATABASE_URL, q=q, limit=limit, offset=offset)
+
+    @app.get("/api/stocks/{code}/bars")
+    def stock_bars(code: str, limit: int = 250, offset: int = 0):
+        """单股日K（默认最新 250 根，时间升序返回，供图表使用）。"""
+        return fetch_stock_bars(config.DATABASE_URL, code, limit=limit, offset=offset)
 
     @app.get("/api/crawl/stats")
     def crawl_stats():

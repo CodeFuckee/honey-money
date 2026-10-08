@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 
 // ===== 数据层（沿用原仪表盘逻辑：三接口并发 + 优雅降级）=====
 const backend = ref({ status: 'checking' })   // 后端进程本身
@@ -67,6 +67,38 @@ const sources = computed(() => {
   return Object.entries(bs).map(([k, v]) => ({ name: names[k] || k, count: fmt(v) }))
 })
 const srcPage = computed(() => SRC_ITEMS.find(s => s.id === activeNav.value) || null)
+// ===== 数据浏览：真实爬取数据（/api/stocks 分页 + 搜索）=====
+const browse = ref({ status: 'loading', total: 0, stocks: [] })
+const browseQuery = ref('')
+const browsePage = ref(0)                 // 0 起
+const BROWSE_PAGE_SIZE = 50
+const browseLoading = ref(false)
+const browseTotalPages = computed(() =>
+  Math.max(1, Math.ceil((browse.value.total || 0) / BROWSE_PAGE_SIZE)))
+
+async function loadBrowse() {
+  browseLoading.value = true
+  try {
+    const q = encodeURIComponent(browseQuery.value.trim())
+    const off = browsePage.value * BROWSE_PAGE_SIZE
+    const r = await fetch(`/api/stocks?q=${q}&limit=${BROWSE_PAGE_SIZE}&offset=${off}`)
+    browse.value = await r.json()
+  } catch (e) {
+    browse.value = { status: 'down', total: 0, stocks: [] }
+  } finally {
+    browseLoading.value = false
+  }
+}
+function browseSearch() { browsePage.value = 0; loadBrowse() }
+function browseGo(delta) {
+  const next = browsePage.value + delta
+  if (next < 0 || next >= browseTotalPages.value) return
+  browsePage.value = next; loadBrowse()
+}
+watch([activeNav, srcPage], ([nav]) => {
+  if (nav === 'data' || srcPage.value) loadBrowse()
+})
+
 const srcSubText = computed(() => {
   const p = srcPage.value
   if (!p) return ''
@@ -289,11 +321,10 @@ onMounted(refresh)
             <div class="toolbar">
               <div>
                 <h2 class="h1">{{ srcPage ? `数据浏览 · ${srcPage.label}` : '数据浏览' }}</h2>
-                <p class="sub">{{ srcPage ? srcSubText : 'K线查询与浏览 · v0.2+ 规划' }}</p>
+                <p class="sub">{{ srcPage ? srcSubText : 'K线查询与浏览 · 已入库股票行情一览' }}</p>
               </div>
               <div class="toolbar-right">
                 <span v-if="srcPage" class="ph-tag" :class="srcPage.tagCls">{{ srcPage.label }}</span>
-                <span v-else class="ph-tag">Placeholder · v0.2+</span>
                 <div class="theme-toggle tb-toggle" role="group" aria-label="界面风格切换">
                   <button v-for="t in THEMES" :key="t" class="seg-btn" :class="{ on: theme === t }"
                     @click="setTheme(t)">{{ THEME_LABELS[t] }}</button>
@@ -305,23 +336,43 @@ onMounted(refresh)
                 <circle cx="6.5" cy="6.5" r="4.5" stroke="#aeaeb2" stroke-width="2"/>
                 <line x1="10" y1="10" x2="14" y2="14" stroke="#aeaeb2" stroke-width="2.5" stroke-linecap="round"/>
               </svg>
-              <span>搜索代码 / 名称，如 600519 或 贵州茅台</span>
+              <input class="browse-input" v-model="browseQuery" placeholder="搜索代码 / 名称，如 600519 或 贵州茅台"
+                @keydown.enter="browseSearch" />
+              <button class="btn browse-btn" @click="browseSearch">搜索</button>
             </div>
-            <div class="ph-grid">
-              <div class="ph-table">
-                <div class="ph-head">代码 · 名称 · 最新价 · 涨跌幅 · K线数 · 来源</div>
-                <div v-for="i in 9" :key="i" class="ph-row">
-                  <span class="sk" :style="{ width: (50 + (i * 17) % 45) + 'px' }"></span>
-                  <span class="sk" :style="{ width: (28 + (i * 29) % 30) + 'px' }"></span>
+            <div class="browse-table">
+              <div class="browse-head">
+                <span>代码</span><span>名称</span><span class="num">最新价</span><span class="num">涨跌幅</span>
+                <span class="num">K线数</span><span>最新交易日</span><span>来源</span>
+              </div>
+              <template v-if="browse.status === 'loading' || browseLoading">
+                <div v-for="i in 8" :key="'sk' + i" class="browse-row"><span class="sk" style="width:80%"></span></div>
+              </template>
+              <template v-else-if="browse.status === 'down'">
+                <div class="browse-empty">数据库不可达：{{ browse.detail }}</div>
+              </template>
+              <template v-else-if="!browse.stocks.length">
+                <div class="browse-empty">无匹配股票（清单 {{ fmt(crawl?.stocks_listed || 0) }} 只中搜索）</div>
+              </template>
+              <template v-else>
+                <div v-for="st in browse.stocks" :key="st.code" class="browse-row" :class="{ empty: st.bars === 0 }">
+                  <span class="code">{{ st.code }}</span>
+                  <span>{{ st.name }}</span>
+                  <span class="num">{{ st.close ?? '—' }}</span>
+                  <span class="num" :class="(st.pct_chg ?? 0) >= 0 ? 'up' : 'down'">
+                    {{ st.pct_chg != null ? (st.pct_chg >= 0 ? '+' : '') + st.pct_chg + '%' : '—' }}</span>
+                  <span class="num">{{ st.bars || 0 }}</span>
+                  <span>{{ st.last_date || '—' }}</span>
+                  <span class="src">{{ st.sources || '—' }}</span>
                 </div>
-              </div>
-              <div class="ph-chart">
-                <div v-for="i in 16" :key="i" class="ph-candle"
-                  :style="{ left: 18 + i * 23 + 'px', height: 40 + (i * 47) % 160 + 'px' }"></div>
-                <span class="ph-chart-label">K线图 / 走势（图表库待选型）</span>
-              </div>
+              </template>
             </div>
-            <p class="note">范围：分页/筛选/导出 · 数据源：本地 PG（东财+新浪）</p>
+            <div class="browse-pager" v-if="browse.status === 'up'">
+              <button class="btn" :disabled="browsePage === 0 || browseLoading" @click="browseGo(-1)">上一页</button>
+              <span>第 {{ browsePage + 1 }} / {{ browseTotalPages }} 页 · 共 {{ fmt(browse.total) }} 只</span>
+              <button class="btn" :disabled="browsePage + 1 >= browseTotalPages || browseLoading" @click="browseGo(1)">下一页</button>
+            </div>
+            <p class="note">数据源：本地 PG（新浪/东财）· 爬虫持续入库中 · 单股K线明细接口已就绪（/api/stocks/{code}/bars），图表待选型</p>
           </template>
 
           <!-- ===== 回测工作台（占位） ===== -->
@@ -1024,6 +1075,45 @@ body {
 /* —— 骨架卡：白卡 + #E5E5E5 灰条 —— */
 [data-theme="carbon"] .cards > .card.skeleton-card { height: 140px; }
 
+/* ===== 数据浏览真数据表 ===== */
+.browse-input {
+  flex: 1; min-width: 0; border: 0; background: transparent; outline: none;
+  font: inherit; font-size: 13px; color: var(--fg);
+}
+.browse-input::placeholder { color: var(--fg-3); }
+.browse-btn { padding: 5px 14px; font-size: 12px; }
+.browse-table {
+  margin-top: 20px; background: var(--card-bg); backdrop-filter: var(--card-blur);
+  border: 1px solid var(--card-border-color); border-radius: var(--card-radius);
+  box-shadow: var(--card-shadow); overflow: hidden;
+}
+.browse-head, .browse-row {
+  display: grid; grid-template-columns: 90px 1fr 90px 90px 80px 110px 90px;
+  gap: 8px; align-items: center; padding: 9px 16px;
+}
+.browse-head {
+  font-size: 12px; font-weight: 600; color: var(--fg-2);
+  background: var(--bar-track); border-bottom: 1px solid var(--card-border-color);
+}
+.browse-row { font-size: 13px; color: var(--fg); border-bottom: 1px solid var(--card-border-color); }
+.browse-row:last-child { border-bottom: 0; }
+.browse-row:hover:not(.empty) { background: var(--nav-hover-bg); }
+.browse-row.empty { color: var(--fg-3); }
+.browse-row .code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.browse-row .num { text-align: right; font-variant-numeric: tabular-nums; }
+.browse-row .up { color: var(--dot-down); font-weight: 600; }   /* A 股红涨 */
+.browse-row .down { color: var(--dot-up); font-weight: 600; }   /* 绿跌 */
+.browse-row .src { font-size: 11px; color: var(--fg-3); }
+.browse-empty { padding: 28px 16px; font-size: 13px; color: var(--fg-3); text-align: center; }
+.browse-pager {
+  display: flex; align-items: center; justify-content: center; gap: 18px;
+  margin-top: 16px; font-size: 12px; color: var(--fg-2);
+}
+[data-theme="fluent"] .browse-head { background: #f5f5f5; }
+[data-theme="carbon"] .browse-head { height: 48px; padding: 0 16px; background: #f4f4f4; color: #525252; }
+[data-theme="fluent"] .browse-row.up { color: #c50f1f; }
+[data-theme="fluent"] .browse-row.down { color: #0f7b0f; }
+
 /* ===== 响应式兜底 ===== */
 @media (max-width: 860px) {
   .body { flex-direction: column; }
@@ -1031,6 +1121,8 @@ body {
   .group, .sidebar-foot { display: none; }
   .content { padding: 20px; }
   .ph-grid { grid-template-columns: 1fr; }
+  .browse-table { overflow-x: auto; }
+  .browse-head, .browse-row { min-width: 640px; }
   .empty { flex-direction: column; align-items: flex-start; }
 }
 </style>
