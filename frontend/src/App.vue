@@ -362,7 +362,7 @@ onMounted(refresh)
                   <span class="num" :class="(st.pct_chg ?? 0) >= 0 ? 'up' : 'down'">
                     {{ st.pct_chg != null ? (st.pct_chg >= 0 ? '+' : '') + st.pct_chg + '%' : '—' }}</span>
                   <span class="num">{{ st.bars || 0 }}</span>
-                  <span>{{ st.last_date || '—' }}</span>
+                  <span class="date">{{ st.last_date || '—' }}</span>
                   <span class="src">{{ st.sources || '—' }}</span>
                 </div>
               </template>
@@ -1095,7 +1095,9 @@ body {
   font-size: 12px; font-weight: 600; color: var(--fg-2);
   background: var(--bar-track); border-bottom: 1px solid var(--card-border-color);
 }
-.browse-head .num, .browse-row .num { text-align: center; }
+.browse-head .num, .browse-row .num,
+.browse-head .date, .browse-row .date,
+.browse-head .src, .browse-row .src { text-align: center; }
 .browse-head .src { font-size: 12px; }
 .browse-row { font-size: 13px; color: var(--fg); border-bottom: 1px solid var(--card-border-color); }
 .browse-row:last-child { border-bottom: 0; }
