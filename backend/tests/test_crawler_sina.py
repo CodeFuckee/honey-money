@@ -14,7 +14,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.crawler.sina import SinaClient, df_to_rows  # noqa: E402
+from app.crawler.sina import SinaClient, SinaError, df_to_rows  # noqa: E402
 
 
 def run(coro):
@@ -222,3 +222,30 @@ class TestFetchDailyBars:
         run(client.fetch_daily_bars(1, "600000"))
         rate = client._rate
         assert any("sina" in k for k in rate.acquires)
+
+
+class TestDailyFetchTimeout:
+    """akshare 挂起超时兜底：内部永久阻塞 → wait_for 超时 → SinaError（可计数失败），
+    绝不让事件循环停摆（NAS 实测：挂起导致 PG 事务悬空锁表全链路卡死）。"""
+
+    def _client(self, daily, timeout):
+        return SinaClient(rate=SpyRate(), http=None, daily_fetcher=daily,
+                          fetch_timeout=timeout)
+
+    def test_hanging_fetcher_times_out(self):
+        import time as _time
+
+        def hang_forever(symbol, *, start_date=None, end_date=None):
+            _time.sleep(1)           # 模拟 akshare 无超时挂起（真睡 1s > 0.1s 超时）
+            raise AssertionError("不应执行到这")
+
+        client = self._client(hang_forever, timeout=0.1)
+        with pytest.raises(SinaError, match="超时"):
+            run(client.fetch_daily_bars(1, "600519"))
+
+    def test_fast_fetcher_unaffected(self):
+        client = self._client(lambda symbol, *, start_date=None, end_date=None: daily_df(),
+                              timeout=5)
+        bars = run(client.fetch_daily_bars(1, "600519"))
+        assert bars.source == "sina" and bars.rows
+

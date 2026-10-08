@@ -75,10 +75,11 @@ class SinaClient:
     """与 EastmoneyClient 同构：fetch_stock_list / fetch_daily_bars。"""
 
     def __init__(self, *, rate: RateLimiter, http: httpx.AsyncClient,
-                 daily_fetcher=None):
+                 daily_fetcher=None, fetch_timeout: float = 60.0):
         self._rate = rate
         self._http = http
         self._daily = daily_fetcher or _default_daily_fetcher
+        self._fetch_timeout = fetch_timeout
 
     async def _fetch_list_total(self) -> int:
         """新浪官方股票总数（hs_a 含北交所）——清单完整性校验基准。"""
@@ -149,9 +150,18 @@ class SinaClient:
         start = None if beg in ("", "0") else beg
         await self._rate.acquire(SINA_CHANNEL)
         try:
-            df = await asyncio.to_thread(
-                self._daily, symbol, start_date=start)
+            # akshare 同步库内部 requests 不带超时，NAS 网络下偶发永久挂起
+            # （实测：事件循环停摆 + PG 事务悬空锁表）——外层必须加超时兜底，
+            # 挂起降级为普通单股失败，交给连续失败熔停机制处置。
+            df = await asyncio.wait_for(
+                asyncio.to_thread(self._daily, symbol, start_date=start),
+                timeout=self._fetch_timeout)
             rows = df_to_rows(df, beg=beg)
+        except asyncio.TimeoutError as exc:
+            self._rate.report(SINA_CHANNEL, False)
+            raise SinaError(
+                f"新浪日线获取超时({symbol}, {self._fetch_timeout}s, "
+                f"akshare 内部挂起)") from exc
         except Exception as exc:
             self._rate.report(SINA_CHANNEL, False)
             raise SinaError(f"新浪日线获取失败({symbol}): {exc}") from exc
