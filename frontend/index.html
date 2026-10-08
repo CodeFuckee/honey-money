@@ -9,12 +9,6 @@
   <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <link rel="manifest" href="/manifest.webmanifest">
   <meta name="theme-color" content="#F08C00">
-  <script>
-    // 首帧前应用持久化的主题，避免刷新时闪回默认风格
-    var t = localStorage.getItem('hm-theme')
-    document.documentElement.dataset.theme =
-      t === 'fluent' || t === 'carbon' ? t : 'apple'
-  </script>
 </head>
 <body>
   <div id="app"></div>
