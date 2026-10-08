@@ -355,7 +355,7 @@ onMounted(refresh)
                 <div class="browse-empty">无匹配股票（清单 {{ fmt(crawl?.stocks_listed || 0) }} 只中搜索）</div>
               </template>
               <template v-else>
-                <div v-for="st in browse.stocks" :key="st.code" class="browse-row" :class="{ empty: st.bars === 0 }">
+                <div v-for="st in browse.stocks" :key="st.code" class="browse-row" :class="{ 'no-data': st.bars === 0 }">
                   <span class="code">{{ st.code }}</span>
                   <span>{{ st.name }}</span>
                   <span class="num">{{ st.close ?? '—' }}</span>
@@ -1101,8 +1101,8 @@ body {
 .browse-head .src { font-size: 12px; }
 .browse-row { font-size: 13px; color: var(--fg); border-bottom: 1px solid var(--card-border-color); }
 .browse-row:last-child { border-bottom: 0; }
-.browse-row:hover:not(.empty) { background: var(--nav-hover-bg); }
-.browse-row.empty { color: var(--fg-3); }
+.browse-row:hover:not(.no-data) { background: var(--nav-hover-bg); }
+.browse-row.no-data { color: var(--fg-3); }
 .browse-row .code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .browse-row .num { text-align: center; font-variant-numeric: tabular-nums; }
 .browse-row .up { color: var(--dot-down); font-weight: 600; }   /* A 股红涨 */
