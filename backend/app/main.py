@@ -18,6 +18,7 @@ import psycopg
 from fastapi import FastAPI
 
 from . import config
+from .backtest_api import register_backtest_routes
 from .browse import fetch_stock_bars, fetch_stock_list
 from .crawler.store import Store
 from .crawl_stats import fetch_crawl_stats
@@ -103,6 +104,7 @@ def create_app(*, scheduler: TaskScheduler | None = None,
 
     register_task_routes(app, scheduler=scheduler, task_store=task_store,
                          connect=connect)
+    register_backtest_routes(app)
 
     return app
 

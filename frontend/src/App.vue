@@ -269,6 +269,140 @@ function backToList() {
   activeNav.value = stockNav.value || 'data'
 }
 
+// ===== 量化教学：经典回测策略（backend vectorbt 引擎，/api/backtest） =====
+const STRATS = [
+  { id: 'buy_hold', name: '买入持有', tag: '基准',
+    brief: '期初买入、持有到期末——不是策略，是一切策略的对照基准线',
+    lessons: ['跑不赢买入持有的策略是负贡献（白交手续费）', '绝对收益高 ≠ 跑赢基准'] },
+  { id: 'ma_cross', name: '双均线交叉', tag: '趋势',
+    brief: 'MA(short) 上穿 MA(long) 金叉买入、下穿死叉卖出——回测界的 Hello World',
+    lessons: ['震荡市鞭尸（whipsaw）：横盘期反复金叉死叉被来回打脸', '参数敏感：5/20 与 20/60 的结果差异巨大，警惕过拟合'] },
+  { id: 'donchian', name: '通道突破（海龟）', tag: '趋势',
+    brief: '突破前 N 日最高价追入、跌破 M 日最低价离场——不预测，只承认事实',
+    lessons: ['假突破频率高，离场纪律是生命线', '单边大行情抓得最全（对照双均线感受差异）'] },
+  { id: 'bollinger', name: '布林带均值回归', tag: '反转',
+    brief: '跌破均线下 α 倍标准差买入、回到均线上方卖出——赌偏离修复',
+    lessons: ['与趋势策略哲学对立：震荡市赚得漂亮', '单边下跌越抄越深——策略没有好坏，只有适配行情'] },
+  { id: 'grid', name: '网格交易', tag: '波动',
+    brief: '以起点为基准每跌 step% 买一档、反弹减档——赚波动不赌方向',
+    lessons: ['单边下跌满仓套牢（与均值回归同款风险）', '收益来自波动率而非方向，适合震荡标的'] },
+  { id: 'momentum', name: '动量轮动', tag: '多标的',
+    brief: '每月末按过去 N 日涨幅排名，等权买入前 K 名——强者恒强',
+    lessons: ['动量崩溃：市场反转时前期最强跌最狠', '从单标的升级到股票池+定期调仓的框架'] },
+]
+const STRAT_FIELDS = {
+  buy_hold: [],
+  ma_cross: [{ k: 'fast', label: '短期均线', type: 'number', min: 2, max: 120 },
+             { k: 'slow', label: '长期均线', type: 'number', min: 3, max: 250 }],
+  donchian: [{ k: 'entry_n', label: '突破窗口', type: 'number', min: 3, max: 120 },
+             { k: 'exit_n', label: '离场窗口', type: 'number', min: 2, max: 60 }],
+  bollinger: [{ k: 'window', label: '均线窗口', type: 'number', min: 5, max: 120 },
+              { k: 'alpha', label: 'σ 倍数', type: 'number', min: 0.5, max: 4, step: 0.5 }],
+  grid: [{ k: 'step_pct', label: '步长 %', type: 'number', min: 0.5, max: 20, step: 0.5 },
+         { k: 'levels', label: '档位数', type: 'number', min: 2, max: 10 }],
+  momentum: [{ k: 'window', label: '动量窗口', type: 'number', min: 5, max: 120 },
+             { k: 'top_k', label: '买前 K 名', type: 'number', min: 1, max: 10 }],
+}
+const DEFAULT_PARAMS = {
+  buy_hold: {}, ma_cross: { fast: 5, slow: 20 }, donchian: { entry_n: 20, exit_n: 10 },
+  bollinger: { window: 20, alpha: 2.0 }, grid: { step_pct: 5.0, levels: 4 },
+  momentum: { window: 20, top_k: 2 },
+}
+const learnStrat = ref('ma_cross')
+const learnCode = ref('600519')
+const learnCodes = ref('600519,000001,601318,300750,600036')
+const learnRange = ref('3y')
+const learnExec = ref('next_open')
+const learnParams = ref({ ...DEFAULT_PARAMS.ma_cross })
+const learnCommission = ref(2.5)   // 万分数输入（万分之 2.5）
+const learnSellTax = ref(5)        // 万分数（卖出印花税 0.05%）
+const learnResult = ref(null)
+const learnError = ref('')
+const learnLoading = ref(false)
+const learnChartEl = ref(null)
+let learnChart = null
+
+const learnStratMeta = computed(() => STRATS.find(s => s.id === learnStrat.value))
+const learnIsMomentum = computed(() => learnStrat.value === 'momentum')
+
+watch(learnStrat, id => { learnParams.value = { ...DEFAULT_PARAMS[id] } })
+
+function openLearnWith(code) {
+  learnCode.value = code
+  activeNav.value = 'learn'
+}
+
+async function runLearn() {
+  learnLoading.value = true
+  learnError.value = ''
+  learnResult.value = null
+  try {
+    const body = {
+      strategy: learnStrat.value,
+      codes: learnIsMomentum.value
+        ? learnCodes.value.split(',').map(s => s.trim()).filter(Boolean)
+        : [learnCode.value.trim()],
+      range: learnRange.value,
+      params: learnParams.value,
+      exec_mode: learnExec.value,
+      commission: (learnCommission.value || 0) / 10000,
+      sell_tax: (learnSellTax.value || 0) / 10000,
+    }
+    const r = await fetch('/api/backtest', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    if (r.status === 400) { learnError.value = (await r.json()).detail; return }
+    learnResult.value = await r.json()
+    await nextTick()
+    renderLearnChart()
+  } catch (e) {
+    learnError.value = String(e)
+  } finally { learnLoading.value = false }
+}
+
+function renderLearnChart() {
+  const res = learnResult.value
+  if (learnChart) { learnChart.dispose(); learnChart = null }
+  if (!learnChartEl.value || !res || res.status !== 'up' || !res.equity?.length) return
+  learnChart = echarts.init(learnChartEl.value)
+  const dates = res.equity.map(r => r[0])
+  const strat = res.equity.map(r => r[1])
+  const bh = res.equity.map(r => r[2])
+  const dd = Object.fromEntries(res.drawdown.map(r => [r[0], r[1]]))
+  const drawdown = dates.map(d => dd[d] ?? null)
+  learnChart.setOption({
+    animation: false,
+    tooltip: { trigger: 'axis' },
+    legend: { data: ['策略净值', '买入持有'], top: 0 },
+    axisPointer: { link: [{ xAxisIndex: 'all' }] },
+    grid: [{ left: 60, right: 20, top: 30, height: '58%' },
+           { left: 60, right: 20, top: '76%', height: '16%' }],
+    xAxis: [
+      { type: 'category', data: dates, axisLabel: { fontSize: 10 } },
+      { type: 'category', gridIndex: 1, data: dates, axisLabel: { show: false } },
+    ],
+    yAxis: [
+      { scale: true, splitLine: { lineStyle: { color: '#eee' } } },
+      { gridIndex: 1, axisLabel: { formatter: v => (v * 100).toFixed(0) + '%' },
+        splitLine: { show: false } },
+    ],
+    dataZoom: [{ type: 'inside', xAxisIndex: [0, 1] }],
+    series: [
+      { name: '策略净值', type: 'line', data: strat, showSymbol: false,
+        lineStyle: { width: 1.6, color: '#0f62fe' } },
+      { name: '买入持有', type: 'line', data: bh, showSymbol: false,
+        lineStyle: { width: 1.2, color: '#a8a8a8' } },
+      { name: '回撤', type: 'line', xAxisIndex: 1, yAxisIndex: 1, data: drawdown,
+        showSymbol: false, areaStyle: { color: 'rgba(218,30,40,.25)' },
+        lineStyle: { width: 1, color: '#da1e28' } },
+    ],
+  })
+}
+
+const _onLearnResize = () => learnChart && learnChart.resize()
+onMounted(() => window.addEventListener('resize', _onLearnResize))
+
 async function fetchBars(code, { limit, offset, source }) {
   const r = await fetch(`/api/stocks/${code}/bars?limit=${limit}&offset=${offset}&source=${source}`)
   return r.json()
@@ -665,6 +799,7 @@ onMounted(refresh)
                     :class="{ active: stock.source === s.v }"
                     @click="setStockSource(s.v)">{{ s.label }}</button>
                 </div>
+                <button class="btn" @click="openLearnWith(stock.code)">用该股教学回测</button>
                 <button class="btn" @click="backToList">← 返回列表</button>
               </div>
             </div>
@@ -889,31 +1024,126 @@ onMounted(refresh)
             </div>
           </template>
 
-          <!-- ===== 教学页（占位） ===== -->
+          <!-- ===== 量化教学：经典回测策略 ===== -->
           <template v-else>
             <div class="toolbar">
               <div>
-                <h2 class="h1">教学页</h2>
-                <p class="sub">量化入门课程 · v0.2+ 规划</p>
+                <h2 class="h1">量化教学 · 经典回测策略</h2>
+                <p class="sub">六大经典策略 · 真实行情回测 · 收益对照买入持有</p>
               </div>
               <div class="toolbar-right">
-                <span class="ph-tag">Placeholder · v0.2+</span>
+                <span class="ph-tag">教学 · 数据为不复权口径</span>
+              </div>
+            </div>
 
+            <div class="learn-grid">
+              <!-- 左列：策略导航 + 原理卡 -->
+              <div class="learn-side">
+                <button v-for="s in STRATS" :key="s.id" class="learn-nav"
+                  :class="{ active: learnStrat === s.id }" @click="learnStrat = s.id">
+                  <span class="learn-nav-name">{{ s.name }}</span>
+                  <span class="learn-nav-tag">{{ s.tag }}</span>
+                </button>
+                <div class="card learn-card" v-if="learnStratMeta">
+                  <div class="learn-brief">{{ learnStratMeta.brief }}</div>
+                  <div class="learn-lessons">
+                    <div class="learn-lesson-title">教学点 / 常见坑</div>
+                    <ul><li v-for="l in learnStratMeta.lessons" :key="l">{{ l }}</li></ul>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 右列：参数面板 + 结果 -->
+              <div class="learn-main">
+                <div class="card learn-params">
+                  <div class="learn-params-row">
+                    <template v-if="!learnIsMomentum">
+                      <label class="learn-field"><span>股票代码</span>
+                        <InputText v-model="learnCode" placeholder="600519" class="learn-input" /></label>
+                    </template>
+                    <template v-else>
+                      <label class="learn-field wide"><span>轮动股票池（逗号分隔，≥2 只）</span>
+                        <InputText v-model="learnCodes" class="learn-input" /></label>
+                    </template>
+                    <label class="learn-field"><span>回测区间</span>
+                      <select v-model="learnRange" class="learn-select">
+                        <option value="1y">近 1 年</option><option value="3y">近 3 年</option>
+                        <option value="5y">近 5 年</option><option value="all">全史</option>
+                      </select></label>
+                    <label class="learn-field"><span>撮合模式</span>
+                      <select v-model="learnExec" class="learn-select">
+                        <option value="next_open">次日开盘（正确）</option>
+                        <option value="close">当日收盘（未来函数）</option>
+                      </select></label>
+                  </div>
+                  <div class="learn-params-row">
+                    <label v-for="f in (STRAT_FIELDS[learnStrat] || [])" :key="f.k" class="learn-field">
+                      <span>{{ f.label }}</span>
+                      <input :type="f.type === 'number' ? 'number' : 'text'" class="learn-input num"
+                        :min="f.min" :max="f.max" :step="f.step"
+                        v-model.number="learnParams[f.k]" />
+                    </label>
+                    <label class="learn-field"><span>佣金 ‱（双边）</span>
+                      <input type="number" class="learn-input num" min="0" max="10" step="0.5"
+                        v-model.number="learnCommission" /></label>
+                    <label class="learn-field"><span>印花税 ‱（卖出）</span>
+                      <input type="number" class="learn-input num" min="0" max="10" step="1"
+                        v-model.number="learnSellTax" /></label>
+                    <button class="btn btn-primary learn-run" :disabled="learnLoading" @click="runLearn">
+                      {{ learnLoading ? '回测中…' : '▶ 跑回测' }}</button>
+                  </div>
+                </div>
+
+                <div v-if="learnError" class="error-banner"><span>{{ learnError }}</span></div>
+
+                <template v-if="learnResult">
+                  <div v-if="learnResult.status === 'down'" class="card learn-empty">
+                    <div class="state">回测不可用</div>
+                    <div class="detail">{{ learnResult.detail }}</div>
+                  </div>
+                  <div v-else-if="learnResult.message" class="card learn-empty">
+                    <div class="state">{{ learnResult.message }}</div>
+                  </div>
+                  <template v-else>
+                    <div class="learn-metrics">
+                      <div class="card lm"><div class="lm-k">总收益</div><div class="lm-v" :class="learnResult.metrics.total_return >= 0 ? 'chg-up' : 'chg-down'">{{ (learnResult.metrics.total_return * 100).toFixed(1) }}%</div></div>
+                      <div class="card lm"><div class="lm-k">年化收益</div><div class="lm-v" :class="learnResult.metrics.annual_return >= 0 ? 'chg-up' : 'chg-down'">{{ (learnResult.metrics.annual_return * 100).toFixed(1) }}%</div></div>
+                      <div class="card lm"><div class="lm-k">最大回撤</div><div class="lm-v chg-down">{{ (learnResult.metrics.max_drawdown * 100).toFixed(1) }}%</div></div>
+                      <div class="card lm"><div class="lm-k">夏普比率</div><div class="lm-v">{{ learnResult.metrics.sharpe?.toFixed(2) }}</div></div>
+                      <div class="card lm"><div class="lm-k">胜率</div><div class="lm-v">{{ (learnResult.metrics.win_rate * 100).toFixed(0) }}%</div></div>
+                      <div class="card lm"><div class="lm-k">盈亏比</div><div class="lm-v">{{ learnResult.metrics.profit_loss_ratio?.toFixed(2) }}</div></div>
+                      <div class="card lm"><div class="lm-k">交易次数</div><div class="lm-v">{{ learnResult.metrics.trades }}</div></div>
+                    </div>
+                    <div class="card chart-card"><div ref="learnChartEl" class="learn-chart"></div></div>
+                    <div class="card detail-table-card" v-if="learnResult.trades.length">
+                      <table class="runs-table">
+                        <thead><tr><th>方向</th><th>标的</th><th>买入日</th><th>买入价</th><th>卖出日</th><th>卖出价</th><th>收益率</th></tr></thead>
+                        <tbody>
+                          <tr v-for="(t, i) in learnResult.trades" :key="i">
+                            <td>{{ t.direction === 'long' ? '多' : t.direction }}</td>
+                            <td class="mono">{{ t.symbol || learnResult.codes?.[0] }}</td>
+                            <td class="mono">{{ t.entry_date }}</td>
+                            <td class="mono">{{ t.entry_price?.toFixed?.(2) ?? t.entry_price }}</td>
+                            <td class="mono">{{ t.exit_date || '持有中' }}</td>
+                            <td class="mono">{{ t.exit_price != null ? (t.exit_price?.toFixed?.(2) ?? t.exit_price) : '—' }}</td>
+                            <td :class="(t.pnl_pct || 0) >= 0 ? 'chg-up' : 'chg-down'">
+                              {{ t.pnl_pct != null ? ((t.pnl_pct >= 0 ? '+' : '') + (t.pnl_pct * 100).toFixed(2) + '%') : '—' }}</td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                    <div v-if="learnResult.gap_dates?.length" class="task-risk">
+                      检测到疑似除权跳空日：{{ learnResult.gap_dates.join('、') }}——不复权数据跨除权日回测存在假亏损噪声，结果仅供参考
+                    </div>
+                  </template>
+                </template>
+                <div v-else-if="!learnLoading" class="card learn-empty">
+                  <div class="state">选好策略与参数，点「跑回测」开始</div>
+                  <div class="detail">收盘出信号：当日收盘成交 = 未来函数（作弊），次日开盘成交 = 规矩——切换对比两者收益差</div>
+                </div>
               </div>
             </div>
-            <div class="ph-courses">
-              <div v-for="c in [
-                  { t: '01 · K线与均线基础', d: '日线数据结构 · MA/EMA · 行情软件对照', bg: '#EFF6FF' },
-                  { t: '02 · 回测思维入门', d: '为什么回测 · 过拟合陷阱 · 样本内外', bg: '#ECFDF5' },
-                  { t: '03 · 第一个策略', d: '均线交叉实战 · 参数敏感性 · 复盘报告', bg: '#FFF7ED' }]"
-                :key="c.t" class="ph-course">
-                <div class="ph-course-icon" :style="{ background: c.bg }"></div>
-                <h3>{{ c.t }}</h3>
-                <p>{{ c.d }}</p>
-                <span class="ph-tag small">待编写</span>
-              </div>
-            </div>
-            <p class="note">形态：图文卡片 + 代码示例 + 交互练习（信息架构待业务迁入后细化）</p>
+            <p class="note">引擎：vectorbt（撮合）· 数据：daily_bar 不复权日线（新浪源）· 成本按比例近似（未含最低佣金 5 元）· 教学用途，不构成投资建议</p>
           </template>
 
         </main>
@@ -1535,6 +1765,41 @@ body {
 .src-seg-btn:hover { background: var(--btn-hover-bg); }
 .src-seg-btn.active { background: var(--accent); color: #fff; }
 
+/* ===== 量化教学页 ===== */
+.learn-grid { display: grid; grid-template-columns: 260px 1fr; gap: 20px; align-items: start; }
+.learn-side { display: flex; flex-direction: column; gap: 8px; }
+.learn-nav {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 10px 14px; font: inherit; font-size: 13.5px; cursor: pointer;
+  background: var(--card-bg); border: 1px solid var(--card-border-color);
+  border-radius: var(--card-radius); color: var(--fg);
+}
+.learn-nav:hover { background: var(--nav-hover-bg); }
+.learn-nav.active { background: var(--nav-active-bg); border-color: var(--accent); }
+.learn-nav-name { font-weight: 500; }
+.learn-nav-tag { font-size: 11px; color: var(--fg-3); }
+.learn-card { padding: 14px 16px; font-size: 13px; }
+.learn-brief { color: var(--fg); line-height: 1.6; }
+.learn-lesson-title { margin: 10px 0 6px; font-weight: 600; color: var(--fg-2); font-size: 12px; }
+.learn-lessons ul { margin: 0; padding-left: 18px; color: var(--fg-2); }
+.learn-lessons li { margin-bottom: 4px; line-height: 1.5; }
+.learn-params { padding: 14px 16px; margin-bottom: 16px; }
+.learn-params-row { display: flex; gap: 14px; flex-wrap: wrap; align-items: flex-end; }
+.learn-params-row + .learn-params-row { margin-top: 10px; }
+.learn-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--fg-2); }
+.learn-field.wide { flex: 1; min-width: 260px; }
+.learn-input { width: 110px; }
+.learn-input.num { width: 90px; }
+.learn-select { height: 36px; border: 1px solid var(--ph-input-border); background: #fff; font: inherit; font-size: 13px; }
+.learn-run { margin-left: auto; }
+.learn-metrics { display: grid; grid-template-columns: repeat(7, 1fr); gap: 10px; margin-bottom: 16px; }
+.lm { padding: 10px 12px; text-align: center; }
+.lm-k { font-size: 11px; color: var(--fg-3); margin-bottom: 4px; }
+.lm-v { font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.learn-chart { width: 100%; height: 420px; }
+.learn-empty { padding: 36px; text-align: center; }
+.learn-empty .detail { margin-top: 8px; }
+
 /* ===== 响应式兜底 ===== */
 @media (max-width: 860px) {
   .body { flex-direction: column; }
@@ -1545,5 +1810,7 @@ body {
   .browse-table { overflow-x: auto; }
   .browse-head, .browse-row { min-width: 640px; }
   .empty { flex-direction: column; align-items: flex-start; }
+  .learn-grid { grid-template-columns: 1fr; }
+  .learn-metrics { grid-template-columns: repeat(3, 1fr); }
 }
 </style>

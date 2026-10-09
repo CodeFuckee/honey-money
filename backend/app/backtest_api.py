@@ -1,0 +1,68 @@
+"""回测 API：POST /api/backtest（同步，秒级返回）。
+
+约定（同项目降级风格）：PG 不可达/区间无数据 → 200 + status 表达；
+参数非法由 pydantic 422，轮动池 <2 只 → 400。
+"""
+
+import datetime as dt
+from typing import Literal
+
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field, field_validator
+
+from . import config
+from .backtest.data import load_history
+from .backtest.runner import STRATEGIES, run_strategy
+
+_RANGE_DAYS = {"1y": 365, "3y": 365 * 3, "5y": 365 * 5}
+
+
+class BacktestIn(BaseModel):
+    strategy: Literal["buy_hold", "ma_cross", "donchian", "bollinger",
+                      "grid", "momentum"]
+    codes: list[str] = Field(min_length=1)
+    range: Literal["1y", "3y", "5y", "all"] = "3y"
+    params: dict = Field(default_factory=dict)
+    exec_mode: Literal["close", "next_open"] = "next_open"
+    commission: float = Field(default=2.5e-4, ge=0, le=0.01)
+    sell_tax: float = Field(default=5e-4, ge=0, le=0.01)
+
+    @field_validator("codes")
+    @classmethod
+    def _codes_ok(cls, v):
+        codes = [c.strip().upper() for c in v if c.strip()]
+        if not codes:
+            raise ValueError("codes 不能为空")
+        return codes
+
+    @field_validator("params")
+    @classmethod
+    def _params_json_safe(cls, v):
+        return {k: val for k, val in v.items() if val is not None}
+
+
+def register_backtest_routes(app: FastAPI) -> None:
+    @app.post("/api/backtest")
+    def backtest(body: BacktestIn):
+        if body.strategy == "momentum" and len(body.codes) < 2:
+            raise HTTPException(400, "动量轮动需要至少 2 只标的")
+        today = dt.date.today()
+        start = (today - dt.timedelta(days=_RANGE_DAYS[body.range])).isoformat() \
+            if body.range != "all" else None
+        try:
+            bars = load_history(config.DATABASE_URL, body.codes,
+                                start=start, end=today.isoformat())
+        except Exception as exc:                   # PG 不可达：降级而非 5xx
+            return {"status": "down",
+                    "detail": f"{type(exc).__name__}: {str(exc)[:120]}"}
+        if not bars:
+            return {"status": "up", "metrics": {}, "equity": [], "drawdown": [],
+                    "trades": [], "gap_dates": [],
+                    "message": "区间内无行情数据（请检查代码或扩大区间）"}
+        result = run_strategy(
+            bars, strategy=body.strategy, params=body.params,
+            exec_mode=body.exec_mode, commission=body.commission,
+            sell_tax=body.sell_tax)
+        return {"status": "up", "codes": body.codes,
+                "strategy": body.strategy, "range": body.range,
+                "exec_mode": body.exec_mode, **result}

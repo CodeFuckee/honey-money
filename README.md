@@ -19,6 +19,8 @@ backend/            Python 后端（FastAPI）
   app/task_store.py   爬虫任务持久化（crawl_task 表 CRUD + 预置任务播种）
   app/scheduler.py    进程内任务调度器（每日到点/启动补跑/全局串行/advisory lock 互斥）
   app/tasks_api.py    任务管理 API（CRUD/触发/取消/停止/历史）
+  app/backtest/       vectorbt 回测引擎（信号/指标纯 pandas，六大经典策略）
+  app/backtest_api.py 回测 API（策略/区间/撮合模式/成本，降级 200 约定）
   tests/              离线 pytest 用例（API 骨架 + 爬虫 + 任务调度）
 frontend/           Vue3 + Vite 前端
   src/App.vue         服务仪表盘（Carbon 风格）：四状态（加载骨架/空态插画/
@@ -26,7 +28,9 @@ frontend/           Vue3 + Vite 前端
                       数据源子页（新浪/东财来源筛选变体）；「任务」页管理
                       每日爬虫任务（启停/手动触发/实时进度/历史）；
                       数据页点行进个股详情（ECharts K线近250根 + 全字段
-                      明细分页 + 新浪/东财来源切换，返回保留列表状态）
+                      明细分页 + 新浪/东财来源切换，返回保留列表状态）；
+                      教学页六大经典回测策略（vectorbt 引擎，撮合模式可切换
+                      对比未来函数，净值对照买入持有）
   nginx.conf          生产：静态托管 + /api 反代后端
 deploy/             （预留：将来放 NAS 专属编排变体）
 tests/e2e/          Playwright E2E（自拉后端 uvicorn + 前端 vite preview）
@@ -143,6 +147,7 @@ backend 启动即拉起任务调度循环（`app/scheduler.py`），到点自动
 
 1. 数据层：✅ 日线爬虫（新浪/东财双源）与 ✅ 每日增量定时任务（进程内调度器
    + 「任务」页管理，见上节）已落地；待做：复权因子、财务/基本面数据；
-2. 回测引擎与策略（原 backtrader 体系迁入 backend，暴露回测 API）；
+2. 回测引擎与策略：✅ vectorbt 引擎 + 六大经典策略教学页（backtrader 已
+   停维护，改选 vectorbt；路线原定体系随之调整）；待做：参数寻优、复权因子；
 3. 前端页面：双均线教学页移植为 Vue 组件 + 回测结果展示；
 4. 实盘信号与调仓单（原 live 体系）。
