@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS daily_bar (
   PRIMARY KEY (code, trade_date, source)
 );
 CREATE INDEX IF NOT EXISTS idx_daily_bar_date ON daily_bar (trade_date);
+CREATE INDEX IF NOT EXISTS idx_daily_bar_code ON daily_bar (code);
 
 CREATE TABLE IF NOT EXISTS crawl_run (
   id             BIGSERIAL PRIMARY KEY,

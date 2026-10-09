@@ -6,6 +6,16 @@
 
 import psycopg
 
+# 两段式查询：先在 stock_basic 上分页（小表，毫秒级），再只对当页 ≤200 只
+# 聚合 daily_bar（大表 1,600 万行——原写法 LATERAL 作用于全表分页前的每一行，
+# 深分页时退化成对大表数千次聚合，实测 8~10s）。
+_LIST_IDS_SQL = """
+SELECT code, name FROM stock_basic
+WHERE (%s = '' OR code ILIKE %s OR name ILIKE %s)
+ORDER BY code
+LIMIT %s OFFSET %s
+"""
+
 _LIST_SQL = """
 SELECT b.code, b.name,
        p.close, p.pct_chg, p.trade_date,
@@ -26,9 +36,8 @@ LEFT JOIN LATERAL (
     FROM daily_bar d2
     WHERE d2.code = b.code
 ) s ON true
-WHERE (%s = '' OR b.code ILIKE %s OR b.name ILIKE %s)
+WHERE b.code = ANY(%s)
 ORDER BY b.code
-LIMIT %s OFFSET %s
 """
 
 _COUNT_SQL = """
@@ -65,10 +74,16 @@ def fetch_stock_list(dsn: str, *, q: str = "", limit: int = 50, offset: int = 0)
     def run():
         with psycopg.connect(dsn, connect_timeout=3) as conn:
             with conn.cursor() as cur:
-                cur.execute(_LIST_SQL, (q, like, like, limit, offset))
-                cols = ["code", "name", "close", "pct_chg", "last_date",
-                        "bars", "first_date", "sources"]
-                stocks = [dict(zip(cols, row)) for row in cur.fetchall()]
+                cur.execute(_LIST_IDS_SQL, (q, like, like, limit, offset))
+                page_rows = cur.fetchall()
+                codes = [r[0] for r in page_rows]
+                stocks = []
+                if codes:
+                    cur.execute(_LIST_SQL, (codes,))
+                    cols = ["code", "name", "close", "pct_chg", "last_date",
+                            "bars", "first_date", "sources"]
+                    by_code = {r[0]: dict(zip(cols, r)) for r in cur.fetchall()}
+                    stocks = [by_code[c] for c in codes]   # 保持 code 序
                 cur.execute(_COUNT_SQL, (q, like, like))
                 total = cur.fetchone()[0]
         for s in stocks:
