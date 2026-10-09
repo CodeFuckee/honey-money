@@ -11,4 +11,8 @@ DATABASE_URL = os.environ.get(
 # 代理池（jhao104/proxy_pool）Web API 地址；/get 返回一个可用代理。
 PROXY_POOL_URL = os.environ.get("PROXY_POOL_URL", "http://proxy_pool:5010")
 
+# 进程内爬虫任务调度开关（默认开）：0/false 关闭自动调度（任务 CRUD 仍可用）。
+SCHEDULER_ENABLED = os.environ.get("SCHEDULER_ENABLED", "1").strip().lower() \
+    not in ("0", "false", "no")
+
 SERVICE_VERSION = "0.1.0"

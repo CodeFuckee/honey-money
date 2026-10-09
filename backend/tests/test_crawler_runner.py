@@ -54,8 +54,10 @@ class FakeStore:
         self.sources.append(source)
         return len(rows)
 
-    def start_run(self, conn, mode, source=None):
+    def start_run(self, conn, mode, source=None, task_id=None, trigger="manual"):
         self.run_source = source
+        self.run_task_id = task_id
+        self.run_trigger = trigger
         return 1
 
     def finish_run(self, conn, run_id, **stats):
@@ -248,3 +250,67 @@ class TestBatchCommit:
         runner = make_runner()
         run(runner.run(STOCKS, batch_size=None, on_batch=calls.append))
         assert calls == []
+
+
+class TestStopEvent:
+    """外部停止信号（任务管理页「停止」按钮）：停止派发、优雅落库、不算失败。"""
+
+    def test_stopped_before_start_runs_nothing(self):
+        stop = asyncio.Event()
+        stop.set()
+        client, store = FakeClient(), FakeStore()
+        summary = run(make_runner(client, store).run(STOCKS, stop_event=stop))
+        assert client.calls == []
+        assert summary.ok_stocks == 0
+        assert summary.stopped is True
+        assert summary.aborted is False, "用户主动停止 ≠ 熔停失败"
+
+    def test_stop_midway_finishes_inflight_and_stops_dispatch(self):
+        """第 1 只完成后置位：在跑的不打断，后续不再派发。"""
+        stop = asyncio.Event()
+        client, store = FakeClient(), FakeStore()
+
+        async def fetch_then_stop(market, code, *, beg="0", **kw):
+            result = await client.fetch_daily_bars(market, code, beg=beg)
+            if len(client.calls) >= 1:
+                stop.set()
+            return result
+
+        runner = CrawlRunner(client=FakeClientProxy(client, fetch_then_stop),
+                             store=store, conn=FakeConn(), concurrency=1)
+        summary = run(runner.run(STOCKS, stop_event=stop))
+        assert summary.stopped is True
+        assert summary.ok_stocks == 1          # 只有第 1 只完成
+        assert len(client.calls) == 1          # 第 2、3 只未派发
+
+    def test_no_stop_event_runs_to_completion(self):
+        summary = run(make_runner().run(STOCKS, stop_event=None))
+        assert summary.ok_stocks == 3
+        assert summary.stopped is False
+
+    def test_task_id_and_trigger_passthrough(self):
+        """调度器联动：run 记录关联 task_id 与触发方式（crawl_run.task_id/trigger）。"""
+        store = FakeStore()
+        run(make_runner(store=store).run(STOCKS, task_id=5, trigger="catch_up"))
+        assert store.run_task_id == 5
+        assert store.run_trigger == "catch_up"
+
+    def test_default_trigger_is_manual(self):
+        """CLI 直跑不传参：trigger=manual（ran_today 不认 manual，不影响当晚调度）。"""
+        store = FakeStore()
+        run(make_runner(store=store).run(STOCKS))
+        assert store.run_trigger == "manual"
+
+
+class FakeClientProxy:
+    """包装 client，替换 fetch_daily_bars 实现（其余方法透传）。"""
+
+    def __init__(self, inner, fetch):
+        self._inner = inner
+        self._fetch = fetch
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    async def fetch_daily_bars(self, market, code, *, beg="0", **kw):
+        return await self._fetch(market, code, beg=beg, **kw)

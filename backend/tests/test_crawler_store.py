@@ -73,6 +73,13 @@ class TestSchema:
             assert f"CREATE TABLE IF NOT EXISTS {table}" in ddl
         assert "CREATE INDEX IF NOT EXISTS" in ddl
 
+    def test_init_schema_adds_task_link_columns(self, fake_conn):
+        """调度关联列（CLI 与调度器共用 crawl_run）：不存在则补建。"""
+        store_mod.Store().init_schema(fake_conn)
+        ddl = "\n".join(fake_conn.cursor_obj.executed)
+        assert "ALTER TABLE crawl_run ADD COLUMN IF NOT EXISTS task_id" in ddl
+        assert ("ADD COLUMN IF NOT EXISTS trigger_kind" in ddl)
+
 
 class TestUpsertStockBasic:
     def test_upsert_rows(self, fake_conn):

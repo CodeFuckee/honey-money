@@ -1,19 +1,60 @@
 """honey-money 后端：FastAPI 应用工厂。
 
-当前为工程化骨架——只有健康检查与基础设施连通探测两类接口，
-业务（行情数据/回测/实盘信号）在后续版本逐步迁入。
+接口分组：
+- /healthz                存活探针
+- /api/infra              PostgreSQL / 代理池 连通探测
+- /api/stocks[/bars]      数据浏览
+- /api/crawl/stats        爬虫数据统计
+- /api/tasks[...]         爬虫任务管理（CRUD/触发/取消/停止/历史）
+
+任务调度：lifespan 启动时初始化任务表（含预置任务）并拉起进程内调度循环
+（每日到点自动爬取 + 启动补跑，见 app/scheduler.py）；SCHEDULER_ENABLED=0
+可整体关闭（任务 CRUD 仍可用，仅不再自动执行）。
 """
 
+from contextlib import asynccontextmanager
+
+import psycopg
 from fastapi import FastAPI
 
 from . import config
 from .browse import fetch_stock_bars, fetch_stock_list
+from .crawler.store import Store
 from .crawl_stats import fetch_crawl_stats
 from .infra import check_postgres, check_proxy_pool
+from .scheduler import PgAdvisoryLock, TaskScheduler, build_crawl_executor
+from .task_store import TaskStore
+from .tasks_api import register_task_routes
 
 
-def create_app() -> FastAPI:
-    app = FastAPI(title="honey-money backend", version=config.SERVICE_VERSION)
+def create_app(*, scheduler: TaskScheduler | None = None,
+               task_store: TaskStore | None = None, connect=None) -> FastAPI:
+    """依赖注入参数供测试换假件；缺省按配置构造生产件。"""
+    task_store = task_store or TaskStore()
+    connect = connect or psycopg.connect
+    if scheduler is None:
+        scheduler = TaskScheduler(
+            dsn=config.DATABASE_URL,
+            executor=build_crawl_executor(config.DATABASE_URL, config.PROXY_POOL_URL),
+            lock=PgAdvisoryLock(config.DATABASE_URL))
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        try:
+            with connect(config.DATABASE_URL) as conn:
+                Store().init_schema(conn)          # 含 crawl_run 任务关联列
+                task_store.init_schema(conn)       # crawl_task + 预置任务
+                conn.commit()
+        except Exception as exc:                   # PG 暂不可达：服务照常起，
+            print(f"[startup] 任务表初始化失败（调度扫描会重试）: {exc}")
+        if config.SCHEDULER_ENABLED:
+            await scheduler.start()
+        yield
+        await scheduler.stop()
+
+    app = FastAPI(title="honey-money backend", version=config.SERVICE_VERSION,
+                  lifespan=lifespan)
+    app.state.scheduler = scheduler
 
     @app.get("/healthz")
     def healthz():
@@ -55,6 +96,9 @@ def create_app() -> FastAPI:
         始终 200；PG 不可达在 status=down 表达（同 /api/infra 的降级约定）。
         """
         return fetch_crawl_stats(config.DATABASE_URL)
+
+    register_task_routes(app, scheduler=scheduler, task_store=task_store,
+                         connect=connect)
 
     return app
 

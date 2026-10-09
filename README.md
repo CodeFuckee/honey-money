@@ -10,16 +10,21 @@ PostgreSQL + 代理池，Docker Compose 一键部署（本地 / 群晖 NAS），
 
 ```
 backend/            Python 后端（FastAPI）
-  app/main.py         应用工厂：/healthz 存活探针、/api/infra 基础设施探测
+  app/main.py         应用工厂：/healthz 存活探针、/api/infra 基础设施探测、
+                      /api/tasks 爬虫任务管理
   app/infra.py        PostgreSQL / 代理池 连通性检查（快速失败、优雅降级）
-  app/crawler/        东财日线爬虫：rate(按域名动态限速) / proxies(代理池经纪) /
-                      eastmoney(接口客户端) / store(存储) / runner(编排) / __main__(CLI)
-  tests/              63 个离线 pytest 用例（API 骨架 6 + 爬虫 57）
+  app/crawler/        日线爬虫：rate(按域名动态限速) / proxies(代理池经纪) /
+                      eastmoney(接口客户端) / sina(新浪客户端) / store(存储) /
+                      runner(编排) / __main__(CLI)
+  app/task_store.py   爬虫任务持久化（crawl_task 表 CRUD + 预置任务播种）
+  app/scheduler.py    进程内任务调度器（每日到点/启动补跑/全局串行/advisory lock 互斥）
+  app/tasks_api.py    任务管理 API（CRUD/触发/取消/停止/历史）
+  tests/              离线 pytest 用例（API 骨架 + 爬虫 + 任务调度）
 frontend/           Vue3 + Vite 前端
-  src/App.vue         服务仪表盘，三套界面风格一键切换（苹果 / Fluent 2 /
-                      IBM Carbon，与 Penpot 三版原型对齐，localStorage 持久化）：
-                      四状态（加载骨架/空态插画/错误横幅/降级占位）+
-                      数据·回测·教学占位页 + 数据源子页（新浪/东财来源筛选变体）
+  src/App.vue         服务仪表盘（Carbon 风格）：四状态（加载骨架/空态插画/
+                      错误横幅/降级占位）+ 数据·任务·回测·教学页 +
+                      数据源子页（新浪/东财来源筛选变体）；「任务」页管理
+                      每日爬虫任务（启停/手动触发/实时进度/历史）
   nginx.conf          生产：静态托管 + /api 反代后端
 deploy/             （预留：将来放 NAS 专属编排变体）
 tests/e2e/          Playwright E2E（自拉后端 uvicorn + 前端 vite preview）
@@ -101,8 +106,23 @@ docker exec honey-money-backend-1 python -m app.crawler --source eastmoney  # �
 重试 + 官方总数校验（不完整即报错重跑，绝不静默漏爬）。
 
 数据表：`stock_basic`（清单快照）、`daily_bar`（日线，全市场约 2500 万行/源）、
-`crawl_run`（运行汇总与失败清单）。新浪源全量约 5200+ 请求，1 QPS 起步（AIMD
+`crawl_run`（运行汇总与失败清单，`task_id`/`trigger_kind` 关联调度任务与触发方式）、
+`crawl_task`（任务定义）。新浪源全量约 5200+ 请求，1 QPS 起步（AIMD
 自动升速）约 1~2 小时；此后每日增量数分钟。
+
+## 每日数据更新调度（进程内自治，无需外部计划任务）
+
+backend 启动即拉起任务调度循环（`app/scheduler.py`），到点自动增量爬取：
+
+- **调度时刻**：北京时间（`Asia/Shanghai`，与容器时区无关）每日 HH:MM，
+  不辨交易日——非交易日照常执行，增量断点机制保证空转无害；
+- **错过补跑**：到点时恰在重启/关机 → 下次启动自动补跑一次（trigger=catch_up）；
+- **全局串行**：同一时刻只跑一个任务，后到自动排队；执行前取 PostgreSQL
+  advisory lock——手动 CLI 与调度任务并发写库也被互斥；
+- **防封参数内置**：任务仅可配 数据源/模式/时刻，限速/抖动/分批/熔停用安全
+  默认值不可配；预置「新浪每日增量 18:00」默认禁用，页面上开开关即用；
+- **管理**：前端「任务」页（启停/手动触发/实时进度 3s 轮询/历史）或
+  `/api/tasks` 接口；`SCHEDULER_ENABLED=0` 可整体关闭调度（CLI 手动跑不受影响）。
 
 ## CI/CD
 
@@ -119,8 +139,8 @@ docker exec honey-money-backend-1 python -m app.crawler --source eastmoney  # �
 
 ## 路线图（业务迁入顺序）
 
-1. 数据层：✅ 东财日线爬虫已落地（app/crawler，见上节）；待做：复权因子、
-   财务/基本面数据、每日增量定时任务（NAS 计划任务或调度服务）；
+1. 数据层：✅ 日线爬虫（新浪/东财双源）与 ✅ 每日增量定时任务（进程内调度器
+   + 「任务」页管理，见上节）已落地；待做：复权因子、财务/基本面数据；
 2. 回测引擎与策略（原 backtrader 体系迁入 backend，暴露回测 API）；
 3. 前端页面：双均线教学页移植为 Vue 组件 + 回测结果展示；
 4. 实盘信号与调仓单（原 live 体系）。

@@ -30,6 +30,7 @@ class CrawlSummary:
     elapsed_sec: float
     source: str = "eastmoney"
     aborted: bool = False
+    stopped: bool = False        # 外部停止（用户/调度操作），非失败
     failures: list[str] = field(default_factory=list)
 
 
@@ -58,9 +59,14 @@ class CrawlRunner:
                   limit: int | None = None, source: str = "eastmoney",
                   batch_size: int | None = None, batch_pause: float = 0.0,
                   abort_after_consecutive_failures: int | None = None,
+                  stop_event: asyncio.Event | None = None,
+                  task_id: int | None = None, trigger: str = "manual",
                   on_batch=None) -> CrawlSummary:
         """batch_size/batch_pause：每爬 N 只歇 M 秒（防封节奏）；
         abort_after_consecutive_failures：连续 N 只失败熔停，保存进度退出。
+        stop_event：外部停止信号（任务管理页「停止」）——停止派发新任务、
+        在跑的等完落库，summary.stopped=True（不算失败）；
+        task_id/trigger：调度任务关联（crawl_run.task_id/trigger_kind）。
         on_batch：每个批次边界回调（__main__ 里传 conn.commit —— 批级提交，
         之前全run单事务导致：库内进度长期不可见 + 锁持有到结束 + 崩溃全丢）。"""
         if limit is not None:
@@ -71,7 +77,8 @@ class CrawlRunner:
         summary = CrawlSummary(mode=mode, total_stocks=len(stocks),
                                ok_stocks=0, failed_stocks=0, bars_upserted=0,
                                elapsed_sec=0.0, source=source)
-        run_id = self._store.start_run(self._conn, mode=mode, source=source)
+        run_id = self._store.start_run(self._conn, mode=mode, source=source,
+                                       task_id=task_id, trigger=trigger)
         started = time.perf_counter()
 
         results: asyncio.Queue = asyncio.Queue(maxsize=self._concurrency * 2)
@@ -81,9 +88,12 @@ class CrawlRunner:
                  "abort": False, "pause_until": 0.0}
         sem = asyncio.Semaphore(self._concurrency)
 
+        def stop_requested() -> bool:
+            return stop_event is not None and stop_event.is_set()
+
         async def worker() -> None:
             while True:
-                if state["abort"]:
+                if state["abort"] or stop_requested():
                     return
                 i = state["idx"]
                 if i >= len(stocks):        # 先查队列空，再休眠：结束时不多睡
@@ -91,6 +101,8 @@ class CrawlRunner:
                 now = self._clock()
                 if now < state["pause_until"]:      # 批间休眠（防封节奏）
                     await self._sleep(state["pause_until"] - now)
+                if stop_requested():        # 休眠期间被叫停：不再派发
+                    return
                 state["idx"] = i + 1
                 stock = stocks[i]
 
@@ -120,7 +132,7 @@ class CrawlRunner:
                     if on_batch:
                         on_batch(state["done"])      # 批级提交：进度可见/锁释放/可断点
                     if (state["done"] < summary.total_stocks
-                            and not state["abort"]):
+                            and not state["abort"] and not stop_requested()):
                         state["pause_until"] = self._clock() + batch_pause
 
         workers = [asyncio.create_task(worker()) for _ in range(
@@ -131,6 +143,7 @@ class CrawlRunner:
 
         summary.elapsed_sec = round(time.perf_counter() - started, 1)
         summary.aborted = state["abort"]
+        summary.stopped = stop_requested()
         self._store.finish_run(
             self._conn, run_id,
             total_stocks=summary.total_stocks, ok_stocks=summary.ok_stocks,

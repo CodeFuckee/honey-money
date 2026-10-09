@@ -7,7 +7,10 @@
 - stock_basic  代码→市场/名称 快照（清单接口刷新，不分源）
 - daily_bar   不复权日线，**主键 (code, trade_date, source)**：不同来源并存
   不覆盖，方便多源数据对比（如东财解封后重爬一遍即可 SQL diff）；
-- crawl_run   每次运行汇总（含失败清单与来源），运维排查用。
+- crawl_run   每次运行汇总（含失败清单与来源），运维排查用；task_id 关联
+  触发它的调度任务（NULL=CLI 直跑），trigger_kind 区分触发方式
+  （manual=手动/CLI、schedule=到点、catch_up=启动补跑）——调度器的
+  「今日已计划执行」判定只认后两者，手动触发不抑制当晚调度。
 
 schema 升级：daily_bar 旧主键 (code,trade_date) 表会被 DROP 重建为三列主键
 ——仅限尚无业务数据的初始化阶段安全（写入数据后升级需另行迁移）。
@@ -104,6 +107,10 @@ class Store:
             cur.execute("ALTER TABLE crawl_run ADD COLUMN IF NOT EXISTS source VARCHAR(16)")
             cur.execute("ALTER TABLE crawl_run ADD COLUMN IF NOT EXISTS aborted BOOLEAN "
                         "NOT NULL DEFAULT false")
+            # 调度任务关联：task_id（NULL=CLI 直跑）与触发方式
+            cur.execute("ALTER TABLE crawl_run ADD COLUMN IF NOT EXISTS task_id BIGINT")
+            cur.execute("ALTER TABLE crawl_run ADD COLUMN IF NOT EXISTS trigger_kind "
+                        "VARCHAR(16) NOT NULL DEFAULT 'manual'")
 
     def upsert_stock_basic(self, conn, stocks: list[dict]) -> None:
         if not stocks:
@@ -138,10 +145,12 @@ class Store:
             ])
         return len(rows)
 
-    def start_run(self, conn, mode: str, source: str | None = None) -> int:
+    def start_run(self, conn, mode: str, source: str | None = None,
+                  task_id: int | None = None, trigger: str = "manual") -> int:
         with conn.cursor() as cur:
-            cur.execute("INSERT INTO crawl_run (mode, source) VALUES (%s, %s) "
-                        "RETURNING id", (mode, source))
+            cur.execute("INSERT INTO crawl_run (mode, source, task_id, trigger_kind) "
+                        "VALUES (%s, %s, %s, %s) RETURNING id",
+                        (mode, source, task_id, trigger))
             return cur.fetchone()[0]
 
     def finish_run(self, conn, run_id: int, *, total_stocks: int, ok_stocks: int,

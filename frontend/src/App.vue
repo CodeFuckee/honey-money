@@ -101,6 +101,142 @@ const srcSubText = computed(() => {
     : `按来源筛选 · 仅显示${p.label}源 K线 · v0.2+ 规划`
 })
 
+// ===== 爬虫任务管理（/api/tasks CRUD + 运行态 3s 轮询）=====
+const tasksState = ref({ status: 'loading', tasks: [], queue: [] })
+let tasksTimer = null
+
+async function loadTasks() {
+  try {
+    const r = await fetch('/api/tasks')
+    tasksState.value = await r.json()
+  } catch (e) {
+    tasksState.value = { status: 'down', detail: String(e), tasks: [] }
+  }
+}
+
+function startTasksPolling() {
+  loadTasks()
+  stopTasksPolling()
+  tasksTimer = setInterval(loadTasks, 3000)
+}
+function stopTasksPolling() {
+  if (tasksTimer) { clearInterval(tasksTimer); tasksTimer = null }
+}
+watch(activeNav, nav => {
+  if (nav === 'tasks') startTasksPolling()
+  else stopTasksPolling()
+})
+
+const TASK_SOURCES = [{ v: 'sina', label: '新浪财经' }, { v: 'eastmoney', label: '东方财富' }]
+const TASK_MODES = [{ v: 'incremental', label: '增量续爬' }, { v: 'full', label: '全量重爬' }]
+const sourceLabel = v => (TASK_SOURCES.find(s => s.v === v) || {}).label || v
+const modeLabel = v => (TASK_MODES.find(m => m.v === v) || {}).label || v
+const PHASES = { idle: ['空闲', 'idle'], queued: ['排队中', 'queued'], running: ['运行中', 'up'] }
+const phaseInfo = t => PHASES[t.phase] || PHASES.idle
+
+const taskDialog = ref(null)     // null | {mode:'create'|'edit', id?, name, source, taskMode, schedule_time}
+const taskError = ref('')
+const expandedRuns = ref({})     // task_id → bool
+const runsMap = ref({})          // task_id → runs[]
+
+function openCreate() {
+  taskError.value = ''
+  taskDialog.value = { mode: 'create', name: '', source: 'sina', taskMode: 'incremental', schedule_time: '18:00' }
+}
+function openEdit(t) {
+  taskError.value = ''
+  taskDialog.value = { mode: 'edit', id: t.id, name: t.name, source: t.source,
+                       taskMode: t.mode, schedule_time: t.schedule_time }
+}
+async function saveTask() {
+  const d = taskDialog.value
+  const body = { source: d.source, mode: d.taskMode, schedule_time: d.schedule_time.trim(), name: d.name.trim() || null }
+  taskError.value = ''
+  try {
+    const r = d.mode === 'create'
+      ? await fetch('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      : await fetch(`/api/tasks/${d.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    if (!r.ok) { taskError.value = (await r.json()).detail || `保存失败（HTTP ${r.status}）`; return }
+    taskDialog.value = null
+    loadTasks()
+  } catch (e) { taskError.value = String(e) }
+}
+async function actTask(t, action) {
+  try {
+    const r = await fetch(`/api/tasks/${t.id}/${action}`, { method: 'POST' })
+    if (!r.ok) console.warn(`任务 ${t.id} ${action} 失败: HTTP ${r.status}`)
+  } finally { loadTasks() }
+}
+async function toggleTask(t) {
+  try {
+    await fetch(`/api/tasks/${t.id}`, { method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: !t.enabled }) })
+  } finally { loadTasks() }
+}
+async function deleteTask(t) {
+  if (!window.confirm(`确定删除任务「${t.name}」？（运行记录保留）`)) return
+  try {
+    const r = await fetch(`/api/tasks/${t.id}`, { method: 'DELETE' })
+    if (r.status === 409) window.alert((await r.json()).detail)
+  } finally { loadTasks() }
+}
+async function toggleRuns(t) {
+  expandedRuns.value = { ...expandedRuns.value, [t.id]: !expandedRuns.value[t.id] }
+  if (expandedRuns.value[t.id] && !runsMap.value[t.id]) {
+    try {
+      const r = await fetch(`/api/tasks/${t.id}/runs`)
+      runsMap.value = { ...runsMap.value, [t.id]: (await r.json()).runs || [] }
+    } catch { runsMap.value = { ...runsMap.value, [t.id]: [] } }
+  }
+}
+
+const serverClock = computed(() => {
+  const s = tasksState.value.server_time
+  if (!s) return ''
+  try {
+    return new Date(s).toLocaleString('zh-CN', {
+      month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  } catch { return s }
+})
+function nextRunText(t) {
+  if (!t.next_run_at) return '已禁用'
+  return fmtNext(t.next_run_at)
+}
+function fmtNext(iso) {
+  try {
+    const d = new Date(iso)
+    const now = new Date()
+    const sameDay = d.toDateString() === new Date(tasksState.value.server_time || now).toDateString()
+    const hm = d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
+    if (sameDay) return `今天 ${hm}`
+    return `${d.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' })} ${hm}`
+  } catch { return iso }
+}
+function taskLastRunText(r) {
+  const t = r.started_at ? new Date(r.started_at).toLocaleString('zh-CN', {
+    month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '?'
+  const trig = { schedule: '定时', catch_up: '补跑', manual: '手动' }[r.trigger] || r.trigger
+  const outcome = r.aborted ? '熔停' : '完成'
+  return `${t} · ${trig} · ${outcome} · 成 ${fmt(r.ok_stocks)} / 败 ${fmt(r.failed_stocks)}`
+}
+function riskNote(t) {
+  if (t.source === 'eastmoney')
+    return '东财源 drip 模式：每 30 秒 1 请求（出口 IP 曾被封），全市场一轮约需 40+ 小时，仅作解封后校验/补数用'
+  if (t.mode === 'full')
+    return '全量重爬：每轮 5200+ 请求、约 1~2 小时，确认需要重建数据时再开启'
+  return ''
+}
+const dialogRisk = computed(() => {
+  const d = taskDialog.value
+  if (!d) return ''
+  if (d.source === 'eastmoney')
+    return '东财源 drip 模式：每 30 秒 1 请求（出口 IP 曾被封），全市场一轮约 40+ 小时，仅作解封后校验/补数用'
+  if (d.taskMode === 'full')
+    return '全量重爬：每轮 5200+ 请求、约 1~2 小时，确认需要重建数据时再开启'
+  return ''
+})
+
 onMounted(refresh)
 </script>
 
@@ -138,6 +274,7 @@ onMounted(refresh)
           <div class="group">导航</div>
           <button v-for="n in [
               { id: 'dash', label: '仪表盘' }, { id: 'data', label: '数据' },
+              { id: 'tasks', label: '任务' },
               { id: 'backtest', label: '回测' }, { id: 'learn', label: '教学' }]"
             :key="n.id" class="nav-item"
             :class="{ active: activeNav === n.id, 'sub-active': activeNav.startsWith('src-') && n.id === 'data' }"
@@ -152,6 +289,11 @@ onMounted(refresh)
               <ellipse cx="10" cy="5" rx="7" ry="2.6" stroke="currentColor" stroke-width="1.5"/>
               <path d="M3 5v10c0 1.4 3.1 2.6 7 2.6s7-1.2 7-2.6V5" stroke="currentColor" stroke-width="1.5"/>
               <path d="M3 10c0 1.4 3.1 2.6 7 2.6s7-1.2 7-2.6" stroke="currentColor" stroke-width="1.5"/>
+            </svg>
+            <svg v-else-if="n.id === 'tasks'" class="nav-icon" viewBox="0 0 20 20" fill="none">
+              <rect x="6" y="2.5" width="8" height="3.4" rx="1" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M6 4.2H3.5v13h13v-13H14" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+              <path d="M7 9.5h6M7 13h6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
             </svg>
             <svg v-else-if="n.id === 'backtest'" class="nav-icon" viewBox="0 0 20 20" fill="none">
               <path d="M3 17h14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
@@ -358,6 +500,126 @@ onMounted(refresh)
               </DataTable>
             </div>
             <p class="note">数据源：本地 PG（新浪/东财）· 爬虫持续入库中 · 单股K线明细接口已就绪（/api/stocks/{code}/bars），图表待选型</p>
+          </template>
+
+          <!-- ===== 爬虫任务管理（每日数据更新调度） ===== -->
+          <template v-else-if="activeNav === 'tasks'">
+            <div class="toolbar">
+              <div>
+                <h2 class="h1">爬虫任务</h2>
+                <p class="sub">每日数据更新调度 · 到点自动执行 · 全局串行排队</p>
+              </div>
+              <div class="toolbar-right">
+                <span v-if="serverClock" class="sub">服务器时间 {{ serverClock }}</span>
+                <button class="btn btn-primary" @click="openCreate">＋ 新建任务</button>
+              </div>
+            </div>
+
+            <!-- 数据不可用（PG down） -->
+            <div v-if="tasksState.status === 'down'" class="error-banner">
+              <span><b class="eb-title">任务数据不可用：</b>{{ tasksState.detail || '数据库连接失败' }} · 恢复后自动重试</span>
+            </div>
+
+            <!-- 空态 -->
+            <div v-else-if="!tasksState.tasks.length" class="card task-empty">
+              <div class="state">暂无爬虫任务</div>
+              <div class="detail">点击右上角「新建任务」创建每日数据更新任务（推荐：新浪源 · 增量 · 每日 18:00）</div>
+            </div>
+
+            <!-- 任务卡片列表 -->
+            <div v-else class="task-list">
+              <div v-for="t in tasksState.tasks" :key="t.id" class="card task-card">
+                <div class="task-head">
+                  <div class="task-title">
+                    <h3 class="task-name">{{ t.name }}</h3>
+                    <div class="task-tags">
+                      <span class="chip" :class="t.source === 'eastmoney' ? 'ef' : 'sina'">{{ sourceLabel(t.source) }}源</span>
+                      <span class="chip mode">{{ modeLabel(t.mode) }}</span>
+                      <span class="chip time">每日 {{ t.schedule_time }}</span>
+                      <span class="fbadge"><span class="dot" :class="phaseInfo(t)[1]"></span><span class="fb-txt">{{ phaseInfo(t)[0] }}</span></span>
+                    </div>
+                  </div>
+                  <label class="switch" :title="t.enabled ? '点击禁用' : '点击启用'">
+                    <input type="checkbox" :checked="t.enabled" @change="toggleTask(t)">
+                    <span class="slider"></span>
+                  </label>
+                </div>
+
+                <!-- 运行中：实时进度（3s 轮询刷新） -->
+                <div v-if="t.phase === 'running'" class="task-progress">
+                  <div class="bar"><div class="bar-fill"
+                    :style="{ width: t.progress ? Math.min(100, Math.round(t.progress.done / Math.max(1, t.progress.total) * 100)) + '%' : '0%' }"></div></div>
+                  <div class="detail">{{ t.progress ? `已完成 ${fmt(t.progress.done)} / ${fmt(t.progress.total)} 只` : '准备中（拉取股票清单）…' }}</div>
+                </div>
+
+                <div class="task-meta">
+                  <span>下次执行：<b>{{ nextRunText(t) }}</b></span>
+                  <span v-if="t.last_run">上次：{{ taskLastRunText(t.last_run) }}</span>
+                </div>
+                <div v-if="riskNote(t)" class="task-risk">{{ riskNote(t) }}</div>
+
+                <div class="task-actions">
+                  <button v-if="t.phase === 'running'" class="btn" @click="actTask(t, 'stop')">停止</button>
+                  <button v-else-if="t.phase === 'queued'" class="btn" @click="actTask(t, 'cancel')">取消排队</button>
+                  <button v-else class="btn" @click="actTask(t, 'run')">立即执行</button>
+                  <button class="btn" @click="toggleRuns(t)">{{ expandedRuns[t.id] ? '收起历史' : '历史' }}</button>
+                  <button class="btn" @click="openEdit(t)">编辑</button>
+                  <button class="btn btn-danger" @click="deleteTask(t)">删除</button>
+                </div>
+
+                <!-- 运行历史 -->
+                <div v-if="expandedRuns[t.id]" class="task-runs">
+                  <div v-if="!(runsMap[t.id] || []).length" class="detail">暂无运行记录</div>
+                  <table v-else class="runs-table">
+                    <thead><tr><th>开始时间</th><th>触发</th><th>模式</th><th>结果</th><th>入库K线</th></tr></thead>
+                    <tbody>
+                      <tr v-for="(r, i) in runsMap[t.id]" :key="i">
+                        <td class="mono">{{ (r.started_at || '').replace('T', ' ').slice(5, 16) }}</td>
+                        <td>{{ ({ schedule: '定时', catch_up: '补跑', manual: '手动' })[r.trigger] || r.trigger }}</td>
+                        <td>{{ modeLabel(r.mode) }}</td>
+                        <td>{{ r.aborted ? '熔停' : '完成' }} · 成 {{ fmt(r.ok_stocks) }} / 败 {{ fmt(r.failed_stocks) }}</td>
+                        <td class="mono">{{ fmt(r.bars_upserted) }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <p class="note">调度说明：每日到点自动执行（北京时间，不辨交易日——非交易日空转无害）；错过到点（重启/关机）下次启动时自动补跑；全局串行——同一时刻只跑一个任务，后到排队。手动「立即执行」不影响当晚定时。</p>
+
+            <!-- 新建/编辑对话框 -->
+            <div v-if="taskDialog" class="dialog-mask" @click.self="taskDialog = null">
+              <div class="dialog">
+                <h3 class="dialog-title">{{ taskDialog.mode === 'create' ? '新建爬虫任务' : '编辑任务' }}</h3>
+                <label class="dialog-field">
+                  <span>名称（可选，默认按源/模式生成）</span>
+                  <InputText v-model="taskDialog.name" placeholder="如：新浪每日增量" />
+                </label>
+                <label class="dialog-field">
+                  <span>数据源</span>
+                  <select v-model="taskDialog.source" class="dialog-select">
+                    <option v-for="s in TASK_SOURCES" :key="s.v" :value="s.v">{{ s.label }}</option>
+                  </select>
+                </label>
+                <label class="dialog-field">
+                  <span>模式</span>
+                  <select v-model="taskDialog.taskMode" class="dialog-select">
+                    <option v-for="m in TASK_MODES" :key="m.v" :value="m.v">{{ m.label }}</option>
+                  </select>
+                </label>
+                <label class="dialog-field">
+                  <span>每日执行时刻（北京时间，24 小时制）</span>
+                  <InputText v-model="taskDialog.schedule_time" placeholder="18:00" />
+                </label>
+                <p class="task-risk">{{ dialogRisk || '防封参数（限速/抖动/分批/熔停）已内置安全默认值，无需配置' }}</p>
+                <p v-if="taskError" class="task-error">{{ taskError }}</p>
+                <div class="dialog-actions">
+                  <button class="btn" @click="taskDialog = null">取消</button>
+                  <button class="btn btn-primary" @click="saveTask">保存</button>
+                </div>
+              </div>
+            </div>
           </template>
 
           <!-- ===== 回测工作台（占位） ===== -->
@@ -948,6 +1210,67 @@ body {
 .browse-head { height: 48px; padding: 0 16px; background: #f4f4f4; color: #525252; }
 .browse-row.up { color: #c50f1f; }
 .browse-row.down { color: #0f7b0f; }
+
+/* ===== 爬虫任务管理页 ===== */
+.task-list { display: flex; flex-direction: column; gap: 16px; }
+.task-card { padding: 20px 24px; }
+.task-empty { padding: 40px 24px; text-align: center; }
+.task-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+.task-name { margin: 0 0 8px; font-size: 18px; font-weight: 600; color: var(--fg); }
+.task-tags { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.chip.mode { background: #f0f0f0; color: var(--fg-2); }
+.chip.time { background: #f0f0f0; color: var(--fg-2); font-variant-numeric: tabular-nums; }
+.task-progress { margin: 14px 0 4px; }
+.task-progress .detail { margin-top: 6px; }
+.task-meta { display: flex; gap: 24px; flex-wrap: wrap; margin-top: 14px; font-size: 13px; color: var(--fg-2); }
+.task-meta b { color: var(--fg); font-weight: 600; }
+.task-risk {
+  margin-top: 10px; padding: 8px 12px; font-size: 12.5px;
+  background: var(--ph-tag-bg); color: var(--ph-tag-fg); border-left: 3px solid var(--dot-warn);
+}
+.task-actions { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+.task-actions .btn { font-size: 13px; padding: 6px 14px; }
+.btn-danger { color: var(--dot-down); border-color: var(--dot-down); }
+.btn-danger:hover { background: var(--error-bg); }
+.task-runs { margin-top: 16px; border-top: 1px solid var(--card-border-color); padding-top: 14px; }
+.runs-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.runs-table th { text-align: left; padding: 6px 10px; background: #f4f4f4; color: var(--fg-2); font-weight: 600; }
+.runs-table td { padding: 7px 10px; border-bottom: 1px solid #ededed; color: var(--fg-2); }
+.runs-table .mono { font-variant-numeric: tabular-nums; }
+
+/* 开关（carbon 方角滑块） */
+.switch { position: relative; display: inline-block; width: 44px; height: 24px; flex: none; cursor: pointer; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.switch .slider {
+  position: absolute; inset: 0; background: var(--dot-idle); transition: background .15s;
+}
+.switch .slider::before {
+  content: ''; position: absolute; width: 18px; height: 18px; left: 3px; top: 3px;
+  background: #fff; transition: transform .15s;
+}
+.switch input:checked + .slider { background: var(--accent); }
+.switch input:checked + .slider::before { transform: translateX(20px); }
+
+/* 对话框（carbon 模态） */
+.dialog-mask {
+  position: fixed; inset: 0; background: rgba(22, 22, 22, .5); z-index: 60;
+  display: flex; align-items: center; justify-content: center;
+}
+.dialog {
+  width: min(440px, calc(100vw - 48px)); background: var(--card-bg);
+  border: 1px solid var(--card-border-color); border-top: 4px solid var(--accent);
+  padding: 24px; box-shadow: 0 8px 32px rgba(0, 0, 0, .18);
+}
+.dialog-title { margin: 0 0 18px; font-size: 18px; font-weight: 600; color: var(--fg); }
+.dialog-field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+.dialog-field > span { font-size: 12.5px; color: var(--fg-2); }
+.dialog-select {
+  height: 38px; padding: 0 10px; font: inherit; font-size: 13.5px;
+  border: 1px solid var(--ph-input-border); background: var(--ph-input-bg); color: var(--fg);
+}
+.dialog .task-risk { margin: 4px 0 0; }
+.task-error { margin: 8px 0 0; font-size: 12.5px; color: var(--dot-down); }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
 
 /* ===== 响应式兜底 ===== */
 @media (max-width: 860px) {

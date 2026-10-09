@@ -1,76 +1,12 @@
 """E2E 冒烟：本地拉起后端(uvicorn)与前端(vite preview)，验证健康仪表盘页面。
 
 运行：.venv/Scripts/python.exe -m pytest tests/e2e --headed  # 人工观看
-      .venv/Scripts/python.exe -m pytest tests/e2e            # 无头
+      .venv/Scripts/python -m pytest tests/e2e            # 无头
+servers fixture 见同目录 conftest.py（本文件只写用例）。
 """
-
-import socket
-import subprocess
-import sys
-import time
-import urllib.request
-from pathlib import Path
 
 import pytest
 from playwright.sync_api import expect
-
-ROOT = Path(__file__).resolve().parents[2]
-
-
-def _free_port() -> int:
-    """让 OS 分配一个当前空闲端口（本机开发端口常被占，写死不可靠）。"""
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-def _wait(url: str, timeout: float = 30) -> bool:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            with urllib.request.urlopen(url, timeout=1) as resp:
-                if resp.status == 200:
-                    return True
-        except Exception:
-            time.sleep(0.5)
-    return False
-
-
-@pytest.fixture(scope="session")
-def servers():
-    backend_port, frontend_port = _free_port(), _free_port()
-    import os
-
-    procs = []
-    try:
-        # 注入本地必失败地址：PG/代理池探测秒级返回 down（默认 DSN 的主机名
-        # postgres 在无 DNS 的本机要等十几秒才超时，页面会长时间停在 1 张卡）
-        backend_env = {**os.environ,
-                       "DATABASE_URL": "postgresql://x:x@127.0.0.1:59999/none",
-                       "PROXY_POOL_URL": "http://127.0.0.1:59998"}
-        procs.append(subprocess.Popen(
-            [sys.executable, "-m", "uvicorn", "app.main:app",
-             "--port", str(backend_port), "--log-level", "warning"],
-            cwd=ROOT / "backend", env=backend_env,
-        ))
-        env = {**os.environ, "BACKEND_PORT": str(backend_port)}
-        # Windows 的 npm 是 npm.cmd 需要 shell；POSIX 直接 exec（shell=True+数组
-        # 在 POSIX 下只有首元素生效，preview 参数会全部丢失）
-        procs.append(subprocess.Popen(
-            ["npm", "run", "preview", "--", "--port", str(frontend_port),
-             "--strictPort", "--host", "127.0.0.1"],  # 默认只绑 IPv6 的 ::1
-            cwd=ROOT / "frontend", shell=(sys.platform == "win32"), env=env,
-        ))
-        assert _wait(f"http://127.0.0.1:{backend_port}/healthz"), "后端 30s 内未就绪"
-        assert _wait(f"http://127.0.0.1:{frontend_port}/"), "前端 preview 30s 内未就绪"
-        yield backend_port, frontend_port
-    finally:
-        for p in procs:
-            p.terminate()
-            try:
-                p.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                p.kill()
 
 
 def test_health_dashboard_renders(servers, page):
@@ -113,7 +49,7 @@ def test_health_dashboard_renders(servers, page):
 
 
 def test_shell_and_nav(servers, page):
-    """Web 全幅外壳：标题栏（无红绿灯）+ 侧栏导航四项 + 占位页切换。"""
+    """Web 全幅外壳：标题栏（无红绿灯）+ 侧栏导航五项 + 占位页切换。"""
     _, frontend_port = servers
     page.goto(f"http://127.0.0.1:{frontend_port}/")
 
@@ -129,9 +65,9 @@ def test_shell_and_nav(servers, page):
     assert box["width"] == vp["width"] and box["height"] == vp["height"], \
         f"窗口未铺满视口: {box['width']}x{box['height']} != {vp['width']}x{vp['height']}"
 
-    # 侧栏导航：四项，「仪表盘」默认激活
+    # 侧栏导航：五项（仪表盘/数据/任务/回测/教学），「仪表盘」默认激活
     nav = page.locator(".sidebar .nav-item")
-    expect(nav).to_have_count(4)
+    expect(nav).to_have_count(5)
     expect(page.locator(".sidebar .nav-item.active")).to_have_text("仪表盘")
 
     # 切到「数据」页：标题 + 真数据表（本地无 PG → 降级空表）可见
