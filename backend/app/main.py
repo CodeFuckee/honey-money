@@ -85,9 +85,13 @@ def create_app(*, scheduler: TaskScheduler | None = None,
                                 offset=offset, source=source.strip().lower())
 
     @app.get("/api/stocks/{code}/bars")
-    def stock_bars(code: str, limit: int = 250, offset: int = 0):
-        """单股日K（默认最新 250 根，时间升序返回，供图表使用）。"""
-        return fetch_stock_bars(config.DATABASE_URL, code, limit=limit, offset=offset)
+    def stock_bars(code: str, limit: int = 250, offset: int = 0, source: str = ""):
+        """单股日K（默认最新 250 根，时间升序返回，供图表使用）。
+
+        source 非空时仅取该来源（个股详情页来源切换）；缺省不过滤。
+        """
+        return fetch_stock_bars(config.DATABASE_URL, code, limit=limit,
+                                offset=offset, source=source.strip().lower())
 
     @app.get("/api/crawl/stats")
     def crawl_stats():

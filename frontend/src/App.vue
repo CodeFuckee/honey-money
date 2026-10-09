@@ -1,10 +1,17 @@
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import DataTable from 'primevue/datatable'
 import Column from 'primevue/column'
 import InputText from 'primevue/inputtext'
 import Button from 'primevue/button'
 import Paginator from 'primevue/paginator'
+import * as echarts from 'echarts/core'
+import { CandlestickChart, BarChart } from 'echarts/charts'
+import { GridComponent, TooltipComponent, DataZoomComponent } from 'echarts/components'
+import { CanvasRenderer } from 'echarts/renderers'
+
+echarts.use([CandlestickChart, BarChart, GridComponent, TooltipComponent,
+  DataZoomComponent, CanvasRenderer])
 
 // ===== 数据层（沿用原仪表盘逻辑：三接口并发 + 优雅降级）=====
 const backend = ref({ status: 'checking' })   // 后端进程本身
@@ -237,6 +244,148 @@ const dialogRisk = computed(() => {
   return ''
 })
 
+// ===== 个股历史行情详情（数据页行点击进入；K线近250根 + 全字段明细分页）=====
+const stock = ref(null)            // { code, name, source, fromNav }
+const chartBars = ref({ status: 'loading', bars: [] })
+const detailRows = ref({ status: 'loading', rows: [] })
+const detailPage = ref(0)          // 0 起
+const DETAIL_PAGE_SIZE = 50
+const chartEl = ref(null)
+let chartInstance = null
+
+function openStock(e) {
+  // PrimeVue DataTable row-click 参数为 { originalEvent, data, index }
+  const data = e.data ?? e
+  // 入口来自数据源子页时沿用该来源，否则默认新浪
+  const source = srcPage.value?.field || 'sina'
+  stock.value = { code: data.code, name: data.name, source }
+  detailPage.value = 0
+  stockNav.value = activeNav.value
+  activeNav.value = 'stock'
+}
+const stockNav = ref('data')       // 详情页返回目标（数据页/来源子页）
+
+function backToList() {
+  activeNav.value = stockNav.value || 'data'
+}
+
+async function fetchBars(code, { limit, offset, source }) {
+  const r = await fetch(`/api/stocks/${code}/bars?limit=${limit}&offset=${offset}&source=${source}`)
+  return r.json()
+}
+
+async function loadChart() {
+  chartBars.value = { status: 'loading', bars: [] }
+  try {
+    const body = await fetchBars(stock.value.code,
+      { limit: 250, offset: 0, source: stock.value.source })
+    chartBars.value = { status: body.status, bars: body.bars || [] }
+  } catch (e) {
+    chartBars.value = { status: 'down', detail: String(e), bars: [] }
+  }
+  await nextTick()
+  renderChart()
+}
+
+function renderChart() {
+  if (chartInstance) { chartInstance.dispose(); chartInstance = null }
+  const bars = chartBars.value.bars
+  if (!chartEl.value || chartBars.value.status !== 'up' || !bars.length) return
+  chartInstance = echarts.init(chartEl.value)
+  const dates = bars.map(b => b.date)
+  chartInstance.setOption({
+    animation: false,
+    tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
+    axisPointer: { link: [{ xAxisIndex: 'all' }] },
+    grid: [
+      { left: 64, right: 24, top: 16, height: '58%' },
+      { left: 64, right: 24, top: '74%', height: '16%' },
+    ],
+    xAxis: [
+      { type: 'category', data: dates, boundary: true, axisLabel: { fontSize: 10 } },
+      { type: 'category', gridIndex: 1, data: dates, axisLabel: { show: false } },
+    ],
+    yAxis: [
+      { scale: true, splitLine: { lineStyle: { color: '#eee' } } },
+      { gridIndex: 1, axisLabel: { show: false }, splitLine: { show: false } },
+    ],
+    dataZoom: [
+      { type: 'inside', xAxisIndex: [0, 1], start: 0, end: 100 },
+      { type: 'slider', xAxisIndex: [0, 1], top: '92%', height: 18, start: 0, end: 100 },
+    ],
+    series: [
+      { type: 'candlestick', name: '日K', data: bars.map(b => [b.open, b.close, b.low, b.high]),
+        itemStyle: { color: '#c50f1f', color0: '#0f7b0f', borderColor: '#c50f1f', borderColor0: '#0f7b0f' } },
+      { type: 'bar', name: '成交量', xAxisIndex: 1, yAxisIndex: 1,
+        data: bars.map(b => b.volume),
+        itemStyle: { color: c => (c.value != null && bars[c.dataIndex] &&
+          bars[c.dataIndex].close >= bars[c.dataIndex].open ? '#c50f1f' : '#0f7b0f') } },
+    ],
+  })
+}
+
+async function loadDetail() {
+  detailRows.value = { status: 'loading', rows: [] }
+  const offset = detailPage.value * DETAIL_PAGE_SIZE
+  try {
+    const body = await fetchBars(stock.value.code,
+      { limit: DETAIL_PAGE_SIZE, offset, source: stock.value.source })
+    if (body.status !== 'up') {
+      detailRows.value = { status: body.status, detail: body.detail, rows: [] }
+      return
+    }
+    const rows = body.bars || []
+    // 明细表最新日期在上（API 为图表返回升序，表格独立倒序展示）
+    const tableRows = [...rows].reverse()
+    // totalRecords 估算：满页则多给 1 触发下一页，末页精确
+    const total = rows.length === DETAIL_PAGE_SIZE ? offset + rows.length + 1 : offset + rows.length
+    detailRows.value = { status: 'up', rows: tableRows, total }
+  } catch (e) {
+    detailRows.value = { status: 'down', detail: String(e), rows: [] }
+  }
+}
+const detailTotal = computed(() =>
+  detailRows.value.total ?? (detailRows.value.rows?.length || 0))
+
+function onDetailPage(e) {
+  detailPage.value = e.page
+  loadDetail()
+}
+
+function setStockSource(s) {
+  if (stock.value.source === s) return
+  stock.value = { ...stock.value, source: s }
+  detailPage.value = 0
+  loadChart()
+  loadDetail()
+}
+
+function disposeChart() {
+  if (chartInstance) { chartInstance.dispose(); chartInstance = null }
+}
+
+const _onResize = () => chartInstance && chartInstance.resize()
+onMounted(() => window.addEventListener('resize', _onResize))
+
+watch(activeNav, (nav, prev) => {
+  if (nav === 'stock' && stock.value) {
+    loadChart()
+    loadDetail()
+  }
+  if (prev === 'stock' && nav !== 'stock') disposeChart()
+})
+
+// 大数格式化：亿/万自适应（成交额、流通股本）
+function fmtBig(n, unitDiv = 1) {
+  if (n == null) return '—'
+  const v = n / unitDiv
+  if (Math.abs(v) >= 1e8) return (v / 1e8).toFixed(2) + '亿'
+  if (Math.abs(v) >= 1e4) return (v / 1e4).toFixed(2) + '万'
+  return v.toLocaleString('zh-CN')
+}
+const fmtAmount = n => fmtBig(n)
+const fmtShares = n => fmtBig(n, 1)
+
 onMounted(refresh)
 </script>
 
@@ -277,7 +426,7 @@ onMounted(refresh)
               { id: 'tasks', label: '任务' },
               { id: 'backtest', label: '回测' }, { id: 'learn', label: '教学' }]"
             :key="n.id" class="nav-item"
-            :class="{ active: activeNav === n.id, 'sub-active': activeNav.startsWith('src-') && n.id === 'data' }"
+            :class="{ active: activeNav === n.id, 'sub-active': (activeNav.startsWith('src-') || activeNav === 'stock') && n.id === 'data' }"
             @click="activeNav = n.id">
             <svg v-if="n.id === 'dash'" class="nav-icon" viewBox="0 0 20 20" fill="none">
               <rect x="2.5" y="2.5" width="6.5" height="6.5" rx="1.2" stroke="currentColor" stroke-width="1.5"/>
@@ -465,9 +614,10 @@ onMounted(refresh)
             </div>
             <div class="browse-pv">
               <DataTable :value="browse.stocks || []" lazy paginator :rows="50"
+                :first="browsePage * 50"
                 :totalRecords="browse.total || 0" :loading="browseLoading"
                 dataKey="code" stripedRows size="small"
-                @page="onPage">
+                @page="onPage" @row-click="openStock">
                 <template #empty>
                   <div class="browse-empty">
                     {{ browse.status === 'down' ? '数据库不可达：' + (browse.detail || '')
@@ -499,7 +649,92 @@ onMounted(refresh)
                 </Column>
               </DataTable>
             </div>
-            <p class="note">数据源：本地 PG（新浪/东财）· 爬虫持续入库中 · 单股K线明细接口已就绪（/api/stocks/{code}/bars），图表待选型</p>
+            <p class="note">数据源：本地 PG（新浪/东财）· 点击行查看个股历史行情（K线图 + 全字段明细）· 图表：ECharts（按需引入）</p>
+          </template>
+
+          <!-- ===== 个股历史行情详情（数据页行点击进入） ===== -->
+          <template v-else-if="activeNav === 'stock' && stock">
+            <div class="toolbar">
+              <div>
+                <h2 class="h1"><span class="mono">{{ stock.code }}</span> {{ stock.name }}</h2>
+                <p class="sub">个股历史行情 · 日K（不复权）· 图为近 250 个交易日</p>
+              </div>
+              <div class="toolbar-right">
+                <div class="src-seg">
+                  <button v-for="s in TASK_SOURCES" :key="s.v" class="src-seg-btn"
+                    :class="{ active: stock.source === s.v }"
+                    @click="setStockSource(s.v)">{{ s.label }}</button>
+                </div>
+                <button class="btn" @click="backToList">← 返回列表</button>
+              </div>
+            </div>
+
+            <!-- K 线图（近 250 根，蜡烛 + 成交量副图，可缩放平移） -->
+            <div class="card chart-card">
+              <div v-if="chartBars.status === 'down'" class="chart-note">
+                行情数据不可用：{{ chartBars.detail || '数据库连接失败' }}
+              </div>
+              <div v-else-if="!chartBars.bars.length" class="chart-note">
+                {{ chartBars.status === 'loading' ? '行情加载中…'
+                   : `${sourceLabel(stock.source)}源暂无该股K线数据（可切换来源）` }}
+              </div>
+              <div v-show="chartBars.status === 'up' && chartBars.bars.length"
+                ref="chartEl" class="kchart"></div>
+            </div>
+
+            <!-- 全字段明细表（独立分页，可翻更早历史） -->
+            <div class="card detail-table-card">
+              <DataTable :value="detailRows.rows" lazy paginator :rows="DETAIL_PAGE_SIZE"
+                :first="detailPage * DETAIL_PAGE_SIZE"
+                :totalRecords="detailTotal" :loading="detailRows.status === 'loading'"
+                dataKey="date" stripedRows size="small" @page="onDetailPage">
+                <template #empty>
+                  <div class="browse-empty">
+                    {{ detailRows.status === 'down' ? '数据库不可达：' + (detailRows.detail || '')
+                      : detailRows.status === 'loading' ? '加载中…' : '该源暂无该股行情数据' }}
+                  </div>
+                </template>
+                <Column field="date" header="日期" style="width: 110px">
+                  <template #body="{ data }"><span class="mono">{{ data.date }}</span></template>
+                </Column>
+                <Column field="open" header="开盘" style="width: 80px" bodyClass="num-col" />
+                <Column field="close" header="收盘" style="width: 80px" bodyClass="num-col" />
+                <Column field="high" header="最高" style="width: 80px" bodyClass="num-col" />
+                <Column field="low" header="最低" style="width: 80px" bodyClass="num-col" />
+                <Column field="change" header="涨跌额" style="width: 84px">
+                  <template #body="{ data }">
+                    <span v-if="data.change != null"
+                      :class="data.change >= 0 ? 'chg-up' : 'chg-down'">
+                      {{ (data.change >= 0 ? '+' : '') + data.change }}</span>
+                    <span v-else>—</span>
+                  </template>
+                </Column>
+                <Column field="pct_chg" header="涨跌幅" style="width: 90px">
+                  <template #body="{ data }">
+                    <span v-if="data.pct_chg != null"
+                      :class="data.pct_chg >= 0 ? 'chg-up' : 'chg-down'">
+                      {{ (data.pct_chg >= 0 ? '+' : '') + data.pct_chg + '%' }}</span>
+                    <span v-else>—</span>
+                  </template>
+                </Column>
+                <Column field="amplitude" header="振幅" style="width: 80px">
+                  <template #body="{ data }">{{ data.amplitude != null ? data.amplitude + '%' : '—' }}</template>
+                </Column>
+                <Column field="volume" header="成交量(手)" style="width: 110px">
+                  <template #body="{ data }">{{ data.volume != null ? fmt(data.volume) : '—' }}</template>
+                </Column>
+                <Column field="amount" header="成交额" style="width: 100px">
+                  <template #body="{ data }">{{ fmtAmount(data.amount) }}</template>
+                </Column>
+                <Column field="turnover" header="换手率" style="width: 84px">
+                  <template #body="{ data }">{{ data.turnover != null ? data.turnover + '%' : '—' }}</template>
+                </Column>
+                <Column v-if="stock.source === 'sina'" field="outstanding_share" header="流通股本">
+                  <template #body="{ data }">{{ fmtShares(data.outstanding_share) }}</template>
+                </Column>
+              </DataTable>
+            </div>
+            <p class="note">数据来源：{{ sourceLabel(stock.source) }}源 · 主键 (code, trade_date, source)，与列表页来源 Tab 语义一致 · 点击「← 返回列表」或侧栏「数据」返回（搜索/分页状态保留）</p>
           </template>
 
           <!-- ===== 爬虫任务管理（每日数据更新调度） ===== -->
@@ -1280,6 +1515,25 @@ body {
 .dialog .task-risk { margin: 4px 0 0; }
 .task-error { margin: 8px 0 0; font-size: 12.5px; color: var(--dot-down); }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+
+/* ===== 个股历史行情详情页 ===== */
+:deep(.browse-pv .p-datatable-tbody tr) { cursor: pointer; }
+:deep(.browse-pv .p-datatable-tbody tr:hover) { background: var(--nav-hover-bg); }
+.chart-card { padding: 12px; margin-bottom: 16px; }
+.kchart { width: 100%; height: 440px; }
+.chart-note {
+  height: 220px; display: flex; align-items: center; justify-content: center;
+  color: var(--fg-3); font-size: 13px;
+}
+.detail-table-card { padding: 8px; }
+.src-seg { display: inline-flex; border: 1px solid var(--btn-border-color); }
+.src-seg-btn {
+  min-width: 72px; height: 34px; padding: 0 14px; font: inherit; font-size: 13px;
+  background: var(--btn-bg); color: var(--btn-fg); border: 0; cursor: pointer;
+}
+.src-seg-btn + .src-seg-btn { border-left: 1px solid var(--btn-border-color); }
+.src-seg-btn:hover { background: var(--btn-hover-bg); }
+.src-seg-btn.active { background: var(--accent); color: #fff; }
 
 /* ===== 响应式兜底 ===== */
 @media (max-width: 860px) {

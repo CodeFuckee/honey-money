@@ -52,8 +52,9 @@ WHERE (%s = '' OR code ILIKE %s OR name ILIKE %s)
 
 _BARS_SQL = """
 SELECT trade_date, open, close, high, low, volume, amount,
-       amplitude, pct_chg, change, turnover, source
-FROM daily_bar WHERE code = %s ORDER BY trade_date DESC LIMIT %s OFFSET %s
+       amplitude, pct_chg, change, turnover, source, outstanding_share
+FROM daily_bar WHERE code = %s {src_clause}
+ORDER BY trade_date DESC LIMIT %s OFFSET %s
 """
 
 
@@ -112,20 +113,31 @@ def fetch_stock_list(dsn: str, *, q: str = "", limit: int = 50, offset: int = 0,
                        "total": 0, "limit": limit, "offset": offset, "stocks": []})
 
 
-def fetch_stock_bars(dsn: str, code: str, *, limit: int = 250, offset: int = 0) -> dict:
-    """单股日K（默认最新 250 根，倒序进正序出）。"""
+def fetch_stock_bars(dsn: str, code: str, *, limit: int = 250, offset: int = 0,
+                     source: str = "") -> dict:
+    """单股日K（默认最新 250 根，倒序进正序出）。
+
+    source 非空时仅取该来源（个股详情页用——(code,trade_date,source) 主键下
+    同一交易日两源各一行，不过滤会混返）；缺省不过滤，兼容旧行为。
+    """
     limit = max(1, min(limit, 5000))
     offset = max(0, offset)
+    source = source.strip().lower()
+    sql = (_BARS_SQL.replace("{src_clause}", "AND source = %s")
+           if source else _BARS_SQL.replace("{src_clause}", "true"))
+    params = ((code, source, limit, offset) if source
+              else (code, limit, offset))
 
     def run():
         with psycopg.connect(dsn, connect_timeout=3) as conn:
             with conn.cursor() as cur:
-                cur.execute(_BARS_SQL, (code, limit, offset))
+                cur.execute(sql, params)
                 rows = [
                     {"date": r[0].isoformat(), "open": r[1], "close": r[2],
                      "high": r[3], "low": r[4], "volume": r[5], "amount": r[6],
                      "amplitude": r[7], "pct_chg": r[8], "change": r[9],
-                     "turnover": r[10], "source": r[11]}
+                     "turnover": r[10], "source": r[11],
+                     "outstanding_share": r[12]}
                     for r in cur.fetchall()
                 ]
         rows.reverse()
