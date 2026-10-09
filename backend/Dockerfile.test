@@ -7,6 +7,10 @@ WORKDIR /srv
 COPY requirements.txt .
 # pypi.org 官方 CDN 本网络实测 ~14KB/s 不可用，固定阿里源（Dockerfile.test 同）
 RUN pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ -r requirements.txt
+# vectorbt 单独装：其元数据声明 pandas>=3.0.3 与我们锁定的 pandas 2.x 冲突
+# （真实兼容性相反，见 requirements.txt 注释）——--no-deps 跳过检查，
+# 运行时依赖已在上一行显式列出
+RUN pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ --no-deps vectorbt==1.1.1
 
 COPY app/ app/
 COPY tests/ tests/
