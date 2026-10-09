@@ -128,6 +128,31 @@ class TestTaskList:
         expect(card(page, "东财补数").get_by_role("button", name="取消排队")).to_be_visible()
         expect(p.get_by_role("button", name="立即执行")).to_be_visible()
 
+    def test_phase_badge_not_overlapping_switch(self, servers, page, api_calls):
+        """回归：相位徽章曾复用仪表盘状态卡的 .fbadge（absolute 右上角定位），
+        脱离文档流压到卡片右上角的启用开关上（用户过目发现）。现为任务页
+        专属 .phase-badge（inline-flex 文档流内）。"""
+        _, frontend_port = servers
+        open_tasks(page, frontend_port)
+
+        p = card(page, "新浪每日增量")
+        badge = p.locator(".task-tags .phase-badge")
+        expect(badge).to_be_visible()
+        expect(badge).to_contain_text("空闲")
+
+        # 根因断言：徽章必须在文档流内（不得 absolute 到卡片角落）
+        pos = badge.evaluate("el => getComputedStyle(el).position")
+        assert pos == "static", f"任务页相位徽章应为文档流内（static），实际 {pos}"
+
+        # 现象断言：徽章与启用开关边界框不相交
+        b1 = badge.bounding_box()
+        b2 = p.locator("label.switch").bounding_box()
+        assert b1 and b2, "徽章或开关未渲染"
+        overlap_x = min(b1["x"] + b1["width"], b2["x"] + b2["width"]) - max(b1["x"], b2["x"])
+        overlap_y = min(b1["y"] + b1["height"], b2["y"] + b2["height"]) - max(b1["y"], b2["y"])
+        assert not (overlap_x > 0 and overlap_y > 0), \
+            f"相位徽章与启用开关重叠: badge={b1} switch={b2}"
+
 
 class TestCreateAndEdit:
     def test_create_task_posts_payload(self, servers, page, api_calls):

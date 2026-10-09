@@ -74,6 +74,12 @@
   （搜索 480 / 行情表 / K线图占位条 160）。
 
 ### Fixed
+- **任务页相位徽章与启用开关重叠（用户过目发现）**：相位徽章复用了仪表盘
+  状态卡的 `.fbadge` 样式（`position: absolute` 右上角定位，`.dot` 同属该
+  体系），在任务卡内脱离文档流、绝对定位到卡片右上角压住启用开关。任务页
+  改用专属 `.phase-badge`（inline-flex 文档流内，独立 `.pdot` 圆点样式）
+  与仪表盘徽章体系彻底解耦；E2E 回归断言徽章 `position=static` 且与开关
+  边界框不相交（tests/e2e/test_tasks_page.py::test_phase_badge_not_overlapping_switch）。
 - **数据源 Tab 过滤未生效**：侧栏「新浪财经/东方财富」子页此前只是换标题
   的同一份列表（后端无来源参数）。`/api/stocks` 新增 `source` 参数
   （EXISTS 按 (code,trade_date,source) 主键过滤，深库毫秒级），前端 Tab

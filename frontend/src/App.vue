@@ -536,7 +536,7 @@ onMounted(refresh)
                       <span class="chip" :class="t.source === 'eastmoney' ? 'ef' : 'sina'">{{ sourceLabel(t.source) }}源</span>
                       <span class="chip mode">{{ modeLabel(t.mode) }}</span>
                       <span class="chip time">每日 {{ t.schedule_time }}</span>
-                      <span class="fbadge"><span class="dot" :class="phaseInfo(t)[1]"></span><span class="fb-txt">{{ phaseInfo(t)[0] }}</span></span>
+                      <span class="phase-badge"><span class="pdot" :class="phaseInfo(t)[1]"></span>{{ phaseInfo(t)[0] }}</span>
                     </div>
                   </div>
                   <label class="switch" :title="t.enabled ? '点击禁用' : '点击启用'">
@@ -1220,6 +1220,15 @@ body {
 .task-tags { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .chip.mode { background: #f0f0f0; color: var(--fg-2); }
 .chip.time { background: #f0f0f0; color: var(--fg-2); font-variant-numeric: tabular-nums; }
+/* 相位徽章：任务页专属（仪表盘 .fbadge/.dot 是 absolute 右上角定位体系，
+   复用会脱离文档流压住右上角开关——用户过目发现的重叠 bug） */
+.phase-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; line-height: 1; color: var(--fg-2); white-space: nowrap;
+}
+.phase-badge .pdot { width: 8px; height: 8px; border-radius: 50%; background: var(--dot-idle); }
+.phase-badge .pdot.up { background: var(--dot-up); }
+.phase-badge .pdot.queued { background: var(--dot-warn); }
 .task-progress { margin: 14px 0 4px; }
 .task-progress .detail { margin-top: 6px; }
 .task-meta { display: flex; gap: 24px; flex-wrap: wrap; margin-top: 14px; font-size: 13px; color: var(--fg-2); }
