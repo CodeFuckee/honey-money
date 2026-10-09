@@ -9,6 +9,7 @@
 """
 
 import asyncio
+import datetime as dt
 from dataclasses import dataclass
 
 import httpx
@@ -32,6 +33,20 @@ class SinaError(Exception):
 def _default_daily_fetcher(symbol: str, *, start_date=None, end_date=None):
     import akshare as ak   # 延迟导入：重依赖，仅新浪源需要
     return ak.stock_zh_a_daily(symbol=symbol, start_date=start_date, end_date=end_date)
+
+
+START_BUFFER_DAYS = 15
+
+
+def start_with_buffer(start: str | None, *, days: int = START_BUFFER_DAYS) -> str | None:
+    """增量取数起点前移缓冲：akshare 按 start_date 过滤后返回，恰从 beg 起会让
+    首根拿不到前收盘——涨跌额/涨跌幅/振幅全空（2026-10-09 全市场 5208 根踩坑）。
+    多给几天缓冲行，df_to_rows 的「保留前收」递推即可拿到真实前收；akshare 的
+    kjs 接口本就是全量取回后过滤，前移无额外请求成本。"""
+    if not start or start == "0":
+        return start
+    d = dt.datetime.strptime(start, "%Y%m%d") - dt.timedelta(days=days)
+    return d.strftime("%Y%m%d")
 
 
 def df_to_rows(df, beg: str = "0") -> list[tuple]:
@@ -147,7 +162,7 @@ class SinaClient:
                                beg: str = "0", end: str = "20500101") -> DailyBars:
         """单只股票日线（akshare 全史 + beg 增量过滤），不复权口径。"""
         symbol = ("sh" if market == 1 else "sz") + code
-        start = None if beg in ("", "0") else beg
+        start = start_with_buffer(None if beg in ("", "0") else beg)
         await self._rate.acquire(SINA_CHANNEL)
         try:
             # akshare 同步库内部 requests 不带超时，NAS 网络下偶发永久挂起

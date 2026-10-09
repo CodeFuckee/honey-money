@@ -205,7 +205,35 @@ class TestFetchDailyBars:
 
         client, _ = make_client(daily=fetcher)
         run(client.fetch_daily_bars(1, "600000", beg="20260930"))
-        assert seen["start_date"] == "20260930"
+        # 取数起点应带缓冲（早于 beg）——akshare 按 start_date 过滤返回，
+        # 恰从 beg 起会让首根拿不到前收盘（涨跌额/涨跌幅/振幅全空）
+        assert seen["start_date"] is not None
+        assert seen["start_date"] < "20260930"
+
+    def test_incremental_first_bar_has_prev_close(self):
+        """回归（2026-10-09 全市场 5208 根涨跌幅空值）：增量首根必须仍能
+        算出涨跌额/涨跌幅/振幅——取数起点前移缓冲，df 里含 beg 前的缓冲行，
+        df_to_rows 的「保留前收」逻辑据此递推出首根衍生字段。"""
+        def fetcher(symbol, *, start_date=None, end_date=None):
+            return FakeDF(
+                ["date", "open", "high", "low", "close", "volume", "amount",
+                 "outstanding_share", "turnover"],
+                [
+                    # beg（20261009）之前的缓冲行：close=9.05 即真实前收
+                    [dt.date(2026, 9, 30), 9.00, 9.10, 8.95, 9.05, 90000000, 8.1e8, 3.3e10, 0.0031],
+                    # 增量首根（当天）
+                    [dt.date(2026, 10, 9), 9.15, 9.25, 9.09, 9.18, 80509739, 7.4e8, 3.33e10, 0.00242],
+                ],
+            )
+
+        client, _ = make_client(daily=fetcher)
+        bars = run(client.fetch_daily_bars(1, "600000", beg="20261009"))
+        assert len(bars.rows) == 1                    # 缓冲行被过滤，只输出 beg 起
+        r = bars.rows[0]
+        assert r[0] == "2026-10-09"
+        assert r[8] == pytest.approx((9.18 - 9.05) / 9.05 * 100, abs=0.01)   # pct_chg
+        assert r[9] == pytest.approx(0.13, abs=1e-6)                          # change
+        assert r[7] == pytest.approx((9.25 - 9.09) / 9.05 * 100, abs=0.05)   # amplitude
 
     def test_fetcher_error_raises_sina_error(self):
         def boom(symbol, **kw):
