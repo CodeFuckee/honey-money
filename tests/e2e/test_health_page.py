@@ -144,6 +144,14 @@ def test_shell_and_nav(servers, page):
     sb = page.locator(".ph-search").bounding_box()
     assert sb is not None and sb["height"] <= 60, f"搜索框高度异常: {sb}"
 
+    # 数据源 Tab：点「东方财富」→ 走 source=eastmoney 过滤（本地无 PG 时为空表但接口仍 200）
+    page.locator(".sidebar .src-item", has_text="东方财富").click()
+    expect(page.get_by_role("heading", name="数据浏览 · 东方财富")).to_be_visible()
+    expect(page.locator(".p-datatable")).to_be_visible()
+    # 回数据页
+    page.get_by_role("button", name="数据").click()
+    expect(page.get_by_role("heading", name="数据浏览", exact=True)).to_be_visible()
+
 
 def test_source_pages(servers, page):
     """数据源子页（Carbon 原型 ⑥⑦ 屏）：子项选中灰底+右箭头、父项「数据」保留

@@ -9,9 +9,13 @@ import psycopg
 # 两段式查询：先在 stock_basic 上分页（小表，毫秒级），再只对当页 ≤200 只
 # 聚合 daily_bar（大表 1,600 万行——原写法 LATERAL 作用于全表分页前的每一行，
 # 深分页时退化成对大表数千次聚合，实测 8~10s）。
+# 有来源过滤时只列「该来源下有K线」的股票（用 EXISTS 而非聚合，可走 (code,trade_date,source) 主键）
+_SRC_FILTER = "EXISTS (SELECT 1 FROM daily_bar d WHERE d.code = stock_basic.code AND d.source = {src!r})"
+
 _LIST_IDS_SQL = """
 SELECT code, name FROM stock_basic
 WHERE (%s = '' OR code ILIKE %s OR name ILIKE %s)
+  AND {src_clause}
 ORDER BY code
 LIMIT %s OFFSET %s
 """
@@ -43,6 +47,7 @@ ORDER BY b.code
 _COUNT_SQL = """
 SELECT count(*) FROM stock_basic
 WHERE (%s = '' OR code ILIKE %s OR name ILIKE %s)
+  AND {src_clause}
 """
 
 _BARS_SQL = """
@@ -65,16 +70,24 @@ def _safe(fn, default):
         return d
 
 
-def fetch_stock_list(dsn: str, *, q: str = "", limit: int = 50, offset: int = 0) -> dict:
-    """股票列表 + 每股行情摘要（最新价/涨跌幅/K线数/区间/来源），code/name 模糊搜索。"""
+def fetch_stock_list(dsn: str, *, q: str = "", limit: int = 50, offset: int = 0,
+                     source: str = "") -> dict:
+    """股票列表 + 每股行情摘要（最新价/涨跌幅/K线数/区间/来源），code/name 模糊搜索。
+
+    source 非空时仅返回该来源下有K线的股票（数据源 Tab 过滤）。
+    """
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
     like = f"%{q}%"
+    sql_ids = (_LIST_IDS_SQL.replace("{src_clause}", _SRC_FILTER.format(src=source))
+               if source else _LIST_IDS_SQL.replace("{src_clause}", "true"))
+    count_sql = (_COUNT_SQL.replace("{src_clause}", _SRC_FILTER.format(src=source))
+                 if source else _COUNT_SQL.replace("{src_clause}", "true"))
 
     def run():
         with psycopg.connect(dsn, connect_timeout=3) as conn:
             with conn.cursor() as cur:
-                cur.execute(_LIST_IDS_SQL, (q, like, like, limit, offset))
+                cur.execute(sql_ids, (q, like, like, limit, offset))
                 page_rows = cur.fetchall()
                 codes = [r[0] for r in page_rows]
                 stocks = []
@@ -84,7 +97,7 @@ def fetch_stock_list(dsn: str, *, q: str = "", limit: int = 50, offset: int = 0)
                             "bars", "first_date", "sources"]
                     by_code = {r[0]: dict(zip(cols, r)) for r in cur.fetchall()}
                     stocks = [by_code[c] for c in codes]   # 保持 code 序
-                cur.execute(_COUNT_SQL, (q, like, like))
+                cur.execute(count_sql, (q, like, like))
                 total = cur.fetchone()[0]
         for s in stocks:
             for k in ("close", "pct_chg"):

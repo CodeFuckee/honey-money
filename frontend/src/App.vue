@@ -75,7 +75,8 @@ async function loadBrowse() {
   try {
     const q = encodeURIComponent(browseQuery.value.trim())
     const off = browsePage.value * BROWSE_PAGE_SIZE
-    const r = await fetch(`/api/stocks?q=${q}&limit=${BROWSE_PAGE_SIZE}&offset=${off}`)
+    const src = srcPage.value ? `&source=${srcPage.value.field}` : ''
+    const r = await fetch(`/api/stocks?q=${q}&limit=${BROWSE_PAGE_SIZE}&offset=${off}${src}`)
     browse.value = await r.json()
   } catch (e) {
     browse.value = { status: 'down', total: 0, stocks: [] }
@@ -327,7 +328,8 @@ onMounted(refresh)
                 @page="onPage">
                 <template #empty>
                   <div class="browse-empty">
-                    {{ browse.status === 'down' ? '数据库不可达：' + (browse.detail || '') : '无匹配股票' }}
+                    {{ browse.status === 'down' ? '数据库不可达：' + (browse.detail || '')
+                      : (srcPage ? `${srcPage.label}源暂无入库数据（当前数据全部来自新浪源）` : '无匹配股票') }}
                   </div>
                 </template>
                 <Column field="code" header="代码" style="width: 100px">
