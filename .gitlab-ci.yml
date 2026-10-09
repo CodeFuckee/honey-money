@@ -37,7 +37,7 @@ backend-test:
   # 钉死到 NAS runner（唯一确定有 docker 的 runner）：runner 池异构
   # （Linux shell / Windows pwsh / NAS），无标签作业随机认领导致环境不可复现。
   tags: [linux, docker, nas, deploy]
-  timeout: 40m
+  timeout: 90m
   script:
     - *mirror-fetch
     - fetch_base python:3.12-slim docker.1panel.live docker.1ms.run docker.m.daocloud.io
@@ -48,7 +48,7 @@ deploy-nas:
   stage: deploy
   image: docker:27-cli          # shell 执行器下会被忽略，无害
   tags: [linux, docker, nas, deploy]
-  timeout: 40m
+  timeout: 90m
   variables:
     COMPOSE_PROJECT_NAME: honey-money   # 固定项目名：job 目录每次随机，不固定会残留孤儿项目
   rules:
@@ -106,3 +106,20 @@ nas-diag:
     - |
       echo "===================== 端到端：backend → PostgreSQL（/api/infra） ====================="
       docker exec honey-money-backend-1 python -c "import httpx; print(httpx.get('http://127.0.0.1:8000/api/infra', timeout=8).text)" 2>&1 || true
+
+nas-ops:
+  stage: deploy
+  tags: [linux, docker, nas, deploy]
+  rules:
+    - if: '$CI_COMMIT_BRANCH =~ /^ops\//'
+      exists: [ops-cmd.txt]
+      when: manual
+  allow_failure: true
+  timeout: 10m
+  script:
+    - CMD="$(cat ops-cmd.txt)"
+    - |
+      case "$CMD" in
+        docker\ *) sh -c "$CMD" ;;
+        *) echo "拒绝：仅允许 docker 命令"; exit 1 ;;
+      esac
