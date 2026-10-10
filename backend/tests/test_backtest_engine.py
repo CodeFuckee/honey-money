@@ -97,3 +97,49 @@ class TestGapDetection:
             exits=pd.Series([False] * 5 + [True], index=bars["close"].index),
             exec_mode="next_open", commission=0.0, sell_tax=0.0)
         assert len(result["gap_dates"]) == 1
+
+
+class TestTargetAndWeightsPaths:
+    """回归（2026-10-10 用户报 买入持有 全 0）：target/weights 路径的无名
+    Series 列名 0 被 reindex 整列丢弃 → 零成交。修复后三条输入路径都必须真实成交。
+    此前的引擎测试只覆盖了 entries/exits 信号路径，是本次事故的测试盲区。"""
+
+    def test_buy_hold_target_trades_and_tracks_benchmark(self):
+        from app.backtest.signals import buy_hold_target
+        bars = make_bars()
+        target = buy_hold_target(bars["close"].iloc[:, 0])
+        r = run_backtest(bars, target=target, exec_mode="next_open",
+                         commission=0.0, sell_tax=0.0)
+        assert r["metrics"]["trades"] >= 1
+        assert r["metrics"]["total_return"] == pytest.approx(
+            r["equity"][-1][2] - 1, abs=0.02)          # 与买入持有基准基本一致
+
+    def test_grid_target_executes_orders(self):
+        from app.backtest.signals import grid_target
+        bars = make_bars(n=12)
+        # 人造下跌+反弹：触发降档建仓与升档减仓
+        close = bars["close"].iloc[:, 0]
+        close.iloc[:6] = np.linspace(10, 8.6, 6)       # 下跌段
+        close.iloc[6:] = np.linspace(9.4, 10.4, 6)     # 反弹段
+        bars["low"] = (close - 0.2).to_frame("600519")
+        target = grid_target(close, step_pct=5.0, levels=4)
+        r = run_backtest(bars, target=target, exec_mode="next_open",
+                         commission=0.0, sell_tax=0.0)
+        assert r["metrics"]["trades"] >= 2, "网格应产生建仓与减仓多笔订单"
+        assert r["metrics"]["total_return"] != 0.0
+
+    def test_momentum_weights_execute_orders(self):
+        idx = pd.bdate_range("2026-01-01", periods=45)
+        a = np.linspace(10, 12, 45)                    # 强
+        b = np.linspace(10, 10.5, 45)                  # 中
+        c = np.linspace(10, 9, 45)                     # 弱
+        close = pd.DataFrame({"AAA": a, "BBB": b, "CCC": c}, index=idx)
+        bars = {"close": close, "open": close - 0.05,
+                "high": close + 0.2, "low": close - 0.2,
+                "volume": close * 1e6}
+        from app.backtest.signals import momentum_weights
+        weights = momentum_weights(close, window=20, top_k=2)
+        r = run_backtest(bars, weights=weights, exec_mode="next_open",
+                         commission=0.0, sell_tax=0.0)
+        assert r["metrics"]["trades"] >= 1
+        assert r["metrics"]["total_return"] != 0.0     # 强者组合应产生收益

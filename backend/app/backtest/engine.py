@@ -46,22 +46,25 @@ def run_backtest(bars: dict, *, entries=None, exits=None, target=None, weights=N
     close = _to_frame(bars["close"])
     open_ = _to_frame(bars["open"])
 
+    def align(df):
+        # 无名 Series to_frame() 列名是 0——先对齐列名，reindex 否则整列丢弃
+        # （signals 路径曾踩过；target/weights 路径同样适用）
+        df = _to_frame(df)
+        if list(df.columns) != list(close.columns):
+            df.columns = close.columns
+        return df.reindex(columns=close.columns, index=close.index)
+
     def norm_signals(s):
         if s is None:
             return None
-        s = _to_frame(s)
-        # 无名 Series to_frame() 列名是 0——先对齐列名，reindex 否则整列丢弃
-        if list(s.columns) != list(close.columns):
-            s.columns = close.columns
-        s = s.reindex(columns=close.columns, index=close.index).fillna(False)
-        return s.astype(bool)
+        return align(s).fillna(False).astype(bool)
 
     # 1.x 无卖出差分费用：印花税均摊到双边（卖出-only 的精确模拟不值得引入自研撮合）
     # 1.x 的 size 默认 None（不成交）——信号策略显式全仓；轮动/网格用 targetpercent
     kwargs = dict(fees=commission + sell_tax / 2, init_cash=INIT_CASH)
 
     if weights is not None:
-        w = _to_frame(weights).reindex(columns=close.columns, index=close.index)
+        w = align(weights)
         if exec_mode == "next_open":
             w, price = w.shift(1), open_
         else:
@@ -70,7 +73,7 @@ def run_backtest(bars: dict, *, entries=None, exits=None, target=None, weights=N
             close, size=w, size_type="targetpercent", price=price,
             group_by=True, cash_sharing=True, call_seq="auto", **kwargs)
     elif target is not None:
-        t = _to_frame(target).reindex(columns=close.columns, index=close.index)
+        t = align(target)
         if exec_mode == "next_open":
             t, price = t.shift(1), open_
         else:
