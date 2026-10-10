@@ -48,13 +48,19 @@ def register_backtest_routes(app: FastAPI) -> None:
         """复权因子懒加载：拉取入库后把 bars 合成为后复权价。
 
         因子不可用（新浪断连等）→ 返回原 bars + None（调用方降级不复权）。"""
-        latest = {}
+        from .backtest.engine import detect_gap_dates
+        latest, gaps = {}, {}
         cl = bars["close"]
         for code in codes:
             if code in cl.columns and cl[code].notna().any():
-                latest[code] = cl[code].dropna().index.max().date()
+                sub = cl[[code]].dropna()
+                latest[code] = sub.index.max().date()
+                prev = sub[code].shift(1)
+                gap_mask = ((sub[code] / prev - 1).abs() > 0.098) & prev.notna()
+                if gap_mask.any():
+                    gaps[code] = [d.date() for d in sub.index[gap_mask]]
         status = ensure_factors(config.DATABASE_URL, codes,
-                                latest_trade_dates=latest)
+                                latest_trade_dates=latest, gap_dates=gaps)
         if not all(v == "ok" for v in status.values()):
             return bars, None
         with psycopg.connect(config.DATABASE_URL, connect_timeout=5) as conn:

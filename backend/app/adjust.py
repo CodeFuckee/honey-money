@@ -33,11 +33,18 @@ def _symbol(code: str) -> str:
 
 
 def _default_fetch(symbol: str) -> pd.Series:
-    """新浪后复权因子全史（akshare，与日线爬虫同源直连）。"""
+    """新浪后复权因子（akshare，与日线爬虫同源直连）。
+
+    返回为**稀疏序列**：仅在除权除息日有行（另有 1900-01-01 哨兵行，丢弃），
+    因子为累计口径——合成时靠 reindex+ffill 展开到逐日。"""
     import akshare as ak
     df = ak.stock_zh_a_daily(symbol=symbol, adjust="hfq-factor")
-    s = pd.Series(df["factor"].values, index=pd.to_datetime(df["date"]))
-    return s[~s.index.duplicated(keep="last")].sort_index()
+    col = "hfq_factor" if "hfq_factor" in df.columns else "factor"
+    if col not in df.columns:
+        return pd.Series(dtype=float)
+    s = pd.Series(df[col].values, index=pd.to_datetime(df["date"]))
+    s = s[~s.index.duplicated(keep="last")].sort_index()
+    return s[s.index > pd.Timestamp("1901-01-01")]          # 丢哨兵行
 
 
 def load_factors(conn, code: str) -> pd.Series:
@@ -52,10 +59,18 @@ def load_factors(conn, code: str) -> pd.Series:
 
 
 def ensure_factors(dsn: str, codes: list[str], *, latest_trade_dates: dict,
+                   gap_dates: dict | None = None,
                    connect=None, fetch=None) -> dict[str, str]:
-    """确保每只股票的复权因子覆盖到最新行情日，返回 {code: ok|missing}。
+    """确保每只股票的复权因子覆盖到最新除权日，返回 {code: ok|missing}。
 
     latest_trade_dates: {code: 该股最新行情交易日}（来自 daily_bar）。
+    gap_dates: {code: 疑似除权跳空日列表}（来自 daily_bar 的隔夜跳空检测）。
+
+    新鲜判定：因子接口返回**稀疏序列**（仅除权日有行，末日=最近除权日），
+    永远追不上最新行情日——因此判定为：
+    因子末日 ≥ 最新行情日（近期除权过）
+    或 因子末日 ≥ 最后一个疑似跳空日（末日之后 daily_bar 无新除权迹象）
+    两者满足其一即视为缓存新鲜，否则重拉。
     """
     connect = connect or psycopg.connect
     fetch = fetch or _default_fetch
@@ -69,8 +84,15 @@ def ensure_factors(dsn: str, codes: list[str], *, latest_trade_dates: dict,
                 continue
             try:
                 cached = load_factors(conn, code)
-                fresh = (not cached.empty
-                         and cached.index.max().date() >= latest)
+                fresh = False
+                if not cached.empty:
+                    last_factor = cached.index.max().date()
+                    gaps = [d for d in ((gap_dates or {}).get(code) or [])
+                            if d <= latest]
+                    if last_factor >= latest:
+                        fresh = True                   # 近期除权过，因子到今日
+                    elif gaps and last_factor >= max(gaps):
+                        fresh = True                   # 末日之后无新除权迹象
                 if not fresh:                          # 无缓存 / 因子过期 → 重拉
                     f = fetch(_symbol(code))
                     if f.empty:
