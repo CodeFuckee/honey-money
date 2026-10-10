@@ -353,7 +353,14 @@ async function runLearn() {
       body: JSON.stringify(body),
     })
     if (r.status === 400) { learnError.value = (await r.json()).detail; return }
-    learnResult.value = await r.json()
+    let parsed
+    try { parsed = await r.json() }
+    catch {
+      // 网关/代理超时等返回 HTML 错误页，json() 会抛 "Unexpected token '<'"
+      learnError.value = `服务返回异常（HTTP ${r.status}，可能为网关超时），请稍后重试`
+      return
+    }
+    learnResult.value = parsed
     await nextTick()
     renderLearnChart()
   } catch (e) {

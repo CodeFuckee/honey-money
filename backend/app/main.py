@@ -50,6 +50,10 @@ def create_app(*, scheduler: TaskScheduler | None = None,
             print(f"[startup] 任务表初始化失败（调度扫描会重试）: {exc}")
         if config.SCHEDULER_ENABLED:
             await scheduler.start()
+        # vectorbt numba 编译预热（后台）：部署后首次用户回测从数十秒降到秒级
+        import asyncio
+        from .backtest.engine import warmup
+        asyncio.create_task(asyncio.to_thread(warmup))
         yield
         await scheduler.stop()
 

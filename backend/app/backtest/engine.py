@@ -136,3 +136,19 @@ def run_backtest(bars: dict, *, entries=None, exits=None, target=None, weights=N
         (t["pnl_pct"] for t in trades if "pnl_pct" in t)))
     return {"metrics": metrics, "equity": equity, "drawdown": drawdown,
             "trades": trades, "gap_dates": detect_gap_dates(open_, close)}
+
+
+def warmup() -> None:
+    """numba JIT 编译预热：部署后容器内首次回测需编译数十秒（用户感知为
+    网关超时），启动时用微型回测把编译成本提前吃掉。失败不影响服务。"""
+    try:
+        idx = pd.bdate_range("2026-01-01", periods=5)
+        close = pd.Series(np.linspace(10.0, 11.0, 5), index=idx).to_frame("WARMUP")
+        bars = {"close": close, "open": close - 0.1,
+                "high": close + 0.1, "low": close - 0.2,
+                "volume": close * 1e6}
+        run_backtest(bars, entries=close.notna(), exits=~close.notna(),
+                     exec_mode="next_open")
+        print("[warmup] vectorbt 编译预热完成")
+    except Exception as exc:                       # 预热失败不阻塞服务
+        print(f"[warmup] vectorbt 预热失败（不影响服务）: {exc}")

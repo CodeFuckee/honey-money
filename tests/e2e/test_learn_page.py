@@ -140,3 +140,15 @@ class TestLearnPage:
         page.get_by_role("button", name="▶ 跑回测").click()
         expect(page.locator(".learn-empty .state")
                ).to_contain_text("区间内无行情数据")
+
+    def test_gateway_html_response_friendly_error(self, servers, page, api_calls):
+        """回归（生产 504 事件）：网关超时返回 HTML 错误页时给出友好提示，
+        而不是 json() 解析崩出 SyntaxError。"""
+        _, frontend_port = servers
+        page.route("**/api/backtest", lambda route: route.fulfill(
+            status=504, content_type="text/html",
+            body="<html><head><title>504</title></head><body>nginx</body></html>"))
+        open_learn(page, frontend_port)
+        page.get_by_role("button", name="▶ 跑回测").click()
+        expect(page.locator(".error-banner")).to_contain_text("服务返回异常")
+        expect(page.locator(".error-banner")).to_contain_text("504")
