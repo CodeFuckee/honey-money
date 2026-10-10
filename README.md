@@ -19,6 +19,7 @@ backend/            Python 后端（FastAPI）
   app/task_store.py   爬虫任务持久化（crawl_task 表 CRUD + 预置任务播种）
   app/scheduler.py    进程内任务调度器（每日到点/启动补跑/全局串行/advisory lock 互斥）
   app/tasks_api.py    任务管理 API（CRUD/触发/取消/停止/历史）
+  app/adjust.py       复权因子（懒加载入库；后/前复权合成；降级不复权）
   app/backtest/       vectorbt 回测引擎（信号/指标纯 pandas，六大经典策略）
   app/backtest_api.py 回测 API（策略/区间/撮合模式/成本，降级 200 约定）
   tests/              离线 pytest 用例（API 骨架 + 爬虫 + 任务调度）
@@ -147,7 +148,8 @@ backend 启动即拉起任务调度循环（`app/scheduler.py`），到点自动
 
 1. 数据层：✅ 日线爬虫（新浪/东财双源）与 ✅ 每日增量定时任务（进程内调度器
    + 「任务」页管理，见上节）已落地；待做：复权因子、财务/基本面数据；
-2. 回测引擎与策略：✅ vectorbt 引擎 + 六大经典策略教学页（backtrader 已
-   停维护，改选 vectorbt；路线原定体系随之调整）；待做：参数寻优、复权因子；
+2. 回测引擎与策略：✅ vectorbt 引擎 + 六大经典策略教学页 + ✅ 复权因子
+   （回测后复权口径，除权失真消除；backtrader 已停维护，改选 vectorbt）；
+   待做：参数寻优；
 3. 前端页面：双均线教学页移植为 Vue 组件 + 回测结果展示；
 4. 实盘信号与调仓单（原 live 体系）。

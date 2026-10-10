@@ -168,3 +168,17 @@ class TestStockDetail:
         expect(page.locator(".chart-note")).to_contain_text("行情数据不可用")
         expect(page.locator(".detail-table-card .browse-empty")
                ).to_contain_text("数据库不可达")
+
+
+    def test_adjust_toggle_refetches(self, servers, page, api_calls):
+        """详情页复权切换：点「前复权」→ bars 请求带 adjust=qfq。"""
+        calls, _ = api_calls
+        _, frontend_port = servers
+        open_data(page, frontend_port)
+        page.locator(".browse-pv tbody tr", has_text="贵州茅台").click()
+        expect(page.locator(".kchart canvas").first).to_be_visible()
+        n0 = len(calls)
+        page.locator(".src-seg-btn", has_text="前复权").click()
+        expect(page.locator(".src-seg-btn.active", has_text="前复权")).to_be_visible()
+        assert any("adjust=qfq" in u for u in calls[n0:]), \
+            f"切换后应带 adjust=qfq: {calls[n0:]}"

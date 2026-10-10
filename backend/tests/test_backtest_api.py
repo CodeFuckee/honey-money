@@ -6,6 +6,8 @@ engine 的 vectorbt 撮合正确性由 test_backtest_engine.py 用合成数据�
 import sys
 from pathlib import Path
 
+import pandas as pd
+
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -168,3 +170,74 @@ class TestBacktestApi:
         body = resp.json()
         assert body["status"] == "up"
         assert "无行情数据" in body.get("message", "")
+
+
+class TestBacktestAdjust:
+    def _hist(self):
+        idx = pd.to_datetime(["2026-01-01", "2026-01-02"])
+        close = pd.DataFrame({"600519": [10.0, 10.5]}, index=idx)
+        hist = {"close": close}
+        hist.update({k: close.copy() for k in ("open", "high", "low")})
+        hist["volume"] = close * 1e6
+        return hist
+
+    def test_adjust_applied_true(self, monkeypatch):
+        from app import backtest_api as bapi
+        monkeypatch.setattr(bapi, "load_history", lambda *a, **k: self._hist())
+        monkeypatch.setattr(bapi, "ensure_factors",
+                            lambda *a, **k: {"600519": "ok"})
+        monkeypatch.setattr(bapi, "load_factors",
+                            lambda conn, code: pd.Series(
+                                [3.0], index=pd.to_datetime(["2026-01-02"])))
+
+        class FakeConn:
+            def cursor(self):
+                return self
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def execute(self, q, p=None):
+                pass
+
+        monkeypatch.setattr(bapi.psycopg, "connect",
+                            lambda *a, **k: FakeConn())
+        captured = {}
+        result_run = {"metrics": {"total_return": 0.26}, "equity": [], "drawdown": [],
+                      "trades": [], "gap_dates": []}
+
+        def fake_run(bars, **kw):
+            captured["factors"] = kw.get("factors")
+            return result_run
+
+        monkeypatch.setattr(bapi, "run_strategy", fake_run)
+        client = TestClient(create_app())
+        resp = client.post("/api/backtest", json={
+            "strategy": "ma_cross", "codes": ["600519"], "range": "1y"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["adjust_applied"] is True
+        assert captured["factors"] is not None
+
+    def test_adjust_missing_degrades(self, monkeypatch):
+        from app import backtest_api as bapi
+        seen = {}
+
+        def fake_run(bars, **kw):
+            seen["first_close"] = bars["close"].iloc[0, 0]
+            return {"metrics": {"total_return": 0.0}, "equity": [], "drawdown": [],
+                    "trades": [], "gap_dates": []}
+
+        monkeypatch.setattr(bapi, "load_history", lambda *a, **k: self._hist())
+        monkeypatch.setattr(bapi, "ensure_factors",
+                            lambda *a, **k: {"600519": "missing"})
+        monkeypatch.setattr(bapi, "run_strategy", fake_run)
+        client = TestClient(create_app())
+        resp = client.post("/api/backtest", json={
+            "strategy": "ma_cross", "codes": ["600519"], "range": "1y"})
+        body = resp.json()
+        assert body["adjust_applied"] is False
+        assert seen["first_close"] == 10.0

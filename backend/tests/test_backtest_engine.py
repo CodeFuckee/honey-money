@@ -173,3 +173,28 @@ class TestTradeRecordFields:
         t = r["trades"][0]
         assert t["entry_price"] > 0
         assert t.get("exit_price") is None or t.get("exit_price") > 0
+
+
+class TestAdjustedBacktest:
+    """复权口径：后复权价上回测（除权无跳空），交易价换算回真实历史价。"""
+
+    def test_hfq_backtest_real_trade_prices(self):
+        idx = pd.bdate_range("2026-01-01", periods=3)
+        real_close = pd.Series([100.0, 50.0, 51.0], index=idx).to_frame("002594")
+        real_open = pd.Series([99.0, 49.0, 50.0], index=idx).to_frame("002594")
+        bars = {"close": real_close, "open": real_open,
+                "high": real_close + 1, "low": real_close - 1,
+                "volume": real_close * 1e6}
+        factors = {"002594": pd.Series([1.0, 2.0, 2.0], index=idx)}
+        f_series = factors["002594"]
+        bars_hfq = {k: (v.mul(f_series, axis=0)
+                        if k != "volume" else v) for k, v in bars.items()}
+        entries = pd.Series([True] + [False] * 2, index=idx)
+        r = run_backtest(bars_hfq, entries=entries, exits=None,
+                         exec_mode="next_open", commission=0.0, sell_tax=0.0,
+                         factors=factors)
+        t = r["trades"][0]
+        assert t["entry_price"] == pytest.approx(49.0, abs=0.01), \
+            f"交易价应换算回真实价: {t}"
+        assert r["metrics"]["total_return"] == pytest.approx(
+            102.0 / 98.0 - 1, abs=0.005)

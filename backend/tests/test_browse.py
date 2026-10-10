@@ -4,6 +4,8 @@ SQL 行为用 sqlite 不现实，此处验证路由契约与降级形状；SQL �
 
 import datetime as dt
 import sys
+
+import pandas as pd
 from pathlib import Path
 
 import pytest
@@ -148,23 +150,26 @@ class TestBarsEndpointSource:
         import app.main as main_mod
         captured = {}
 
-        def fake_bars(dsn, code, *, limit=250, offset=0, source=""):
-            captured.update(code=code, source=source, limit=limit, offset=offset)
+        def fake_bars(dsn, code, *, limit=250, offset=0, source="", adjust=""):
+            captured.update(code=code, source=source, limit=limit, offset=offset,
+                            adjust=adjust)
             return {"status": "up", "code": code, "count": 0, "bars": []}
 
         monkeypatch.setattr(main_mod, "fetch_stock_bars", fake_bars)
         resp = client.get("/api/stocks/600519/bars",
                           params={"source": "sina", "limit": 50, "offset": 50})
         assert resp.status_code == 200
-        assert captured == {"code": "600519", "source": "sina",
-                            "limit": 50, "offset": 50}
+        assert captured["code"] == "600519"
+        assert captured["source"] == "sina"
+        assert captured["adjust"] == ""          # 未传 adjust：透传空串（不过滤口径）
+        assert captured["limit"] == 50 and captured["offset"] == 50
 
     def test_endpoint_source_default_empty(self, client, monkeypatch):
         """不传 source：端点透传空串（不过滤，兼容旧行为）。"""
         import app.main as main_mod
         captured = {}
 
-        def fake_bars(dsn, code, *, limit=250, offset=0, source=""):
+        def fake_bars(dsn, code, *, limit=250, offset=0, source="", adjust=""):
             captured["source"] = source
             return {"status": "up", "code": code, "count": 0, "bars": []}
 
@@ -203,3 +208,58 @@ class TestStocksBasic:
         assert resp.status_code == 200
         assert resp.json()["status"] == "down"
         assert resp.json()["stocks"] == []
+
+
+class TestBarsAdjust:
+    """前复权（教学/详情页复权切换）：因子懒加载 + OHLC 换算 + 衍生字段重算。"""
+
+    ROWS = [
+        (dt.date(2026, 1, 2), 100.0, 101.0, 102.0, 98.0,
+         1e6, 1e8, 4.0, 1.0, 1.0, 0.5, "sina", 1e10),
+        (dt.date(2026, 1, 5), 51.0, 51.5, 52.0, 50.0,
+         1e6, 5e7, 4.0, 2.0, 1.0, 0.5, "sina", 1e10),
+    ]   # SQL 列序 date,open,close,high,low,vol,amount,amp,pct,chg,turnover,src,osha
+        # 第二日除权：close ÷2（假 -50%）
+
+    def _fetch(self, monkeypatch, adjust="qfq", factor_series=None, fail=False):
+        import app.browse as browse_mod
+
+        conn = FakeConn(rows=list(self.ROWS))
+        monkeypatch.setattr(browse_mod.psycopg, "connect",
+                            lambda *a, **k: conn)
+        if fail:
+            def boom(*a, **k):
+                raise RuntimeError("sina down")
+            monkeypatch.setattr(browse_mod, "ensure_factors", boom)
+        else:
+            monkeypatch.setattr(browse_mod, "ensure_factors",
+                                lambda *a, **k: {"600519": "ok"})
+        monkeypatch.setattr(browse_mod, "load_factors", lambda conn_, code:
+                            pd.Series([1.0, 2.0], index=pd.to_datetime(
+                                ["2026-01-02", "2026-01-05"])) if not fail
+                            else pd.Series(dtype=float))
+        return browse_mod.fetch_stock_bars(
+            "postgresql://fake", "600519", adjust=adjust)
+
+    def test_qfq_recomputes_derived_fields(self, monkeypatch):
+        import pandas as pd
+
+        body = self._fetch(monkeypatch)
+        assert body["adjust_applied"] is True
+        bars = body["bars"]                    # 倒序输出（最新在上）
+        assert bars[0]["close"] == pytest.approx(51.5 * 2)   # 51.5×2=103
+        # 除权日假 -50% 修正为真实涨跌：(103-101)/101 ≈ +1.98%
+        assert bars[0]["pct_chg"] == pytest.approx(
+            (103.0 - 101.0) / 101.0 * 100, abs=0.05)
+        assert bars[0]["change"] == pytest.approx(2.0)
+        assert bars[1]["close"] == pytest.approx(101.0)      # 基准日因子=1 原值
+
+    def test_qfq_failure_degrades(self, monkeypatch):
+        body = self._fetch(monkeypatch, fail=True)
+        assert body["adjust_applied"] is False
+        assert body["bars"][0]["close"] == pytest.approx(51.5)  # 原值
+
+    def test_no_adjust_keeps_legacy(self, monkeypatch):
+        body = self._fetch(monkeypatch, adjust="")
+        assert body["adjust_applied"] is False
+        assert body["bars"][0]["close"] == pytest.approx(51.5)  # 倒序：最新在上

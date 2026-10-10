@@ -12,7 +12,7 @@ from playwright.sync_api import expect
 
 BT_RESULT = {
     "status": "up", "codes": ["600519"], "strategy": "donchian",
-    "range": "3y", "exec_mode": "next_open",
+    "range": "3y", "exec_mode": "next_open", "adjust_applied": True,
     "metrics": {"total_return": 0.26, "annual_return": 0.08,
                 "max_drawdown": 0.18, "sharpe": 0.85, "win_rate": 0.5,
                 "profit_loss_ratio": 1.8, "trades": 3, "vol_days": 750},
@@ -194,3 +194,15 @@ class TestLearnPage:
         page.locator(".learn-ac .p-autocomplete-dropdown").click()
         expect(page.locator(".p-autocomplete-option", has_text="平安银行")
                .first).to_be_visible()
+
+
+    def test_adjust_badge_on_result(self, servers, page, api_calls):
+        """复权徽标：因子可用显示「已按后复权口径」，不可用显示失真警示。"""
+        _, holder = api_calls
+        _, frontend_port = servers
+        open_learn(page, frontend_port)
+        page.get_by_role("button", name="▶ 跑回测").click()
+        expect(page.locator(".adj-ok", has_text="后复权口径")).to_be_visible()
+        holder["bt"] = {**BT_RESULT, "adjust_applied": False}
+        page.get_by_role("button", name="▶ 跑回测").click()
+        expect(page.locator(".task-risk", has_text="不复权口径")).to_be_visible()

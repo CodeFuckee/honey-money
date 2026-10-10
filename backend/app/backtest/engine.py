@@ -14,6 +14,7 @@
 import numpy as np
 import pandas as pd
 
+from ..adjust import aligned_factor
 from .metrics import perf_metrics, trade_stats
 
 INIT_CASH = 1_000_000
@@ -34,7 +35,7 @@ def _to_frame(x) -> pd.DataFrame:
 
 def run_backtest(bars: dict, *, entries=None, exits=None, target=None, weights=None,
         exec_mode: str = "next_open", commission: float = 2.5e-4,
-        sell_tax: float = 5e-4) -> dict:
+        sell_tax: float = 5e-4, factors: dict | None = None) -> dict:
     """运行回测并输出教学页统一形状。
 
     三种输入（互斥）：entries/exits（信号策略）、target（网格目标仓位）、
@@ -99,6 +100,20 @@ def run_backtest(bars: dict, *, entries=None, exits=None, target=None, weights=N
         net = net.sum(axis=1)
     net = net / INIT_CASH
 
+    # 复权口径：bars 为后复权价时，成交价 ÷ 当日因子换算回真实历史价
+    aligned = None
+    if factors:
+        aligned = {col: aligned_factor(factors, col, close.index)
+                   for col in close.columns}
+
+    def _real(price, symbol, ts):
+        if not aligned or symbol not in aligned:
+            return price
+        f = aligned[symbol]
+        loc = f.index.get_indexer([ts], method="ffill")[0]
+        factor = float(f.iloc[loc]) if loc >= 0 else 1.0
+        return price / factor if factor else price
+
     # 基准：同区间等权买入持有（含费率，对照公平）
     bh_pf = vbt.Portfolio.from_holding(close, group_by=True, cash_sharing=True,
                                        init_cash=INIT_CASH,
@@ -135,6 +150,18 @@ def run_backtest(bars: dict, *, entries=None, exits=None, target=None, weights=N
                     elif dst == "direction":
                         v = str(v).title().lower() or "long"
                     item[dst] = v
+            if item.get("entry_price") is not None:
+                ts = row.get("Entry Timestamp")
+                sym = item.get("symbol") or close.columns[0]
+                if ts is not None and not pd.isna(ts):
+                    item["entry_price"] = round(_real(
+                        item["entry_price"], sym, ts), 4)
+            if item.get("exit_price") is not None:
+                ts = row.get("Exit Timestamp")
+                sym = item.get("symbol") or close.columns[0]
+                if ts is not None and not pd.isna(ts):
+                    item["exit_price"] = round(_real(
+                        item["exit_price"], sym, ts), 4)
             trades.append(item)
     except Exception:                              # 兼容不同版本 records 形状
         trades = []

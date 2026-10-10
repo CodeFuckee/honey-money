@@ -6,6 +6,8 @@
 
 import psycopg
 
+from .adjust import ensure_factors, load_factors
+
 # 两段式查询：先在 stock_basic 上分页（小表，毫秒级），再只对当页 ≤200 只
 # 聚合 daily_bar（大表 1,600 万行——原写法 LATERAL 作用于全表分页前的每一行，
 # 深分页时退化成对大表数千次聚合，实测 8~10s）。
@@ -114,11 +116,13 @@ def fetch_stock_list(dsn: str, *, q: str = "", limit: int = 50, offset: int = 0,
 
 
 def fetch_stock_bars(dsn: str, code: str, *, limit: int = 250, offset: int = 0,
-                     source: str = "") -> dict:
+                     source: str = "", adjust: str = "") -> dict:
     """单股日K（默认最新 250 根，倒序进正序出）。
 
     source 非空时仅取该来源（个股详情页用——(code,trade_date,source) 主键下
     同一交易日两源各一行，不过滤会混返）；缺省不过滤，兼容旧行为。
+    adjust="qfq"：前复权口径（因子懒加载入库；失败降级不复权，
+    adjust_applied=false 供前端提示）。
     """
     limit = max(1, min(limit, 5000))
     offset = max(0, offset)
@@ -132,18 +136,58 @@ def fetch_stock_bars(dsn: str, code: str, *, limit: int = 250, offset: int = 0,
         with psycopg.connect(dsn, connect_timeout=3) as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, params)
-                rows = [
-                    {"date": r[0].isoformat(), "open": r[1], "close": r[2],
-                     "high": r[3], "low": r[4], "volume": r[5], "amount": r[6],
-                     "amplitude": r[7], "pct_chg": r[8], "change": r[9],
-                     "turnover": r[10], "source": r[11],
-                     "outstanding_share": r[12]}
-                    for r in cur.fetchall()
-                ]
-        rows.reverse()
-        return {"status": "up", "code": code, "count": len(rows), "bars": rows}
+                rows = cur.fetchall()
+
+        # 前复权：因子懒加载 + 逐行换算 OHLC + 重算涨跌衍生字段
+        adjust_applied = False
+        rows.sort(key=lambda r: r[0])                  # 升序处理（输出再倒序）
+        if adjust == "qfq" and rows:
+            try:
+                ensure_factors(dsn, [code], latest_trade_dates={
+                    code: rows[-1][0]})
+                with psycopg.connect(dsn, connect_timeout=3) as fconn:
+                    fac = load_factors(fconn, code)
+                if not fac.empty:
+                    fmap = {d.date() if hasattr(d, "date") else d: v
+                            for d, v in fac.items()}
+                    adj_rows, prev_factor, prev_adj_close = [], None, None
+                    for r in rows:             # r: date, open, close, high, low, ...
+                        factor = fmap.get(r[0]) or prev_factor
+                        prev_factor = factor or prev_factor
+                        if not factor:
+                            adj_rows.append(r)
+                            prev_adj_close = r[2]
+                            continue
+                        o, cl, h, l = (r[1] * factor, r[2] * factor,
+                                       r[3] * factor, r[4] * factor)
+                        pct = ((cl / prev_adj_close - 1) * 100
+                               if prev_adj_close else r[8])
+                        amp = ((h - l) / prev_adj_close * 100
+                               if prev_adj_close else r[7])
+                        chg = cl - prev_adj_close if prev_adj_close else r[9]
+                        adj_rows.append((r[0], o, cl, h, l, r[5], r[6],
+                                         amp, pct, chg, r[10], r[11], r[12]))
+                        prev_adj_close = cl
+                    rows = adj_rows
+                    adjust_applied = True
+            except Exception:                          # 因子不可用：降级不复权
+                adjust_applied = False
+
+        out = [
+            {"date": r[0].isoformat(), "open": r[1], "close": r[2],
+             "high": r[3], "low": r[4], "volume": r[5], "amount": r[6],
+             "amplitude": r[7], "pct_chg": r[8], "change": r[9],
+             "turnover": r[10], "source": r[11],
+             "outstanding_share": r[12]}
+            for r in rows
+        ]
+        out.reverse()
+        return {"status": "up", "code": code, "count": len(out),
+                "adjust": adjust, "adjust_applied": adjust_applied,
+                "bars": out}
     return _safe(run, {"status": "down", "detail": "pg unreachable",
-                       "code": code, "count": 0, "bars": []})
+                       "code": code, "count": 0, "bars": [],
+                       "adjust_applied": False})
 
 
 def fetch_stock_basic(dsn: str) -> dict:

@@ -25,7 +25,7 @@ _DEFAULT_PARAMS = {
 
 def run_strategy(bars: dict, *, strategy: str, params: dict,
                  exec_mode: str = "next_open", commission: float = 2.5e-4,
-                 sell_tax: float = 5e-4) -> dict:
+                 sell_tax: float = 5e-4, factors: dict | None = None) -> dict:
     if strategy not in _DEFAULT_PARAMS:
         raise ValueError(f"未知策略: {strategy}")
     merged = {**_DEFAULT_PARAMS[strategy],
@@ -37,7 +37,7 @@ def run_strategy(bars: dict, *, strategy: str, params: dict,
     def run(**kw):
         return engine.run_backtest(bars, exec_mode=exec_mode,
                                    commission=commission, sell_tax=sell_tax,
-                                   **kw)
+                                   factors=factors, **kw)
 
     if strategy == "buy_hold":
         return run(target=buy_hold_target(single))

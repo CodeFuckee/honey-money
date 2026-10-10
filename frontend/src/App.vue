@@ -247,6 +247,7 @@ const dialogRisk = computed(() => {
 
 // ===== 个股历史行情详情（数据页行点击进入；K线近250根 + 全字段明细分页）=====
 const stock = ref(null)            // { code, name, source, fromNav }
+const stockAdjust = ref('')        // '' 不复权（默认） | 'qfq' 前复权
 const chartBars = ref({ status: 'loading', bars: [] })
 const detailRows = ref({ status: 'loading', rows: [] })
 const detailPage = ref(0)          // 0 起
@@ -441,8 +442,8 @@ function renderLearnChart() {
 const _onLearnResize = () => learnChart && learnChart.resize()
 onMounted(() => window.addEventListener('resize', _onLearnResize))
 
-async function fetchBars(code, { limit, offset, source }) {
-  const r = await fetch(`/api/stocks/${code}/bars?limit=${limit}&offset=${offset}&source=${source}`)
+async function fetchBars(code, { limit, offset, source, adjust = '' }) {
+  const r = await fetch(`/api/stocks/${code}/bars?limit=${limit}&offset=${offset}&source=${source}&adjust=${adjust}`)
   return r.json()
 }
 
@@ -450,7 +451,7 @@ async function loadChart() {
   chartBars.value = { status: 'loading', bars: [] }
   try {
     const body = await fetchBars(stock.value.code,
-      { limit: 250, offset: 0, source: stock.value.source })
+      { limit: 250, offset: 0, source: stock.value.source, adjust: stockAdjust.value })
     chartBars.value = { status: body.status, bars: body.bars || [] }
   } catch (e) {
     chartBars.value = { status: 'down', detail: String(e), bars: [] }
@@ -501,7 +502,8 @@ async function loadDetail() {
   const offset = detailPage.value * DETAIL_PAGE_SIZE
   try {
     const body = await fetchBars(stock.value.code,
-      { limit: DETAIL_PAGE_SIZE, offset, source: stock.value.source })
+      { limit: DETAIL_PAGE_SIZE, offset, source: stock.value.source,
+        adjust: stockAdjust.value })
     if (body.status !== 'up') {
       detailRows.value = { status: body.status, detail: body.detail, rows: [] }
       return
@@ -535,6 +537,13 @@ function setStockSource(s) {
 function disposeChart() {
   if (chartInstance) { chartInstance.dispose(); chartInstance = null }
 }
+
+watch(stockAdjust, () => {
+  if (activeNav.value === 'stock' && stock.value) {
+    loadChart()
+    loadDetail()
+  }
+})
 
 const _onResize = () => chartInstance && chartInstance.resize()
 onMounted(() => window.addEventListener('resize', _onResize))
@@ -829,13 +838,19 @@ onMounted(refresh)
             <div class="toolbar">
               <div>
                 <h2 class="h1"><span class="mono">{{ stock.code }}</span> {{ stock.name }}</h2>
-                <p class="sub">个股历史行情 · 日K（不复权）· 图为近 250 个交易日</p>
+                <p class="sub">个股历史行情 · 日K · {{ stockAdjust === 'qfq' ? '前复权口径（最新价=真实价）' : '不复权口径' }} · 图为近 250 个交易日</p>
               </div>
               <div class="toolbar-right">
                 <div class="src-seg">
                   <button v-for="s in TASK_SOURCES" :key="s.v" class="src-seg-btn"
                     :class="{ active: stock.source === s.v }"
                     @click="setStockSource(s.v)">{{ s.label }}</button>
+                </div>
+                <div class="src-seg">
+                  <button class="src-seg-btn" :class="{ active: stockAdjust === '' }"
+                    @click="stockAdjust = ''">不复权</button>
+                  <button class="src-seg-btn" :class="{ active: stockAdjust === 'qfq' }"
+                    @click="stockAdjust = 'qfq'">前复权</button>
                 </div>
                 <button class="btn" @click="openLearnWith(stock.code)">用该股教学回测</button>
                 <button class="btn" @click="backToList">← 返回列表</button>
@@ -1146,6 +1161,11 @@ onMounted(refresh)
                     <div class="state">{{ learnResult.message }}</div>
                   </div>
                   <template v-else>
+                    <div v-if="learnResult.adjust_applied"
+                      class="adj-ok">已按后复权口径计算收益（除权除息已修正）</div>
+                    <div v-else class="task-risk">
+                      复权因子不可用，本次为不复权口径——跨除权日的收益存在假跳空失真
+                    </div>
                     <div class="learn-metrics">
                       <div class="card lm"><div class="lm-k">总收益</div><div class="lm-v" :class="learnResult.metrics.total_return >= 0 ? 'chg-up' : 'chg-down'">{{ (learnResult.metrics.total_return * 100).toFixed(1) }}%</div></div>
                       <div class="card lm"><div class="lm-k">年化收益</div><div class="lm-v" :class="learnResult.metrics.annual_return >= 0 ? 'chg-up' : 'chg-down'">{{ (learnResult.metrics.annual_return * 100).toFixed(1) }}%</div></div>
@@ -1807,6 +1827,10 @@ body {
 .src-seg-btn.active { background: var(--accent); color: #fff; }
 
 /* ===== 量化教学页 ===== */
+.adj-ok {
+  display: inline-block; padding: 4px 10px; margin-bottom: 12px;
+  font-size: 12px; background: #e9f4e9; color: var(--dot-up);
+}
 .learn-grid { display: grid; grid-template-columns: 260px 1fr; gap: 20px; align-items: start; }
 .learn-side { display: flex; flex-direction: column; gap: 8px; }
 .learn-nav {
