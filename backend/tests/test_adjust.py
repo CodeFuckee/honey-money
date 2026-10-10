@@ -57,13 +57,14 @@ class FakeConn:
         self.fetchall_rows = list(rows)
         self.fetchone_row = None
         self.upserted = []
+        self.commits = 0
         self.cursor_obj = FakeCursor(self)
 
     def cursor(self):
         return self.cursor_obj
 
     def commit(self):
-        pass
+        self.commits += 1
 
     def __enter__(self):
         return self
@@ -205,4 +206,4 @@ class TestEnsureFactors:
             gap_dates={"002594": [dt.date(2026, 1, 5)]},
             connect=lambda *a, **k: conn, fetch=fake_fetch)
         assert got == {"002594": "ok"}
-        assert fetched == ["002594"]
+        assert fetched == ["sz002594"]               # symbol 带交易所前缀
