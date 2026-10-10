@@ -116,6 +116,11 @@
   （搜索 480 / 行情表 / K线图占位条 160）。
 
 ### Fixed
+- **交易明细买入价/卖出价缺失**：vectorbt 1.1.1 的成交记录列名由
+  Entry/Exit Price 改为 **Avg Entry/Avg Exit Price**，映射匹配不到导致
+  价格字段缺失。映射兼容两代列名；未平仓的 NaT/NaN 转合法 null（前端显示
+  「持有中/—」）；连带修复 exits=None（只入不出）时 next_open 分支的
+  NoneType 崩溃。E2E/引擎回归：平仓交易价格必须 >0、序列化严格 JSON 无 NaN。
 - **教学页「买入持有/网格/动量轮动」回测结果全 0（用户报 002594 比亚迪复现）**：
   引擎 target/weights 路径的无名 Series `to_frame()` 列名 0 被
   `reindex(columns=close.columns)` 整列丢弃——与此前 signals 路径同源的列错位坑

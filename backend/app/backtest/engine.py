@@ -84,9 +84,10 @@ def run_backtest(bars: dict, *, entries=None, exits=None, target=None, weights=N
     else:
         e, x = norm_signals(entries), norm_signals(exits)
         if exec_mode == "next_open":
-            # pandas 3 的 shift 会把 bool 列退化为 object（引入 NaN），numba 拒收
-            e = e.shift(1).fillna(False).astype(bool)
-            x = x.shift(1).fillna(False).astype(bool)
+            # pandas 3 的 shift 会把 bool 列退化为 object（引入 NaN），numba 拒收；
+            # exits=None = 只入不出，合法输入
+            e = e.shift(1).fillna(False).astype(bool) if e is not None else None
+            x = x.shift(1).fillna(False).astype(bool) if x is not None else None
             price = open_
         else:
             price = close
@@ -116,16 +117,20 @@ def run_backtest(bars: dict, *, entries=None, exits=None, target=None, weights=N
     trades = []
     try:
         rec = pf.trades.records_readable
+        # 0.2x 列名 Entry/Exit Price；1.x 改为 Avg Entry/Avg Exit Price——两代兼容
         col_map = {"Entry Timestamp": "entry_date", "Exit Timestamp": "exit_date",
                    "Entry Price": "entry_price", "Exit Price": "exit_price",
+                   "Avg Entry Price": "entry_price", "Avg Exit Price": "exit_price",
                    "Return": "pnl_pct", "Direction": "direction",
                    "Column": "symbol"}
         for _, row in rec.iterrows():
             item = {}
             for src, dst in col_map.items():
-                if src in rec.columns:
+                if src in rec.columns and dst not in item:
                     v = row[src]
-                    if isinstance(v, pd.Timestamp):
+                    if pd.isna(v):                 # NaT/NaN（未平仓）→ null，合法 JSON
+                        v = None
+                    elif isinstance(v, pd.Timestamp):
                         v = v.strftime("%Y-%m-%d")
                     elif dst == "direction":
                         v = str(v).title().lower() or "long"

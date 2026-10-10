@@ -6,6 +6,7 @@
 - 成本：买入佣金；卖出佣金 + 印花税；最低佣金保护
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -143,3 +144,32 @@ class TestTargetAndWeightsPaths:
                          commission=0.0, sell_tax=0.0)
         assert r["metrics"]["trades"] >= 1
         assert r["metrics"]["total_return"] != 0.0     # 强者组合应产生收益
+
+
+class TestTradeRecordFields:
+    """回归（2026-10-10 用户报 交易明细买卖价全 0/缺失）：vectorbt 1.1.1 的
+    records_readable 列名为 Avg Entry/Avg Exit Price（非 0.2x 的 Entry/Exit
+    Price），映射必须兼容；未平仓交易的 NaN 退出价需转 null（合法 JSON）。"""
+
+    def test_closed_trade_prices_extracted(self):
+        bars = make_bars()
+        entries = pd.Series([True] + [False] * 9, index=bars["close"].index)
+        exits = pd.Series([False] * 7 + [True] + [False] * 2, index=bars["close"].index)
+        r = run_backtest(bars, entries=entries, exits=exits, exec_mode="next_open",
+                         commission=0.0, sell_tax=0.0)
+        assert r["trades"], "应有成交记录"
+        t = r["trades"][0]
+        assert t["entry_price"] > 0, f"entry_price 缺失或为 0: {t}"
+        assert t.get("exit_price", 0) > 0, f"exit_price 缺失或为 0: {t}"
+
+    def test_open_trade_json_safe(self):
+        """只入不出（exits=None）合法；序列化严格 JSON（无 NaN 字面量），
+        价格字段始终可渲染（vectorbt 1.1.1 会对期末持仓按末日收盘自动平账）。"""
+        bars = make_bars()
+        entries = pd.Series([True] + [False] * 9, index=bars["close"].index)
+        r = run_backtest(bars, entries=entries, exits=None, exec_mode="next_open",
+                         commission=0.0, sell_tax=0.0)
+        json.dumps(r["trades"], allow_nan=False)      # NaN 会在此抛错
+        t = r["trades"][0]
+        assert t["entry_price"] > 0
+        assert t.get("exit_price") is None or t.get("exit_price") > 0
