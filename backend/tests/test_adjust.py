@@ -171,3 +171,38 @@ class TestEnsureFactors:
             connect=lambda *a, **k: FakeConn(rows=[]),
             fetch=lambda symbol: (_ for _ in ()).throw(RuntimeError("sina down")))
         assert got == {"002594": "missing"}
+
+
+    def test_gap_dates_cover_cache_fresh(self):
+        """因子末日 < 最新行情日，但末日之后无新跳空 → 缓存新鲜不重拉。"""
+        conn = FakeConn(rows=[(pd.Timestamp("2026-01-01").date(), 3.0)])
+        fetched = []
+
+        def fake_fetch(symbol):
+            fetched.append(symbol)
+            return factor_series(["2026-01-01"], [3.0])
+
+        got = ensure_factors(
+            "postgresql://fake", ["002594"],
+            latest_trade_dates={"002594": dt.date(2026, 1, 6)},
+            gap_dates={"002594": [dt.date(2025, 7, 29)]},
+            connect=lambda *a, **k: conn, fetch=fake_fetch)
+        assert got == {"002594": "ok"}
+        assert fetched == []
+
+    def test_gap_after_cache_stale_refetches(self):
+        """因子末日之后出现新跳空（新除权发生）→ 重拉。"""
+        conn = FakeConn(rows=[(pd.Timestamp("2026-01-01").date(), 3.0)])
+        fetched = []
+
+        def fake_fetch(symbol):
+            fetched.append(symbol)
+            return factor_series(["2026-01-01"], [3.0])
+
+        got = ensure_factors(
+            "postgresql://fake", ["002594"],
+            latest_trade_dates={"002594": dt.date(2026, 1, 6)},
+            gap_dates={"002594": [dt.date(2026, 1, 5)]},
+            connect=lambda *a, **k: conn, fetch=fake_fetch)
+        assert got == {"002594": "ok"}
+        assert fetched == ["002594"]
