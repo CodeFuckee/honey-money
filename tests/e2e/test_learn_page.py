@@ -50,15 +50,25 @@ def api_calls(page):
     def handler(route):
         req = route.request
         url = req.url
+
+        def fulfill_json(obj):
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps(obj))
+
         if re.search(r"/api/backtest", url):
             calls.append({"url": url, "body": req.post_data})
-            route.fulfill(status=200, content_type="application/json",
-                          body=json.dumps(holder["bt"]))
-        elif re.search(r"/api/stocks(\?|$)", url):
-            route.fulfill(status=200, content_type="application/json",
-                          body=json.dumps(LIST_BODY))
-        else:
-            route.continue_()
+            fulfill_json(holder["bt"])
+            return
+        if re.search(r"/api/stocks/basic", url):
+            fulfill_json({"status": "up", "total": 3, "stocks": [
+                {"code": "600519", "name": "贵州茅台"},
+                {"code": "000001", "name": "平安银行"},
+                {"code": "000002", "name": "万科A"}]})
+            return
+        if re.search(r"/api/stocks(\?|$)", url):
+            fulfill_json(LIST_BODY)
+            return
+        route.continue_()
 
     page.route("**/api/**", handler)
     return calls, holder
@@ -152,3 +162,26 @@ class TestLearnPage:
         page.get_by_role("button", name="▶ 跑回测").click()
         expect(page.locator(".error-banner")).to_contain_text("服务返回异常")
         expect(page.locator(".error-banner")).to_contain_text("504")
+
+    def test_code_dropdown_search_and_select(self, servers, page, api_calls):
+        """教学页代码控件为可搜索下拉：输入名称过滤、选中后带码回测。"""
+        calls, _ = api_calls
+        _, frontend_port = servers
+        open_learn(page, frontend_port)
+        box = page.locator(".learn-ac input")
+        box.click()
+        box.fill("茅台")                                  # 输入触发本地过滤建议
+        option = page.locator(".p-autocomplete-option", has_text="贵州茅台")
+        expect(option.first).to_be_visible()
+        option.first.click()
+        page.get_by_role("button", name="▶ 跑回测").click()
+        body = json.loads(calls[-1]["body"])
+        assert body["codes"] == ["600519"]
+
+    def test_code_dropdown_lists_all_on_dropdown_click(self, servers, page, api_calls):
+        """下拉按钮：不输入时列出清单前若干条。"""
+        _, frontend_port = servers
+        open_learn(page, frontend_port)
+        page.locator(".learn-ac .p-autocomplete-dropdown").click()
+        expect(page.locator(".p-autocomplete-option", has_text="平安银行")
+               .first).to_be_visible()

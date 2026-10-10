@@ -144,3 +144,20 @@ def fetch_stock_bars(dsn: str, code: str, *, limit: int = 250, offset: int = 0,
         return {"status": "up", "code": code, "count": len(rows), "bars": rows}
     return _safe(run, {"status": "down", "detail": "pg unreachable",
                        "code": code, "count": 0, "bars": []})
+
+
+def fetch_stock_basic(dsn: str) -> dict:
+    """全清单 code+name（教学页代码下拉数据源，一次性拉取前端本地过滤）。
+
+    与 fetch_stock_list 同一套 SQL，但放宽单页上限取全量、只回两列。
+    """
+    def run():
+        with psycopg.connect(dsn, connect_timeout=3) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT code, name FROM stock_basic ORDER BY code")
+                rows = cur.fetchall()
+        return {"status": "up", "total": len(rows),
+                "stocks": [{"code": r[0], "name": r[1]} for r in rows]}
+    return _safe(run, {"status": "down", "detail": "pg unreachable",
+                       "total": 0, "stocks": []})

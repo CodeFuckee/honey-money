@@ -19,7 +19,7 @@ from fastapi import FastAPI
 
 from . import config
 from .backtest_api import register_backtest_routes
-from .browse import fetch_stock_bars, fetch_stock_list
+from .browse import fetch_stock_bars, fetch_stock_basic, fetch_stock_list
 from .crawler.store import Store
 from .crawl_stats import fetch_crawl_stats
 from .infra import check_postgres, check_proxy_pool
@@ -88,6 +88,16 @@ def create_app(*, scheduler: TaskScheduler | None = None,
         """
         return fetch_stock_list(config.DATABASE_URL, q=q, limit=limit,
                                 offset=offset, source=source.strip().lower())
+
+    @app.get("/api/stocks/basic")
+    def stocks_basic():
+        """全清单 code+name（教学页代码下拉数据源）；降级约定同 /api/infra。"""
+        try:
+            return fetch_stock_basic(config.DATABASE_URL)
+        except Exception as exc:                       # PG 不可达：降级而非 5xx
+            return {"status": "down",
+                    "detail": f"{type(exc).__name__}: {str(exc)[:120]}",
+                    "total": 0, "stocks": []}
 
     @app.get("/api/stocks/{code}/bars")
     def stock_bars(code: str, limit: int = 250, offset: int = 0, source: str = ""):

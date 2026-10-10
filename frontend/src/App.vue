@@ -5,6 +5,7 @@ import Column from 'primevue/column'
 import InputText from 'primevue/inputtext'
 import Button from 'primevue/button'
 import Paginator from 'primevue/paginator'
+import AutoComplete from 'primevue/autocomplete'
 import * as echarts from 'echarts/core'
 import { CandlestickChart, BarChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent, DataZoomComponent } from 'echarts/components'
@@ -309,7 +310,11 @@ const DEFAULT_PARAMS = {
   momentum: { window: 20, top_k: 2 },
 }
 const learnStrat = ref('ma_cross')
-const learnCode = ref('600519')
+const learnCodePick = ref('600519')   // AutoComplete 绑定（选中后为对象）
+function resolveLearnCode() {
+  const v = learnCodePick.value
+  return (typeof v === 'string' ? v : (v?.code ?? '')).trim()
+}
 const learnCodes = ref('600519,000001,601318,300750,600036')
 const learnRange = ref('3y')
 const learnExec = ref('next_open')
@@ -322,13 +327,38 @@ const learnLoading = ref(false)
 const learnChartEl = ref(null)
 let learnChart = null
 
+// 代码下拉：一次性拉全清单（code+name），本地过滤（搜索零延迟）
+const codeOptions = ref([])
+const codeSuggestions = ref([])
+async function loadCodeOptions() {
+  if (codeOptions.value.length) return            // 已加载
+  try {
+    const r = await fetch('/api/stocks/basic')
+    const body = await r.json()
+    if (body.status === 'up')
+      codeOptions.value = body.stocks.map(x => ({
+        code: x.code, name: x.name, label: `${x.code} ${x.name}` }))
+  } catch { /* 拉不到则退化为手输代码 */ }
+}
+function searchCodes(ev) {
+  const q = (ev.query || '').trim().toLowerCase()
+  const src = codeOptions.value
+  codeSuggestions.value = q
+    ? src.filter(x => x.code.toLowerCase().includes(q)
+        || x.name.toLowerCase().includes(q)).slice(0, 50)
+    : src.slice(0, 50)
+}
+watch(activeNav, nav => {
+  if (nav === 'learn') loadCodeOptions()
+})
+
 const learnStratMeta = computed(() => STRATS.find(s => s.id === learnStrat.value))
 const learnIsMomentum = computed(() => learnStrat.value === 'momentum')
 
 watch(learnStrat, id => { learnParams.value = { ...DEFAULT_PARAMS[id] } })
 
 function openLearnWith(code) {
-  learnCode.value = code
+  learnCodePick.value = code
   activeNav.value = 'learn'
 }
 
@@ -341,7 +371,7 @@ async function runLearn() {
       strategy: learnStrat.value,
       codes: learnIsMomentum.value
         ? learnCodes.value.split(',').map(s => s.trim()).filter(Boolean)
-        : [learnCode.value.trim()],
+        : [resolveLearnCode()],
       range: learnRange.value,
       params: learnParams.value,
       exec_mode: learnExec.value,
@@ -1065,8 +1095,11 @@ onMounted(refresh)
                 <div class="card learn-params">
                   <div class="learn-params-row">
                     <template v-if="!learnIsMomentum">
-                      <label class="learn-field"><span>股票代码</span>
-                        <InputText v-model="learnCode" placeholder="600519" class="learn-input" /></label>
+                      <label class="learn-field"><span>股票代码（可搜索）</span>
+                        <AutoComplete v-model="learnCodePick" :suggestions="codeSuggestions"
+                          optionLabel="label" dropdown
+                          placeholder="输入代码或名称，如 600519 / 茅台"
+                          @complete="searchCodes" class="learn-ac" /></label>
                     </template>
                     <template v-else>
                       <label class="learn-field wide"><span>轮动股票池（逗号分隔，≥2 只）</span>
@@ -1796,6 +1829,8 @@ body {
 .learn-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--fg-2); }
 .learn-field.wide { flex: 1; min-width: 260px; }
 .learn-input { width: 110px; }
+.learn-ac { width: 220px; }
+.learn-ac .p-autocomplete-input { width: 100%; }
 .learn-input.num { width: 90px; }
 .learn-select { height: 36px; border: 1px solid var(--ph-input-border); background: #fff; font: inherit; font-size: 13px; }
 .learn-run { margin-left: auto; }

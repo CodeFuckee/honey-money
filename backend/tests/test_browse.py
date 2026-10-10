@@ -171,3 +171,35 @@ class TestBarsEndpointSource:
         monkeypatch.setattr(main_mod, "fetch_stock_bars", fake_bars)
         client.get("/api/stocks/600519/bars")
         assert captured["source"] == ""
+
+
+class TestStocksBasic:
+    """教学页代码下拉的数据源：全清单 code+name（轻量，一次性拉取）。"""
+
+    def test_basic_lists_code_and_name(self, client, monkeypatch):
+        import app.main as main_mod
+
+        def fake_basic(dsn):
+            return {"status": "up", "total": 2,
+                    "stocks": [{"code": "600519", "name": "贵州茅台"},
+                               {"code": "000001", "name": "平安银行"}]}
+
+        monkeypatch.setattr(main_mod, "fetch_stock_basic", fake_basic)
+        resp = client.get("/api/stocks/basic")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "up"
+        assert body["stocks"] == [{"code": "600519", "name": "贵州茅台"},
+                                  {"code": "000001", "name": "平安银行"}]
+
+    def test_basic_down_degrades(self, client, monkeypatch):
+        import app.main as main_mod
+
+        def boom(*a, **k):
+            raise RuntimeError("pg down")
+
+        monkeypatch.setattr(main_mod, "fetch_stock_basic", boom)
+        resp = client.get("/api/stocks/basic")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "down"
+        assert resp.json()["stocks"] == []
