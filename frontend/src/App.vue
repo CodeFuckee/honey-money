@@ -311,12 +311,17 @@ const DEFAULT_PARAMS = {
   momentum: { window: 20, top_k: 2 },
 }
 const learnStrat = ref('ma_cross')
-const learnCodePick = ref('600519')   // AutoComplete 绑定（选中后为对象）
-function resolveLearnCode() {
-  const v = learnCodePick.value
-  return (typeof v === 'string' ? v : (v?.code ?? '')).trim()
+const learnCodePick = ref([])         // 多选标签：[{code, name, label}]（1 只=单股模式）
+const batchProgress = ref(null)       // {done, total} 批量进度
+const batchResults = ref([])          // 批量模式每股结果
+const batchFailed = ref([])           // 批量失败清单 [{code, name, reason}]
+function resolveCodes() {
+  return learnCodePick.value
+    .map(x => (typeof x === 'string' ? x : (x?.code ?? '')).trim())
+    .filter(Boolean)
 }
-const learnCodes = ref('600519,000001,601318,300750,600036')
+const batchMode = computed(() =>
+  learnStrat.value !== 'momentum' && resolveCodes().length >= 2)
 const learnRange = ref('3y')
 const learnExec = ref('next_open')
 const learnParams = ref({ ...DEFAULT_PARAMS.ma_cross })
@@ -358,45 +363,144 @@ const learnIsMomentum = computed(() => learnStrat.value === 'momentum')
 
 watch(learnStrat, id => { learnParams.value = { ...DEFAULT_PARAMS[id] } })
 
-function openLearnWith(code) {
-  learnCodePick.value = code
+function openLearnWith(code, name) {
+  learnCodePick.value = [{ code, name: name || code,
+                           label: name ? `${code} ${name}` : code }]
   activeNav.value = 'learn'
+}
+
+function _pickToCode(x) {
+  return (typeof x === 'string' ? x : (x?.code ?? '')).trim()
+}
+
+async function _runOne(code, shared) {
+  const body = {
+    strategy: learnStrat.value,
+    codes: [code],
+    range: learnRange.value,
+    params: learnParams.value,
+    exec_mode: learnExec.value,
+    commission: (learnCommission.value || 0) / 10000,
+    sell_tax: (learnSellTax.value || 0) / 10000,
+    ...shared,
+  }
+  const r = await fetch('/api/backtest', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (r.status === 400) {
+    return { code, ok: false, reason: (await r.json()).detail || '参数错误' }
+  }
+  let parsed
+  try { parsed = await r.json() }
+  catch {
+    return { code, ok: false,
+             reason: `服务返回异常（HTTP ${r.status}，可能为网关超时）` }
+  }
+  if (parsed.status !== 'up') return { code, ok: false, reason: parsed.detail }
+  if (parsed.message) return { code, ok: false, reason: parsed.message }
+  return { code, ok: true, ...parsed }
 }
 
 async function runLearn() {
   learnLoading.value = true
   learnError.value = ''
   learnResult.value = null
+  batchResults.value = []
+  batchFailed.value = []
+  batchProgress.value = null
+  const codes = resolveCodes()
+  if (!codes.length) {
+    learnLoading.value = false
+    learnError.value = '请先选择至少一只股票'
+    return
+  }
+  const batch = batchMode.value
   try {
-    const body = {
-      strategy: learnStrat.value,
-      codes: learnIsMomentum.value
-        ? learnCodes.value.split(',').map(s => s.trim()).filter(Boolean)
-        : [resolveLearnCode()],
-      range: learnRange.value,
-      params: learnParams.value,
-      exec_mode: learnExec.value,
-      commission: (learnCommission.value || 0) / 10000,
-      sell_tax: (learnSellTax.value || 0) / 10000,
-    }
-    const r = await fetch('/api/backtest', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    })
-    if (r.status === 400) { learnError.value = (await r.json()).detail; return }
-    let parsed
-    try { parsed = await r.json() }
-    catch {
-      // 网关/代理超时等返回 HTML 错误页，json() 会抛 "Unexpected token '<'"
-      learnError.value = `服务返回异常（HTTP ${r.status}，可能为网关超时），请稍后重试`
+    if (!batch) {                                    // 单股 / 轮动（一次请求）
+      const bodyCodes = learnIsMomentum.value ? codes : [codes[0]]
+      learnResult.value = await _runOne(bodyCodes[0], {})
+      if (learnIsMomentum.value) learnResult.value.codes = codes
+      learnResult.value = { ...learnResult.value, codes: bodyCodes }
+      await nextTick()
+      renderLearnChart()
       return
     }
-    learnResult.value = parsed
+    // 批量：逐股请求（并发 3），每股完成即入表渐进渲染
+    const picks = learnCodePick.value
+    const nameOf = code => {
+      const hit = picks.find(x => _pickToCode(x) === code)
+      return hit?.name || code
+    }
+    batchProgress.value = { done: 0, total: codes.length }
+    const queue = [...codes]
+    const results = []
+    const failed = []
+    async function worker() {
+      while (queue.length) {
+        const code = queue.shift()
+        try {
+          const r = await _runOne(code, {})
+          if (r.ok) results.push(r)
+          else failed.push({ code, name: nameOf(code), reason: r.reason || '失败' })
+        } catch (e) {
+          failed.push({ code, name: nameOf(code), reason: String(e) })
+        }
+        batchProgress.value = {
+          done: batchProgress.value.done + 1, total: codes.length }
+        renderBatchTable(results, failed)
+      }
+    }
+    await Promise.all([worker(), worker(), worker(), worker()])
+    batchResults.value = [...results].sort((a, b) =>
+      (b.metrics?.total_return ?? -9) - (a.metrics?.total_return ?? -9))
+    batchFailed.value = failed
+    renderBatchTable(batchResults.value, failed)
     await nextTick()
-    renderLearnChart()
+    renderBatchChart(batchResults.value)
   } catch (e) {
     learnError.value = String(e)
   } finally { learnLoading.value = false }
+}
+
+function renderBatchTable(results, failed) {
+  batchResults.value = [...results].sort((a, b) =>
+    (b.metrics?.total_return ?? -9) - (a.metrics?.total_return ?? -9))
+  batchFailed.value = failed
+}
+
+function renderBatchChart(results) {
+  if (learnChart) { learnChart.dispose(); learnChart = null }
+  if (!learnChartEl.value || !results.length) return
+  learnChart = echarts.init(learnChartEl.value)
+  // 各股归一化净值（1.0 起步）按日期对齐（并集，缺日 null 断开）
+  const dateSet = new Set()
+  results.forEach(r => (r.equity || []).forEach(row => dateSet.add(row[0])))
+  const dates = [...dateSet].sort()
+  const series = results.map(r => {
+    const map = Object.fromEntries((r.equity || []).map(row => [row[0], row[1]]))
+    const pick = pickNameOf(r.code)
+    return {
+      name: pick, type: 'line', showSymbol: false,
+      connectNulls: false, lineStyle: { width: 1.5 },
+      data: dates.map(d => map[d] ?? null),
+    }
+  })
+  learnChart.setOption({
+    animation: false,
+    tooltip: { trigger: 'axis' },
+    legend: { data: results.map(r => pickNameOf(r.code)), top: 0 },
+    grid: { left: 60, right: 20, top: 34, bottom: 46 },
+    xAxis: { type: 'category', data: dates, axisLabel: { fontSize: 10 } },
+    yAxis: { scale: true, splitLine: { lineStyle: { color: '#eee' } } },
+    dataZoom: [{ type: 'inside' }],
+    series,
+  })
+}
+
+function pickNameOf(code) {
+  const hit = learnCodePick.value.find(x => _pickToCode(x) === code)
+  return hit ? (hit.name || hit.code || code) : code
 }
 
 function renderLearnChart() {
@@ -546,6 +650,25 @@ watch(stockAdjust, () => {
 })
 
 const _onResize = () => chartInstance && chartInstance.resize()
+// E2E/调试钩子：直设教学页多选代码（绕过 AutoComplete 交互细节）
+if (typeof window !== 'undefined') {
+  window.__learnSetCodes = (items, names = {}) => {
+    learnCodePick.value = items.map(code => {
+      const name = names[code] || code
+      return { code, name, label: `${code} ${name}` }
+    })
+  }
+  window.__learnState = () => ({
+    strat: learnStrat.value,
+    picks: JSON.parse(JSON.stringify(learnCodePick.value)),
+    batchMode: batchMode.value,
+    codes: resolveCodes(),
+    loading: learnLoading.value,
+    error: learnError.value,
+    hasResult: !!learnResult.value,
+    batchN: batchResults.value.length,
+  })
+}
 onMounted(() => window.addEventListener('resize', _onResize))
 
 watch(activeNav, (nav, prev) => {
@@ -1110,17 +1233,14 @@ onMounted(refresh)
               <div class="learn-main">
                 <div class="card learn-params">
                   <div class="learn-params-row">
-                    <template v-if="!learnIsMomentum">
-                      <label class="learn-field"><span>股票代码（可搜索）</span>
-                        <AutoComplete v-model="learnCodePick" :suggestions="codeSuggestions"
-                          optionLabel="label" dropdown
-                          placeholder="输入代码或名称，如 600519 / 茅台"
-                          @complete="searchCodes" class="learn-ac" /></label>
-                    </template>
-                    <template v-else>
-                      <label class="learn-field wide"><span>轮动股票池（逗号分隔，≥2 只）</span>
-                        <InputText v-model="learnCodes" class="learn-input" /></label>
-                    </template>
+                    <label class="learn-field" :class="{ wide: learnIsMomentum }">
+                      <span>{{ learnIsMomentum
+                        ? '轮动股票池（可搜索多选，≥2 只）'
+                        : '股票代码（可搜索多选：选 1 只单股回测，选多只自动批量对比）' }}</span>
+                      <AutoComplete v-model="learnCodePick" :suggestions="codeSuggestions"
+                        optionLabel="label" dropdown multiple
+                        placeholder="输入代码或名称搜索后选中，如 600519 / 茅台"
+                        @complete="searchCodes" class="learn-ac" /></label>
                     <label class="learn-field"><span>回测区间</span>
                       <select v-model="learnRange" class="learn-select">
                         <option value="1y">近 1 年</option><option value="3y">近 3 年</option>
@@ -1152,6 +1272,11 @@ onMounted(refresh)
 
                 <div v-if="learnError" class="error-banner"><span>{{ learnError }}</span></div>
 
+                <div v-if="batchMode && learnLoading && batchProgress" class="card learn-empty">
+                  <div class="state">批量回测中… 已完成 {{ batchProgress.done }} / {{ batchProgress.total }} 只</div>
+                  <div class="detail">每股独立回测（含复权因子懒加载），完成后自动生成对比表与叠加净值图</div>
+                </div>
+
                 <template v-if="learnResult">
                   <div v-if="learnResult.status === 'down'" class="card learn-empty">
                     <div class="state">回测不可用</div>
@@ -1160,7 +1285,49 @@ onMounted(refresh)
                   <div v-else-if="learnResult.message" class="card learn-empty">
                     <div class="state">{{ learnResult.message }}</div>
                   </div>
-                  <template v-else>
+                  <!-- 批量对比视图：每股一行指标 + 归一化净值叠加 -->
+                  <template v-else-if="batchResults.length || batchFailed.length">
+                    <div class="card learn-empty" v-if="!batchResults.length">
+                      <div class="state">全部股票回测失败</div>
+                      <div class="detail" v-for="f in batchFailed" :key="f.code">
+                        {{ f.code }} {{ f.name }}：{{ f.reason }}</div>
+                    </div>
+                    <template v-else>
+                      <div class="adj-ok" v-if="batchResults.every(r => r.adjust_applied)">
+                        已按后复权口径计算收益（除权除息已修正）· {{ batchResults.length }} 只对比</div>
+                      <div v-else class="task-risk">
+                        部分股票复权因子不可用（表中标注），不复权口径存在假跳空失真</div>
+                      <div class="card chart-card"><div ref="learnChartEl" class="learn-chart"></div></div>
+                      <div class="card detail-table-card">
+                        <table class="runs-table learn-cmp">
+                          <thead><tr>
+                            <th>代码</th><th>名称</th><th>总收益</th><th>年化</th>
+                            <th>最大回撤</th><th>夏普</th><th>胜率</th><th>交易次数</th>
+                          </tr></thead>
+                          <tbody>
+                            <tr v-for="r in batchResults" :key="r.code">
+                              <td class="mono">{{ r.code }}</td>
+                              <td>{{ pickNameOf(r.code) }}</td>
+                              <td :class="(r.metrics?.total_return ?? 0) >= 0 ? 'chg-up' : 'chg-down'">
+                                {{ ((r.metrics?.total_return ?? 0) * 100).toFixed(1) }}%</td>
+                              <td>{{ ((r.metrics?.annual_return ?? 0) * 100).toFixed(1) }}%</td>
+                              <td class="chg-down">{{ ((r.metrics?.max_drawdown ?? 0) * 100).toFixed(1) }}%</td>
+                              <td>{{ r.metrics?.sharpe?.toFixed(2) }}</td>
+                              <td>{{ ((r.metrics?.win_rate ?? 0) * 100).toFixed(0) }}%</td>
+                              <td>{{ r.metrics?.trades ?? 0 }}</td>
+                            </tr>
+                            <tr v-for="f in batchFailed" :key="'f-' + f.code" class="learn-fail-row">
+                              <td class="mono">{{ f.code }}</td>
+                              <td>{{ f.name }}</td>
+                              <td colspan="6" class="learn-fail-reason">失败：{{ f.reason }}</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    </template>
+                  </template>
+
+                  <template v-else-if="learnResult && learnResult.metrics">
                     <div v-if="learnResult.adjust_applied"
                       class="adj-ok">已按后复权口径计算收益（除权除息已修正）</div>
                     <div v-else class="task-risk">
@@ -1866,6 +2033,12 @@ body {
 .learn-chart { width: 100%; height: 420px; }
 .learn-empty { padding: 36px; text-align: center; }
 .learn-empty .detail { margin-top: 8px; }
+
+.learn-cmp { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.learn-cmp th { text-align: left; padding: 8px 10px; background: #f4f4f4; color: var(--fg-2); font-weight: 600; }
+.learn-cmp td { padding: 7px 10px; border-bottom: 1px solid #ededed; font-variant-numeric: tabular-nums; }
+.learn-fail-row td { color: var(--dot-down); font-size: 12px; }
+.learn-fail-reason { word-break: break-all; }
 
 /* ===== 响应式兜底 ===== */
 @media (max-width: 860px) {
