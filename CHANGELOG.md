@@ -116,6 +116,11 @@
   （搜索 480 / 行情表 / K线图占位条 160）。
 
 ### Fixed
+- **教学页回测图表空白（指标正常、仅轴网格无曲线）**：ECharts 按需引入时
+  只注册了 Candlestick/Bar（详情页 K 线用），教学页净值/回撤的 line 系列类型
+  未注册——setOption 静默忽略未知类型。补注册 LineChart；E2E 强化断言
+  （经 window.__learnChart 钩子校验 3 个 series 数据真实进入渲染配置，
+  杜绝「canvas 存在但曲线为空」的假阳性）。
 - **教学页「跑回测」报 SyntaxError（HTML 响应）**：首次回测触发 numba JIT
   编译（部署后第一次可达数十秒），超过 nginx 反代默认 60s 读超时 → 504 HTML
   错误页被前端 json() 解析崩。三层修复：① nginx `/api/` 反代放宽

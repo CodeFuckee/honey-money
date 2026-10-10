@@ -101,6 +101,15 @@ class TestLearnPage:
         page.get_by_role("button", name="▶ 跑回测").click()
 
         expect(page.locator(".learn-chart canvas").first).to_be_visible()
+        # 回归：LineChart 未注册时 canvas 只有轴网格、曲线全空（用户截图事件）
+        diag = page.evaluate(
+            "() => { const c = window.__learnChart; if (!c) return {hook: false};"
+            " const o = c.getOption();"
+            " return {hook: true, n: o.series.length,"
+            " lens: o.series.map(x => (x.data || []).length)}; }")
+        print("CHART DIAG:", diag)
+        assert diag.get("hook") and diag.get("n") == 3 and all(
+            n > 0 for n in diag.get("lens", [])), f"series 未渲染: {diag}"
         for k in ("总收益", "年化收益", "最大回撤", "夏普比率", "胜率", "盈亏比", "交易次数"):
             expect(page.locator(".lm-k", has_text=k)).to_be_visible()
         expect(page.locator(".runs-table tbody tr")).to_have_count(2)

@@ -7,11 +7,11 @@ import Button from 'primevue/button'
 import Paginator from 'primevue/paginator'
 import AutoComplete from 'primevue/autocomplete'
 import * as echarts from 'echarts/core'
-import { CandlestickChart, BarChart } from 'echarts/charts'
+import { CandlestickChart, BarChart, LineChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent, DataZoomComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 
-echarts.use([CandlestickChart, BarChart, GridComponent, TooltipComponent,
+echarts.use([CandlestickChart, BarChart, LineChart, GridComponent, TooltipComponent,
   DataZoomComponent, CanvasRenderer])
 
 // ===== 数据层（沿用原仪表盘逻辑：三接口并发 + 优雅降级）=====
@@ -403,6 +403,7 @@ function renderLearnChart() {
   if (learnChart) { learnChart.dispose(); learnChart = null }
   if (!learnChartEl.value || !res || res.status !== 'up' || !res.equity?.length) return
   learnChart = echarts.init(learnChartEl.value)
+  window.__learnChart = learnChart               // E2E 断言钩子（series 数据检查）
   const dates = res.equity.map(r => r[0])
   const strat = res.equity.map(r => r[1])
   const bh = res.equity.map(r => r[2])
