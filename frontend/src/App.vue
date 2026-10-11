@@ -373,7 +373,9 @@ function _pickToCode(x) {
   return (typeof x === 'string' ? x : (x?.code ?? '')).trim()
 }
 
-async function _runOne(code, shared) {
+const fmtSignedPct = v => (v >= 0 ? '+' : '') + (v * 100).toFixed(1) + '%'
+
+async function _runOne(code, shared, raw = false) {
   const body = {
     strategy: learnStrat.value,
     codes: [code],
@@ -388,6 +390,17 @@ async function _runOne(code, shared) {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
+  if (raw) {
+    // 单股/轮动：保留后端原始语义（message=区间空态、status=down=不可用），
+    // 400/网关异常折算为 {ok:false, reason} 由调用方转错误横幅
+    if (r.status === 400)
+      return { ok: false, reason: (await r.json()).detail || '参数错误' }
+    try { return await r.json() }
+    catch {
+      return { ok: false,
+               reason: `服务返回异常（HTTP ${r.status}，可能为网关超时）` }
+    }
+  }
   if (r.status === 400) {
     return { code, ok: false, reason: (await r.json()).detail || '参数错误' }
   }
@@ -419,9 +432,9 @@ async function runLearn() {
   try {
     if (!batch) {                                    // 单股 / 轮动（一次请求）
       const bodyCodes = learnIsMomentum.value ? codes : [codes[0]]
-      learnResult.value = await _runOne(bodyCodes[0], {})
-      if (learnIsMomentum.value) learnResult.value.codes = codes
-      learnResult.value = { ...learnResult.value, codes: bodyCodes }
+      const raw = await _runOne(bodyCodes[0], {}, true)
+      if (raw.ok === false) throw new Error(raw.reason)   // 参数/网关异常 → 横幅
+      learnResult.value = { ...raw, codes: bodyCodes }
       await nextTick()
       renderLearnChart()
       return
@@ -473,6 +486,7 @@ function renderBatchChart(results) {
   if (learnChart) { learnChart.dispose(); learnChart = null }
   if (!learnChartEl.value || !results.length) return
   learnChart = echarts.init(learnChartEl.value)
+  window.__learnChart = learnChart               // E2E 断言钩子（series 数据检查）
   // 各股归一化净值（1.0 起步）按日期对齐（并集，缺日 null 断开）
   const dateSet = new Set()
   results.forEach(r => (r.equity || []).forEach(row => dateSet.add(row[0])))
@@ -1277,12 +1291,13 @@ onMounted(refresh)
                   <div class="detail">每股独立回测（含复权因子懒加载），完成后自动生成对比表与叠加净值图</div>
                 </div>
 
-                <template v-if="learnResult">
-                  <div v-if="learnResult.status === 'down'" class="card learn-empty">
+                <!-- 有单股结果或批量结果才渲染结果区（批量分支不写 learnResult） -->
+                <template v-if="learnResult || batchResults.length || batchFailed.length">
+                  <div v-if="learnResult && learnResult.status === 'down'" class="card learn-empty">
                     <div class="state">回测不可用</div>
                     <div class="detail">{{ learnResult.detail }}</div>
                   </div>
-                  <div v-else-if="learnResult.message" class="card learn-empty">
+                  <div v-else-if="learnResult && learnResult.message" class="card learn-empty">
                     <div class="state">{{ learnResult.message }}</div>
                   </div>
                   <!-- 批量对比视图：每股一行指标 + 归一化净值叠加 -->
@@ -1309,7 +1324,7 @@ onMounted(refresh)
                               <td class="mono">{{ r.code }}</td>
                               <td>{{ pickNameOf(r.code) }}</td>
                               <td :class="(r.metrics?.total_return ?? 0) >= 0 ? 'chg-up' : 'chg-down'">
-                                {{ ((r.metrics?.total_return ?? 0) * 100).toFixed(1) }}%</td>
+                                {{ fmtSignedPct(r.metrics?.total_return ?? 0) }}</td>
                               <td>{{ ((r.metrics?.annual_return ?? 0) * 100).toFixed(1) }}%</td>
                               <td class="chg-down">{{ ((r.metrics?.max_drawdown ?? 0) * 100).toFixed(1) }}%</td>
                               <td>{{ r.metrics?.sharpe?.toFixed(2) }}</td>

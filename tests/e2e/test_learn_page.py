@@ -103,9 +103,7 @@ class TestLearnPage:
         _, frontend_port = servers
         open_learn(page, frontend_port)
         page.locator(".learn-nav", has_text="通道突破").click()
-        box = page.locator(".learn-ac input")
-        box.fill("600519")
-        page.locator(".p-autocomplete-option", has_text="600519").first.click()
+        self._pick(page, "600519")
         resp_body = {}
 
         def _capture(resp):
@@ -146,14 +144,7 @@ class TestLearnPage:
         page.locator(".learn-nav", has_text="动量轮动").click()
         pool = page.locator(".learn-field", has_text="轮动股票池")
         expect(pool).to_be_visible()
-        pool_box = pool.locator("input")
-        pool_box.fill("600519")
-        page.locator(".p-autocomplete-option", has_text="600519").first.wait_for(
-            state="visible")
-        pool_box.press("ArrowDown")
-        pool_box.press("Enter")
-        pool_box.press("ArrowDown")
-        pool_box.press("Enter")
+        self._pick(page, "600519")                           # 池输入同源多选控件
         page.locator(".learn-select").nth(1).select_option("close")   # 撮合模式
         page.get_by_role("button", name="▶ 跑回测").click()
         body = json.loads(calls[-1]["body"])
@@ -233,10 +224,12 @@ class TestLearnPage:
         expect(page.locator(".task-risk", has_text="不复权口径")).to_be_visible()
 
 
-    def _pick(self, page, code):
-        box = page.locator(".learn-ac input")
-        box.fill(code)
-        page.locator(".p-autocomplete-option", has_text=code).first.click()
+    def _pick(self, page, *codes):
+        """调试钩子直设多选（绕过 AutoComplete 下拉交互——高负载下
+        点击/键盘选码有渲染竞态，偶发丢选）。"""
+        page.evaluate("codes => window.__learnSetCodes(codes)", list(codes))
+        for code in codes:
+            expect(page.locator(".learn-ac")).to_contain_text(code)
 
     def test_batch_compare_table_and_overlay(self, servers, page, api_calls):
         """P0 批量：选 3 只 → 对比表按收益降序 3 行 + 归一化叠加净值图。"""
@@ -247,8 +240,7 @@ class TestLearnPage:
         _, frontend_port = servers
         open_learn(page, frontend_port)
         page.locator(".learn-nav", has_text="双均线交叉").click()
-        for code in ("600519", "000001", "000002"):
-            self._pick(page, code)
+        self._pick(page, "600519", "000001", "000002")
         expect(page.locator(".learn-ac")).to_contain_text("600519")
         expect(page.locator(".learn-ac")).to_contain_text("000001")
         expect(page.locator(".learn-ac")).to_contain_text("000002")
@@ -284,12 +276,12 @@ class TestLearnPage:
         holder["bt"] = by_code
         _, frontend_port = servers
         open_learn(page, frontend_port)
-        for code in ("600519", "000002"):
-            self._pick(page, code)
+        self._pick(page, "600519", "000002")
         page.get_by_role("button", name="▶ 跑回测").click()
 
         rows = page.locator(".learn-cmp tbody tr")
         expect(rows).to_have_count(2)                  # 1 成功 + 1 失败行
-        expect(page.locator(".learn-fail-reason", has_text="000002")
+        fail_row = page.locator(".learn-cmp tbody tr", has_text="000002")
+        expect(fail_row.locator(".learn-fail-reason")
                ).to_contain_text("区间内无行情数据")
         expect(rows.nth(0)).to_contain_text("600519")

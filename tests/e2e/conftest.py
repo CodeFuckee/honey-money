@@ -41,6 +41,12 @@ def servers():
 
     procs = []
     try:
+        # 先重建前端产物再 preview：vite preview 只服务现成 dist，源码改完
+        # 忘了 build 会静默测到旧版本（曾因此误判新功能 E2E 全挂）
+        build = subprocess.run(
+            ["npm", "run", "build"], cwd=ROOT / "frontend",
+            shell=(sys.platform == "win32"), capture_output=True, text=True)
+        assert build.returncode == 0, f"前端构建失败:\n{build.stderr[-2000:]}"
         # 注入本地必失败地址：PG/代理池探测秒级返回 down（默认 DSN 的主机名
         # postgres 在无 DNS 的本机要等十几秒才超时，页面会长时间停在 1 张卡）
         backend_env = {**os.environ,
