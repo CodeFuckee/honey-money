@@ -361,10 +361,17 @@ def _load_universe(run_id: int, spec: dict) -> tuple[list[dict], int]:
     with _connect() as conn:
         stocks = conn.cursor().execute(
             "SELECT code, name FROM stock_basic ORDER BY code").fetchall()
-        counts = dict(conn.cursor().execute(
-            "SELECT code, count(DISTINCT trade_date) FROM daily_bar"
-            " WHERE (%s IS NULL OR trade_date >= %s) GROUP BY code",
-            (start, start)).fetchall())
+        # 注意不可写 `(%s IS NULL OR trade_date >= %s)`：psycopg3 服务端绑定下
+        # $1 仅出现在 IS NULL 位，Postgres 推断不出类型（IndeterminateDatatype）
+        cur = conn.cursor()
+        if start is None:
+            counts = dict(cur.execute(
+                "SELECT code, count(DISTINCT trade_date) FROM daily_bar"
+                " GROUP BY code").fetchall())
+        else:
+            counts = dict(cur.execute(
+                "SELECT code, count(DISTINCT trade_date) FROM daily_bar"
+                " WHERE trade_date >= %s GROUP BY code", (start,)))
     stocks = [{"code": c, "name": n} for c, n in stocks]
     filters = spec.get("filters") or {}
     kept, skipped = filter_universe(

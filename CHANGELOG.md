@@ -177,6 +177,13 @@
   （搜索 480 / 行情表 / K线图占位条 160）。
 
 ### Fixed
+- **全量回测必失败（IndeterminateDatatype: could not determine data type of
+  parameter $1）**：`_load_universe` 的清单计数查询写成
+  `(%s IS NULL OR trade_date >= %s)`——psycopg3 服务端绑定下生成
+  `$1 IS NULL`，`$1` 无类型上下文，Postgres 解析期即报错（任何区间都挂，
+  被 worker 兜底为「全量回测失败」横幅）。改为按分支拼装：全史无 WHERE、
+  有起始日单参数 `trade_date >= %s`；新增 SQL 形状回归测试 2 条
+  （单测兜不住真 SQL——形状测试专门盯「参数化 NULL 位」这一坑）。
 - **仪表盘长时「正在检查各服务…」**：进入页面用 `Promise.all` 等三路探测
   （/healthz · /api/infra 探 PG/代理池 · /api/crawl/stats 大表统计）全部返回
   才渲染，最慢一路（PG 不可达要等超时）拖着整页骨架空转十几秒。改为三路

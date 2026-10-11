@@ -232,6 +232,71 @@ class TestRowsAndExportApi:
 
 # ---------------------------------------------------------------- worker ----
 
+class TestLoadUniverseSql:
+    """回归：`%s IS NULL` 在 psycopg3 服务端绑定下生成 `$1 IS NULL`，
+    Postgres 无法推断 $1 类型 → IndeterminateDatatype（生产全量回测必挂）。
+    无起始日时不得把参数放进 IS NULL 位——SQL 按分支拼装。"""
+
+    class FakeCur:
+        def __init__(self, executed):
+            self.executed = executed
+            self.rows = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def execute(self, q, p=None):
+            self.executed.append((q, p))
+            return self
+
+        def fetchall(self):
+            return self.rows
+
+        def __iter__(self):
+            return iter(self.rows)
+
+    class FakeConn:
+        def __init__(self, executed):
+            self.executed = executed
+
+        def cursor(self):
+            return TestLoadUniverseSql.FakeCur(self.executed)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def commit(self):
+            pass
+
+    def _run(self, monkeypatch, range_key):
+        executed = []
+        monkeypatch.setattr(bf, "_connect",
+                            lambda: self.FakeConn(executed))
+        monkeypatch.setattr(bf, "set_run_totals", lambda *a, **k: None)
+        bf._load_universe(7, {"range": range_key, "filters": {}})
+        assert len(executed) >= 2
+        return executed
+
+    def test_all_range_sql_has_no_null_param_placeholder(self, monkeypatch):
+        executed = self._run(monkeypatch, "all")
+        counts_sql = executed[1][0]
+        assert "GROUP BY code" in counts_sql
+        assert "%s" not in counts_sql            # 全史：无条件参数化
+
+    def test_dated_range_sql_single_typed_param(self, monkeypatch):
+        executed = self._run(monkeypatch, "3y")
+        counts_sql, params = executed[1]
+        assert "trade_date >= %s" in counts_sql
+        assert "IS NULL" not in counts_sql       # 原实现 `%s IS NULL OR ...` 必挂
+        assert len(params) == 1 and params[0]
+
+
 class TestExecuteRun:
     """worker 编排循环：monkeypatch 取数/引擎/落库，验证推进、失败隔离、取消。"""
 
