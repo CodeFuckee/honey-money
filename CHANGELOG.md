@@ -6,6 +6,12 @@
 ## [Unreleased]
 
 ### Added
+- **本地预览一键转发生产后端**：`npm run preview:prod`——vite preview 以
+  `--mode prod-backend` 把 `/api`、`/healthz` 反代到生产（nas.example.com:28080），
+  本地过目无需再起本地 uvicorn（本地后端未起时页面不再「后端 API 不可用」）；
+  绑 0.0.0.0 供局域网设备访问，`--strictPort` 固定 4180。代理目标优先级：
+  `BACKEND_URL` 环境变量 > prod-backend 模式 > 本机 `BACKEND_PORT`（缺省 8000，
+  E2E 动态端口不受影响）。
 - **教学页批量回测（多股横向对比）**：代码控件升级 PrimeVue AutoComplete
   multiple 多选标签（chips，保留可搜索能力，轮动股票池同步迁移多选）；
   自动适配模式——选 1 只走原单股回测，选 ≥2 只自动批量：前端并行逐股请求

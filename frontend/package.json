@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "preview:prod": "vite preview --mode prod-backend --host 0.0.0.0 --port 4180 --strictPort"
   },
   "dependencies": {
     "@primeuix/themes": "^1.2.5",

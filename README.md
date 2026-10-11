@@ -52,6 +52,12 @@ docs/               调研文档（A 股日线数据源实测等）
 # 前端（另开终端）
 cd frontend && npm install && npm run dev    # 默认 5173，/api 已反代到 8000
 
+# 本地过目/预览（构建产物 + 反代生产后端，无需本地起后端；
+# 绑 0.0.0.0，局域网设备可用 http://<本机IP>:4180 访问）
+npm run preview:prod                         # 反代 http://nas.example.com:28080
+# 自定义后端：BACKEND_URL=http://<host>:<port> npm run preview
+# 反代本地后端：BACKEND_PORT=<port> npm run preview（缺省 8000）
+
 # 测试（后端单测 + E2E，全部离线可跑）
 .venv/Scripts/python.exe -m pytest
 ```
