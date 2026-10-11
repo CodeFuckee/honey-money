@@ -177,6 +177,13 @@
   （搜索 480 / 行情表 / K线图占位条 160）。
 
 ### Fixed
+- **全量回测逐股回测每股必挂（真机验证暴露）**：`_run_one_stock` 的
+  `(bars.get("close") or {}).columns` 对 close **DataFrame** 求真值 →
+  `ValueError: The truth value of a DataFrame is ambiguous`——生产首跑
+  32 只全部 failed（单测此前 mock 掉了真 `_run_one_stock`，真实 OHLC
+  宽表路径零覆盖）。改为 `close is None` 判空；补真实宽表 pack 的
+  切片单列/缺码降级回归测试 2 条；生产复验 34 只完成 0 失败，
+  指标行真实产出（买入持有收益≈基准，差值为佣金税费，自洽）。
 - **全量回测必失败（IndeterminateDatatype: could not determine data type of
   parameter $1）**：`_load_universe` 的清单计数查询写成
   `(%s IS NULL OR trade_date >= %s)`——psycopg3 服务端绑定下生成
