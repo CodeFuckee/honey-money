@@ -5,6 +5,8 @@
 servers fixture 见同目录 conftest.py（本文件只写用例）。
 """
 
+import json
+
 import pytest
 from playwright.sync_api import expect
 
@@ -46,6 +48,35 @@ def test_health_dashboard_renders(servers, page):
     for name, word in (("PostgreSQL", "未连接"), ("代理池", "未连接"), ("爬虫数据", "数据不可用")):
         txt = page.locator(".card", has_text=name).first.inner_text()
         assert txt.count(word) == 1, f"{name} 卡状态文字重复：{txt!r}"
+
+
+def test_dashboard_progressive_render(servers, page):
+    """渐进上屏：/healthz 先回先渲染后端卡，/api/infra 悬挂时 PG/代理池保持骨架，
+    放行后补齐——三路探测互不等待（曾经 Promise.all 全等导致长时「正在检查各服务…」）。"""
+    _, frontend_port = servers
+    held = []
+
+    def hold_infra(route):
+        held.append(route)               # 只挂起不响应，模拟 PG/代理池探测慢
+
+    page.route("**/api/infra", hold_infra)
+    page.goto(f"http://127.0.0.1:{frontend_port}/")
+
+    # 后端卡不等 infra，先上屏
+    expect(page.locator(".card", has_text="后端 API")
+           .locator(".state")).to_have_text("运行中", timeout=10000)
+    expect(page.locator(".card", has_text="PostgreSQL")).to_have_count(0)
+    expect(page.locator(".skeleton-card").first).to_be_visible()
+
+    # 放行 infra → PG/代理池卡补齐，骨架清空
+    held[0].fulfill(status=200, content_type="application/json", body=json.dumps(
+        {"postgres": {"status": "up", "detail": "ok"},
+         "proxy_pool": {"status": "up", "detail": "ok"}}))
+    expect(page.locator(".card", has_text="PostgreSQL")
+           .locator(".state")).to_have_text("已连接")
+    expect(page.locator(".card", has_text="代理池")
+           .locator(".state")).to_contain_text("已连接")
+    expect(page.locator(".skeleton-card")).to_have_count(0)
 
 
 def test_shell_and_nav(servers, page):

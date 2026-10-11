@@ -18,7 +18,9 @@ echarts.use([CandlestickChart, BarChart, LineChart, GridComponent, TooltipCompon
 const backend = ref({ status: 'checking' })   // 后端进程本身
 const infra = ref(null)                       // PostgreSQL / 代理池
 const crawl = ref(null)                       // 爬虫数据统计
-const loading = ref(false)
+const pendingBackend = ref(true)              // 三路探测各自独立结算（渐进上屏）
+const pendingInfra = ref(true)
+const pendingCrawl = ref(true)
 const activeNav = ref('dash')                 // dash | data | src-sina | src-ef | backtest | learn
 
 // 数据源子页（对应 Carbon 原型 ⑥⑦ 屏）：按来源筛选的数据浏览占位页
@@ -27,27 +29,28 @@ const SRC_ITEMS = [
   { id: 'src-ef', label: '东方财富', field: 'eastmoney', tagCls: 'src-ef' },
 ]
 
-async function refresh() {
-  loading.value = true
-  try {
-    const [hz, inf, cr] = await Promise.all([
-      fetch('/healthz').then(r => r.json()),
-      fetch('/api/infra').then(r => r.json()),
-      fetch('/api/crawl/stats').then(r => r.json()).catch(() => null),
-    ])
-    backend.value = hz
-    infra.value = inf
-    crawl.value = cr
-  } catch (e) {
-    backend.value = { status: 'down', detail: String(e) }
-  } finally {
-    loading.value = false
-  }
+function refresh() {
+  // 三路探测各自独立结算，谁先回来谁先上屏——/api/infra 要探 PG/代理池、
+  // /api/crawl/stats 走大表统计，慢的一路不再拖着整页骨架空转
+  pendingBackend.value = pendingInfra.value = pendingCrawl.value = true
+  fetch('/healthz').then(r => r.json())
+    .then(hz => { backend.value = hz })
+    .catch(e => { backend.value = { status: 'down', detail: String(e) } })
+    .finally(() => { pendingBackend.value = false })
+  fetch('/api/infra').then(r => r.json())
+    .then(inf => { infra.value = inf })
+    .catch(() => { infra.value = null })          // null → PG/代理池按未连接显示
+    .finally(() => { pendingInfra.value = false })
+  fetch('/api/crawl/stats').then(r => r.json())
+    .then(cr => { crawl.value = cr })
+    .catch(() => { crawl.value = null })          // null → 爬虫卡按数据不可用显示
+    .finally(() => { pendingCrawl.value = false })
 }
 
 const fmt = n => (n ?? 0).toLocaleString('zh-CN')
 const backendDown = computed(() => backend.value.status === 'down')
-const checking = computed(() => backend.value.status === 'checking' || loading.value)
+const checking = computed(() => backend.value.status === 'checking'
+  || pendingBackend.value || pendingInfra.value || pendingCrawl.value)
 const coverPct = computed(() => {
   const c = crawl.value
   if (!c || !c.stocks_listed) return 0
@@ -808,40 +811,41 @@ onMounted(refresh)
               <span><b class="eb-title">后端 API 不可用：</b>Connection refused · 请检查 backend 容器 / uvicorn 进程 / docker compose ps</span>
             </div>
 
-            <!-- 三张状态卡 -->
+            <!-- 三张状态卡：各自独立结算，谁先回来谁先上屏 -->
             <div class="cards">
-              <!-- 加载骨架 -->
-              <template v-if="checking">
-                <div v-for="i in 3" :key="i" class="card skeleton-card">
-                  <div class="sk sk-title"></div><div class="sk sk-main"></div><div class="sk sk-line"></div>
-                </div>
-              </template>
-              <template v-else>
-                <div class="card">
-                  <div class="name">后端 API</div>
-                  <span class="fbadge"><span class="dot" :class="backendDown ? 'down' : 'up'"></span><span class="fb-txt">{{ backendDown ? '不可用' : '运行中' }}</span></span>
-                  <div class="state">{{ backendDown ? '不可用' : '运行中' }}</div>
-                  <div class="detail">v{{ backend.version || '0.1.0' }} · FastAPI + uvicorn</div>
-                </div>
-                <div class="card" :class="{ idle: backendDown }">
-                  <div class="name">PostgreSQL</div>
-                  <span class="fbadge"><span class="dot" :class="backendDown ? 'down' : (infra?.postgres?.status === 'up' ? 'up' : 'down')"></span><span class="fb-txt">{{ backendDown ? '数据不可用' : (infra?.postgres?.status === 'up' ? '已连接' : '未连接') }}</span></span>
-                  <div class="state">{{ backendDown ? '—' : (infra?.postgres?.status === 'up' ? '已连接' : '未连接') }}</div>
-                  <div class="detail">{{ backendDown ? '等待后端恢复后展示' : (infra?.postgres?.detail || '') }}</div>
-                </div>
-                <div class="card" :class="{ idle: backendDown }">
-                  <div class="name">代理池</div>
-                  <span class="fbadge"><span class="dot" :class="backendDown ? 'down' : (infra?.proxy_pool?.status === 'up' ? 'up' : 'down')"></span><span class="fb-txt">{{ backendDown ? '数据不可用' : (infra?.proxy_pool?.status === 'up' ? '已连接' : '未连接') }}</span></span>
-                  <div class="state">{{ backendDown ? '—' : (infra?.proxy_pool?.status === 'up'
-                    ? (infra.proxy_pool.count != null ? `已连接 · 在池 ${infra.proxy_pool.count}` : '已连接')
-                    : '未连接') }}</div>
-                  <div class="detail">{{ backendDown ? '等待后端恢复后展示' : (infra?.proxy_pool?.detail || '') }}</div>
-                </div>
-              </template>
+              <div v-if="pendingBackend" class="card skeleton-card">
+                <div class="sk sk-title"></div><div class="sk sk-main"></div><div class="sk sk-line"></div>
+              </div>
+              <div v-else class="card">
+                <div class="name">后端 API</div>
+                <span class="fbadge"><span class="dot" :class="backendDown ? 'down' : 'up'"></span><span class="fb-txt">{{ backendDown ? '不可用' : '运行中' }}</span></span>
+                <div class="state">{{ backendDown ? '不可用' : '运行中' }}</div>
+                <div class="detail">v{{ backend.version || '0.1.0' }} · FastAPI + uvicorn</div>
+              </div>
+              <div v-if="!backendDown && pendingInfra" class="card skeleton-card">
+                <div class="sk sk-title"></div><div class="sk sk-main"></div><div class="sk sk-line"></div>
+              </div>
+              <div v-else class="card" :class="{ idle: backendDown }">
+                <div class="name">PostgreSQL</div>
+                <span class="fbadge"><span class="dot" :class="backendDown ? 'down' : (infra?.postgres?.status === 'up' ? 'up' : 'down')"></span><span class="fb-txt">{{ backendDown ? '数据不可用' : (infra?.postgres?.status === 'up' ? '已连接' : '未连接') }}</span></span>
+                <div class="state">{{ backendDown ? '—' : (infra?.postgres?.status === 'up' ? '已连接' : '未连接') }}</div>
+                <div class="detail">{{ backendDown ? '等待后端恢复后展示' : (infra?.postgres?.detail || '探测失败') }}</div>
+              </div>
+              <div v-if="!backendDown && pendingInfra" class="card skeleton-card">
+                <div class="sk sk-title"></div><div class="sk sk-main"></div><div class="sk sk-line"></div>
+              </div>
+              <div v-else class="card" :class="{ idle: backendDown }">
+                <div class="name">代理池</div>
+                <span class="fbadge"><span class="dot" :class="backendDown ? 'down' : (infra?.proxy_pool?.status === 'up' ? 'up' : 'down')"></span><span class="fb-txt">{{ backendDown ? '数据不可用' : (infra?.proxy_pool?.status === 'up' ? '已连接' : '未连接') }}</span></span>
+                <div class="state">{{ backendDown ? '—' : (infra?.proxy_pool?.status === 'up'
+                  ? (infra.proxy_pool.count != null ? `已连接 · 在池 ${infra.proxy_pool.count}` : '已连接')
+                  : '未连接') }}</div>
+                <div class="detail">{{ backendDown ? '等待后端恢复后展示' : (infra?.proxy_pool?.detail || '探测失败') }}</div>
+              </div>
             </div>
 
             <!-- 爬虫数据卡 -->
-            <div v-if="checking" class="card crawl skeleton-card">
+            <div v-if="pendingCrawl" class="card crawl skeleton-card">
               <div class="sk sk-title"></div><div class="sk sk-main"></div>
               <div class="sk sk-bar"></div><div class="sk sk-line"></div><div class="sk sk-line short"></div>
             </div>
@@ -909,7 +913,7 @@ onMounted(refresh)
               <div class="detail">/api/crawl/stats 请求失败 · 恢复后端后点击「重新检测」重试</div>
             </div>
 
-            <p class="note">数据流：进入页面并发拉取 /healthz · /api/infra · /api/crawl/stats</p>
+            <p class="note">数据流：进入页面并发拉取 /healthz · /api/infra · /api/crawl/stats，各自返回即上屏互不等待</p>
           </template>
 
           <!-- ===== 数据浏览（占位；数据源子页为按来源筛选变体） ===== -->
