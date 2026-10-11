@@ -184,27 +184,12 @@ class TestBacktestAdjust:
     def test_adjust_applied_true(self, monkeypatch):
         from app import backtest_api as bapi
         monkeypatch.setattr(bapi, "load_history", lambda *a, **k: self._hist())
-        monkeypatch.setattr(bapi, "ensure_factors",
-                            lambda *a, **k: {"600519": "ok"})
-        monkeypatch.setattr(bapi, "load_factors",
-                            lambda conn, code: pd.Series(
-                                [3.0], index=pd.to_datetime(["2026-01-02"])))
+        # 接缝：复权懒加载已提取为 adjust.ensure_and_apply（单股/全量共用）
+        factors = pd.Series([3.0], index=pd.to_datetime(["2026-01-02"]))
+        monkeypatch.setattr(
+            bapi, "ensure_and_apply",
+            lambda bars, codes, dsn: (bars, {"600519": factors}))
 
-        class FakeConn:
-            def cursor(self):
-                return self
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *exc):
-                return False
-
-            def execute(self, q, p=None):
-                pass
-
-        monkeypatch.setattr(bapi.psycopg, "connect",
-                            lambda *a, **k: FakeConn())
         captured = {}
         result_run = {"metrics": {"total_return": 0.26}, "equity": [], "drawdown": [],
                       "trades": [], "gap_dates": []}
@@ -232,8 +217,9 @@ class TestBacktestAdjust:
                     "trades": [], "gap_dates": []}
 
         monkeypatch.setattr(bapi, "load_history", lambda *a, **k: self._hist())
-        monkeypatch.setattr(bapi, "ensure_factors",
-                            lambda *a, **k: {"600519": "missing"})
+        monkeypatch.setattr(
+            bapi, "ensure_and_apply",
+            lambda bars, codes, dsn: (bars, None))   # 因子不可用降级不复权
         monkeypatch.setattr(bapi, "run_strategy", fake_run)
         client = TestClient(create_app())
         resp = client.post("/api/backtest", json={

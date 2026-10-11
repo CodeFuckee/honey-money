@@ -141,3 +141,30 @@ def apply_qfq(bars: dict[str, pd.DataFrame], factors: dict) -> dict[str, pd.Data
             if f is not None:
                 out[k][col] = df[col] * f / f.iloc[-1]
     return out
+
+
+def ensure_and_apply(bars: dict[str, pd.DataFrame], codes: list[str],
+                     dsn: str) -> tuple[dict, dict | None]:
+    """回测用的复权懒加载一步式封装：确保因子 → 合成后复权价。
+
+    因子不可用（新浪断连等）→ 返回原 bars + None（调用方降级不复权）。
+    提取自 backtest_api 的内联 _with_factors，单股/全量回测共用。
+    """
+    from .backtest.engine import detect_gap_dates
+    latest, gaps = {}, {}
+    cl = bars["close"]
+    for code in codes:
+        if code in cl.columns and cl[code].notna().any():
+            sub = cl[[code]].dropna()
+            latest[code] = sub.index.max().date()
+            prev = sub[code].shift(1)
+            gap_mask = ((sub[code] / prev - 1).abs() > 0.098) & prev.notna()
+            if gap_mask.any():
+                gaps[code] = [d.date() for d in sub.index[gap_mask]]
+    status = ensure_factors(dsn, codes,
+                            latest_trade_dates=latest, gap_dates=gaps)
+    if not all(v == "ok" for v in status.values()):
+        return bars, None
+    with psycopg.connect(dsn, connect_timeout=5) as conn:
+        factors = {code: load_factors(conn, code) for code in codes}
+    return apply_hfq(bars, factors), factors

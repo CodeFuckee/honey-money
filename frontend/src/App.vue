@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import DataTable from 'primevue/datatable'
 import Column from 'primevue/column'
 import InputText from 'primevue/inputtext'
@@ -358,7 +358,10 @@ function searchCodes(ev) {
     : src.slice(0, 50)
 }
 watch(activeNav, nav => {
-  if (nav === 'learn') loadCodeOptions()
+  if (nav === 'learn') {
+    loadCodeOptions()
+    loadFullRuns()                             // 历史全量回测列表 + 接上运行中任务
+  }
 })
 
 const learnStratMeta = computed(() => STRATS.find(s => s.id === learnStrat.value))
@@ -518,6 +521,196 @@ function renderBatchChart(results) {
 function pickNameOf(code) {
   const hit = learnCodePick.value.find(x => _pickToCode(x) === code)
   return hit ? (hit.name || hit.code || code) : code
+}
+
+// ===== 全量回测：同策略对全市场一次性后台回测（任务落库，历史可回看） =====
+const fullFilterSt = ref(true)        // 剔除名称含 ST/退
+const fullMinBars = ref(60)           // 区间内最少 K 线数（挡次新/长期停牌）
+const fullAdjust = ref(true)          // 后复权口径（关闭提速但跨除权失真）
+const fullRuns = ref([])              // 历史 run 列表
+const fullRunId = ref(null)           // 当前查看/运行中的 run
+const fullRun = ref(null)             // 该 run 详情（进度/统计）
+const fullRows = ref({ total: 0, rows: [] })
+const fullRowsSort = ref('total_return')
+const fullRowsDesc = ref(true)
+const fullRowsPage = ref(0)
+const FULL_PAGE_SIZE = 50
+const fullCurves = ref([])            // Top-N 归一化净值曲线
+const fullChartEl = ref(null)
+let fullChart = null
+let fullPollTimer = null
+const fullStarting = ref(false)
+const fullError = ref('')
+
+const fullRunning = computed(() =>
+  ['running', 'canceling'].includes(fullRun.value?.status))
+const fullViewable = computed(() =>
+  ['done', 'canceled'].includes(fullRun.value?.status)
+  && (fullRun.value?.done ?? 0) > 0)
+const fullPages = computed(() =>
+  Math.max(1, Math.ceil((fullRows.value.total || 0) / FULL_PAGE_SIZE)))
+const fullExportUrl = computed(() =>
+  fullRunId.value ? `/api/backtest/full/runs/${fullRunId.value}/export` : '')
+
+async function loadFullRuns() {
+  try {
+    const r = await fetch('/api/backtest/full/runs')
+    fullRuns.value = (await r.json()).runs || []
+    // 有任务在跑（或页面刷新前发起了任务）→ 自动接上轮询
+    const active = fullRuns.value.find(x => x.status === 'running')
+    if (active && fullRunId.value == null) {
+      fullRunId.value = active.id
+      fullRun.value = active
+      startFullPoll()
+    } else if (!fullRun.value && fullRuns.value.length) {
+      fullRunId.value = fullRuns.value[0].id   // 默认回看最新一次（含结果）
+      await loadFullRun()
+    }
+  } catch { /* 降级：无历史列表 */ }
+}
+
+async function loadFullRun(withResults = true) {
+  try {
+    const r = await fetch(`/api/backtest/full/runs/${fullRunId.value}`)
+    if (!r.ok) { fullRun.value = null; return }
+    fullRun.value = await r.json()
+    if (withResults && fullViewable.value) {
+      await Promise.all([loadFullRows(), loadFullCurves()])
+    }
+  } catch (e) { fullError.value = String(e) }
+}
+
+async function loadFullRows() {
+  const q = new URLSearchParams({
+    sort: fullRowsSort.value, desc: String(fullRowsDesc.value),
+    page: String(fullRowsPage.value), size: String(FULL_PAGE_SIZE),
+  })
+  try {
+    fullRows.value = await (await fetch(
+      `/api/backtest/full/runs/${fullRunId.value}/rows?${q}`)).json()
+  } catch { fullRows.value = { total: 0, rows: [] } }
+}
+
+async function loadFullCurves() {
+  try {
+    const r = await (await fetch(
+      `/api/backtest/full/runs/${fullRunId.value}/top?n=20`)).json()
+    fullCurves.value = r.curves || []
+    await nextTick()
+    renderFullChart()
+  } catch { fullCurves.value = [] }
+}
+
+async function startFullRun() {
+  fullStarting.value = true
+  fullError.value = ''
+  try {
+    const r = await fetch('/api/backtest/full', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        strategy: learnStrat.value, range: learnRange.value,
+        params: learnParams.value, exec_mode: learnExec.value,
+        commission: (learnCommission.value || 0) / 10000,
+        sell_tax: (learnSellTax.value || 0) / 10000,
+        adjust: fullAdjust.value,
+        filters: { exclude_st: fullFilterSt.value,
+                   min_bars: fullMinBars.value || 0 },
+      }),
+    })
+    if (!r.ok) {
+      fullError.value = (await r.json()).detail || `HTTP ${r.status}`
+      return
+    }
+    fullRunId.value = (await r.json()).run_id
+    fullRun.value = { id: fullRunId.value, status: 'running' }
+    fullRows.value = { total: 0, rows: [] }
+    fullCurves.value = []
+    startFullPoll()
+    loadFullRuns()                               // 刷新历史列表
+  } catch (e) { fullError.value = String(e) }
+  finally { fullStarting.value = false }
+}
+
+function startFullPoll() {
+  stopFullPoll()
+  fullPollTimer = setInterval(async () => {
+    await loadFullRun(fullRunning.value === false)
+    if (!fullRunning.value) {
+      stopFullPoll()
+      if (fullViewable.value) await Promise.all([loadFullRows(), loadFullCurves()])
+      loadFullRuns()
+    }
+  }, 2000)
+}
+
+function stopFullPoll() {
+  if (fullPollTimer) { clearInterval(fullPollTimer); fullPollTimer = null }
+}
+
+async function cancelFullRun() {
+  try { await fetch(`/api/backtest/full/runs/${fullRunId.value}/cancel`,
+                    { method: 'POST' }) } catch { /* 轮询会收敛终态 */ }
+}
+
+async function viewFullRun() {
+  stopFullPoll()
+  fullRowsPage.value = 0
+  await loadFullRun()
+}
+
+function sortFull(col) {
+  if (fullRowsSort.value === col) fullRowsDesc.value = !fullRowsDesc.value
+  else { fullRowsSort.value = col; fullRowsDesc.value = true }
+  fullRowsPage.value = 0
+  loadFullRows()
+}
+
+function pickFullStock(code) {
+  // 点排行代码 → 填入单股回测控件（不自动跑，用户可调参后点跑回测）
+  learnCodePick.value = [{ code, name: code, label: code }]
+  window.scrollTo({ top: 0, behavior: 'smooth' })
+}
+
+function renderFullChart() {
+  if (fullChart) { fullChart.dispose(); fullChart = null }
+  if (!fullChartEl.value || !fullCurves.value.length) return
+  fullChart = echarts.init(fullChartEl.value)
+  window.__fullChart = fullChart                 // E2E 断言钩子
+  const curves = fullCurves.value
+  const dateSet = new Set()
+  curves.forEach(c => c.equity.forEach(row => dateSet.add(row[0])))
+  const dates = [...dateSet].sort()
+  const series = curves.map(c => {
+    const map = Object.fromEntries(c.equity.map(row => [row[0], row[1]]))
+    return {
+      name: `${c.code} ${c.name}`, type: 'line', showSymbol: false,
+      connectNulls: false, lineStyle: { width: 1.2 },
+      data: dates.map(d => map[d] ?? null),
+    }
+  })
+  fullChart.setOption({
+    animation: false,
+    tooltip: { trigger: 'axis' },
+    legend: { data: series.map(s => s.name), top: 0, type: 'scroll' },
+    grid: { left: 60, right: 20, top: 40, bottom: 46 },
+    xAxis: { type: 'category', data: dates, axisLabel: { fontSize: 10 } },
+    yAxis: { scale: true, splitLine: { lineStyle: { color: '#eee' } } },
+    dataZoom: [{ type: 'inside' }],
+    series,
+  })
+}
+
+const _onFullResize = () => fullChart && fullChart.resize()
+onMounted(() => window.addEventListener('resize', _onFullResize))
+onUnmounted(() => { stopFullPoll() })
+
+const FULL_SORT_COLS = [
+  ['total_return', '总收益'], ['annual_return', '年化'], ['max_drawdown', '最大回撤'],
+  ['sharpe', '夏普'], ['win_rate', '胜率'], ['trades', '交易次数'],
+]
+
+function fmtPctSigned(v) {
+  return v == null ? '—' : (v >= 0 ? '+' : '') + (v * 100).toFixed(1) + '%'
 }
 
 function renderLearnChart() {
@@ -1288,6 +1481,85 @@ onMounted(refresh)
                   </div>
                 </div>
 
+                <!-- 全量回测：同策略对全市场一次性后台回测 -->
+                <div class="card learn-params">
+                  <div class="learn-params-row">
+                    <label class="learn-field" :class="{ wide: false }">
+                      <span>🌐 全量回测（{{ learnIsMomentum ? '动量轮动暂不支持' : '全市场 · 后台任务' }}）</span>
+                      <span class="learn-full-controls">
+                        <label class="learn-check"><input type="checkbox" v-model="fullFilterSt" /> 剔除 ST/退</label>
+                        <label class="learn-check"><input type="number" class="learn-input num" min="0" step="10"
+                          v-model.number="fullMinBars" /> 最少K线数</label>
+                        <label class="learn-check"><input type="checkbox" v-model="fullAdjust" /> 后复权</label>
+                        <button class="btn btn-primary" :disabled="learnIsMomentum || fullStarting || fullRunning"
+                          :title="learnIsMomentum ? '动量轮动为横截面组合策略，暂不支持全量' : ''"
+                          @click="startFullRun">{{ fullStarting ? '发起中…' : '🌐 全量回测' }}</button>
+                        <button v-if="fullRunning" class="btn" @click="cancelFullRun">取消</button>
+                        <select v-if="fullRuns.length" class="learn-select" :value="fullRunId ?? ''"
+                          @change="fullRunId = Number($event.target.value) || null; viewFullRun()">
+                          <option v-for="r in fullRuns" :key="r.id" :value="r.id">
+                            #{{ r.id }} {{ r.strategy }} · {{ r.range }} · {{ { running: '运行中', done: '完成', canceled: '已取消', failed: '失败', interrupted: '已中断' }[r.status] || r.status }} · {{ r.done }}/{{ r.total }}
+                          </option>
+                        </select>
+                      </span>
+                    </label>
+                  </div>
+                  <div v-if="fullError" class="error-banner"><span>{{ fullError }}</span></div>
+                  <div v-if="fullRun" class="detail" data-testid="full-status">
+                    <template v-if="fullRunning">
+                      全量回测中：已完成 {{ fullRun.done }} / {{ fullRun.total }} 只（失败 {{ fullRun.failed }}，过滤跳过 {{ fullRun.skipped }}）… 可随时取消
+                    </template>
+                    <template v-else-if="fullRun.status === 'interrupted'">
+                      上次任务因后端重启中断（已完成 {{ fullRun.done }}/{{ fullRun.total }}），可重新发起
+                    </template>
+                    <template v-else-if="fullRun.status === 'failed'">
+                      全量回测失败：{{ fullRun.error }}
+                    </template>
+                    <template v-else-if="fullViewable">
+                      任务 #{{ fullRun.id }}（{{ fullRun.status === 'canceled' ? '已取消' : '已完成' }}）：参与 {{ fullRun.total }} 只 · 过滤跳过 {{ fullRun.skipped }} · 失败 {{ fullRun.failed }}
+                    </template>
+                  </div>
+                </div>
+
+                <!-- 全量回测结果：统计卡 + Top20 叠加图 + 排行表 -->
+                <template v-if="fullViewable">
+                  <div class="learn-metrics">
+                    <div class="card lm"><div class="lm-k">参与股票</div><div class="lm-v">{{ fullRun.stats?.count ?? 0 }}</div></div>
+                    <div class="card lm"><div class="lm-k">正收益占比</div><div class="lm-v">{{ fullRun.stats ? ((fullRun.stats.positive_pct ?? 0) * 100).toFixed(1) + '%' : '—' }}</div></div>
+                    <div class="card lm"><div class="lm-k">总收益中位数</div><div class="lm-v">{{ fullRun.stats?.median_return != null ? fmtPctSigned(fullRun.stats.median_return) : '—' }}</div></div>
+                    <div class="card lm"><div class="lm-k">跑赢买入持有</div><div class="lm-v">{{ fullRun.stats?.beat_buyhold_pct != null ? ((fullRun.stats.beat_buyhold_pct) * 100).toFixed(1) + '%' : '—' }}</div></div>
+                  </div>
+                  <div class="card chart-card"><div ref="fullChartEl" class="learn-chart"></div>
+                    <div class="detail" style="padding: 0 14px 10px">收益 Top 20 归一化净值叠加（策略净值，起点=1）</div></div>
+                  <div class="card detail-table-card">
+                    <table class="runs-table learn-full-cmp">
+                      <thead><tr>
+                        <th>代码</th><th>名称</th>
+                        <th v-for="([k, label]) in FULL_SORT_COLS" :key="k" class="full-sort"
+                          @click="sortFull(k)">{{ label }}{{ fullRowsSort === k ? (fullRowsDesc ? ' ↓' : ' ↑') : '' }}</th>
+                      </tr></thead>
+                      <tbody>
+                        <tr v-for="r in fullRows.rows" :key="r.code" :class="{ 'learn-fail-row': r.status !== 'ok' }">
+                          <td class="mono"><a href="javascript:void 0" class="full-code" @click="pickFullStock(r.code)">{{ r.code }}</a></td>
+                          <td>{{ r.name }}<span v-if="r.reason" class="full-fail-reason">（失败：{{ r.reason }}）</span></td>
+                          <td :class="(r.total_return ?? 0) >= 0 ? 'chg-up' : 'chg-down'">{{ fmtPctSigned(r.total_return) }}</td>
+                          <td>{{ fmtPctSigned(r.annual_return) }}</td>
+                          <td class="chg-down">{{ r.max_drawdown != null ? (r.max_drawdown * 100).toFixed(1) + '%' : '—' }}</td>
+                          <td>{{ r.sharpe?.toFixed(2) ?? '—' }}</td>
+                          <td>{{ r.win_rate != null ? (r.win_rate * 100).toFixed(0) + '%' : '—' }}</td>
+                          <td>{{ r.trades ?? '—' }}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                    <div class="detail" style="padding: 8px 14px">
+                      共 {{ fullRows.total }} 行 · 第 {{ fullRowsPage + 1 }} / {{ fullPages }} 页
+                      <button class="btn" :disabled="fullRowsPage <= 0" @click="fullRowsPage--; loadFullRows()">上一页</button>
+                      <button class="btn" :disabled="fullRowsPage >= fullPages - 1" @click="fullRowsPage++; loadFullRows()">下一页</button>
+                      <a class="btn" :href="fullExportUrl" download>⬇ 导出 CSV</a>
+                    </div>
+                  </div>
+                </template>
+
                 <div v-if="learnError" class="error-banner"><span>{{ learnError }}</span></div>
 
                 <div v-if="batchMode && learnLoading && batchProgress" class="card learn-empty">
@@ -2051,11 +2323,19 @@ body {
 .lm-v { font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .learn-chart { width: 100%; height: 420px; }
 .learn-empty { padding: 36px; text-align: center; }
+.learn-full-controls { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; min-height: 32px; }
+.learn-check { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--fg-2); white-space: nowrap; }
+.learn-check .learn-input.num { width: 76px; }
+.full-sort { cursor: pointer; user-select: none; }
+.full-sort:hover { color: var(--fg-1); }
+.full-code { color: inherit; text-decoration: underline dotted #bbb; }
+.full-code:hover { color: var(--accent, #1976d2); }
+.full-fail-reason { color: #b42318; font-size: 11.5px; }
 .learn-empty .detail { margin-top: 8px; }
 
 .learn-cmp { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-.learn-cmp th { text-align: left; padding: 8px 10px; background: #f4f4f4; color: var(--fg-2); font-weight: 600; }
-.learn-cmp td { padding: 7px 10px; border-bottom: 1px solid #ededed; font-variant-numeric: tabular-nums; }
+.learn-cmp th, .learn-full-cmp th { text-align: left; padding: 8px 10px; background: #f4f4f4; color: var(--fg-2); font-weight: 600; }
+.learn-cmp td, .learn-full-cmp td { padding: 7px 10px; border-bottom: 1px solid #ededed; font-variant-numeric: tabular-nums; }
 .learn-fail-row td { color: var(--dot-down); font-size: 12px; }
 .learn-fail-reason { word-break: break-all; }
 

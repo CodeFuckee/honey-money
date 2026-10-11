@@ -57,6 +57,15 @@ def api_calls(page):
             route.fulfill(status=200, content_type="application/json",
                           body=json.dumps(obj))
 
+        if re.search(r"/api/backtest/full", url):
+            # 全量回测端点（教学页进入时会拉历史列表）：与单股回测分开 mock，
+            # 避免误入 calls 计数与单股响应分支
+            if re.search(r"/runs$", url):
+                fulfill_json({"runs": []})
+            else:
+                route.fulfill(status=404, content_type="application/json",
+                              body=json.dumps({"detail": "任务不存在"}))
+            return
         if re.search(r"/api/backtest", url):
             calls.append({"url": url, "body": req.post_data})
             if callable(holder["bt"]):

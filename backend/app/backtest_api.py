@@ -7,12 +7,11 @@
 import datetime as dt
 from typing import Literal
 
-import psycopg
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from . import config
-from .adjust import apply_hfq, ensure_factors, load_factors
+from .adjust import ensure_and_apply
 from .backtest.data import load_history
 from .backtest.runner import STRATEGIES, run_strategy
 
@@ -44,29 +43,6 @@ class BacktestIn(BaseModel):
 
 
 def register_backtest_routes(app: FastAPI) -> None:
-    def _with_factors(bars: dict, codes: list[str]) -> tuple[dict, dict | None]:
-        """复权因子懒加载：拉取入库后把 bars 合成为后复权价。
-
-        因子不可用（新浪断连等）→ 返回原 bars + None（调用方降级不复权）。"""
-        from .backtest.engine import detect_gap_dates
-        latest, gaps = {}, {}
-        cl = bars["close"]
-        for code in codes:
-            if code in cl.columns and cl[code].notna().any():
-                sub = cl[[code]].dropna()
-                latest[code] = sub.index.max().date()
-                prev = sub[code].shift(1)
-                gap_mask = ((sub[code] / prev - 1).abs() > 0.098) & prev.notna()
-                if gap_mask.any():
-                    gaps[code] = [d.date() for d in sub.index[gap_mask]]
-        status = ensure_factors(config.DATABASE_URL, codes,
-                                latest_trade_dates=latest, gap_dates=gaps)
-        if not all(v == "ok" for v in status.values()):
-            return bars, None
-        with psycopg.connect(config.DATABASE_URL, connect_timeout=5) as conn:
-            factors = {code: load_factors(conn, code) for code in codes}
-        return apply_hfq(bars, factors), factors
-
     @app.post("/api/backtest")
     def backtest(body: BacktestIn):
         if body.strategy == "momentum" and len(body.codes) < 2:
@@ -85,7 +61,8 @@ def register_backtest_routes(app: FastAPI) -> None:
                     "equity": [], "drawdown": [], "trades": [], "gap_dates": [],
                     "message": "区间内无行情数据（请检查代码或扩大区间）"}
         try:
-            bars_adj, factors = _with_factors(bars, body.codes)
+            bars_adj, factors = ensure_and_apply(bars, body.codes,
+                                                 config.DATABASE_URL)
             adjust_applied = factors is not None
         except Exception:                          # 复权链路异常：降级不复权
             bars_adj, factors, adjust_applied = bars, None, False

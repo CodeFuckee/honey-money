@@ -18,7 +18,9 @@ import psycopg
 from fastapi import FastAPI
 
 from . import config
+from . import backtest_full
 from .backtest_api import register_backtest_routes
+from .backtest_full_api import register_full_backtest_routes
 from .browse import fetch_stock_bars, fetch_stock_basic, fetch_stock_list
 from .crawler.store import Store
 from .crawl_stats import fetch_crawl_stats
@@ -45,6 +47,8 @@ def create_app(*, scheduler: TaskScheduler | None = None,
             with connect(config.DATABASE_URL) as conn:
                 Store().init_schema(conn)          # 含 crawl_run 任务关联列
                 task_store.init_schema(conn)       # crawl_task + 预置任务
+                backtest_full.ensure_schema(conn)  # 全量回测双表
+                backtest_full.mark_interrupted_on_startup()  # 重启恢复：running→interrupted
                 conn.commit()
         except Exception as exc:                   # PG 暂不可达：服务照常起，
             print(f"[startup] 任务表初始化失败（调度扫描会重试）: {exc}")
@@ -122,6 +126,7 @@ def create_app(*, scheduler: TaskScheduler | None = None,
     register_task_routes(app, scheduler=scheduler, task_store=task_store,
                          connect=connect)
     register_backtest_routes(app)
+    register_full_backtest_routes(app)
 
     return app
 
