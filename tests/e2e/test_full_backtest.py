@@ -235,10 +235,14 @@ class TestFullBacktest:
         page.locator(".learn-mode-btn", has_text="批量").click()
         expect(page.locator(".learn-ac")).to_be_visible()
         expect(page.get_by_role("button", name="跑回测")).to_be_visible()
-        # 全市场段：代码控件隐藏，过滤面板出现，主按钮变为发起全量
+        # 全市场段：代码控件隐藏，过滤面板出现（含退市股开关默认勾选），
+        # 主按钮变为发起全量
         goto_full_mode(page)
         expect(page.locator(".learn-ac")).to_have_count(0)
         expect(page.locator(".learn-full-controls")).to_be_visible()
+        del_cb = page.locator(".learn-full-controls .learn-check",
+                              has_text="含退市股")
+        expect(del_cb.locator("input")).to_be_checked()
         expect(page.get_by_role("button", name="发起全量")).to_be_visible()
         expect(page.get_by_role("button", name="跑回测")).to_have_count(0)
         # 切回单股

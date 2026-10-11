@@ -3,6 +3,8 @@
 从 test_health_page.py 提升为目录级共享（任务页等新用例复用同一套服务）。
 """
 
+import os
+import signal
 import socket
 import subprocess
 import sys
@@ -20,6 +22,22 @@ def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+def _stop(proc: subprocess.Popen) -> None:
+    """终止进程及其子进程组：npm→sh→vite 三层链只 kill 中间层会漏掉
+    真正监听端口的 vite 孙进程（实测每轮 E2E 泄漏一个 node 进程）。"""
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
 
 
 def _wait(url: str, timeout: float = 30) -> bool:
@@ -52,10 +70,11 @@ def servers():
         backend_env = {**os.environ,
                        "DATABASE_URL": "postgresql://x:x@127.0.0.1:59999/none",
                        "PROXY_POOL_URL": "http://127.0.0.1:59998"}
+        # 各进程独立进程组，收尾按组终止（见 _stop 注释）
         procs.append(subprocess.Popen(
             [sys.executable, "-m", "uvicorn", "app.main:app",
              "--port", str(backend_port), "--log-level", "warning"],
-            cwd=ROOT / "backend", env=backend_env,
+            cwd=ROOT / "backend", env=backend_env, start_new_session=True,
         ))
         env = {**os.environ, "BACKEND_PORT": str(backend_port)}
         # Windows 的 npm 是 npm.cmd 需要 shell；POSIX 直接 exec（shell=True+数组
@@ -64,14 +83,11 @@ def servers():
             ["npm", "run", "preview", "--", "--port", str(frontend_port),
              "--strictPort", "--host", "127.0.0.1"],  # 默认只绑 IPv6 的 ::1
             cwd=ROOT / "frontend", shell=(sys.platform == "win32"), env=env,
+            start_new_session=True,
         ))
         assert _wait(f"http://127.0.0.1:{backend_port}/healthz"), "后端 30s 内未就绪"
         assert _wait(f"http://127.0.0.1:{frontend_port}/"), "前端 preview 30s 内未就绪"
         yield backend_port, frontend_port
     finally:
         for p in procs:
-            p.terminate()
-            try:
-                p.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                p.kill()
+            _stop(p)

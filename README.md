@@ -33,8 +33,10 @@ frontend/           Vue3 + Vite 前端
                       教学页六大经典回测策略（vectorbt 引擎，撮合模式可切换
                       对比未来函数，净值对照买入持有）+ 单股/批量/全市场
                       三模式分段切换 + 🌐 全量回测（同策略全市场后台任务：
-                      过滤面板 剔ST/最少K线数、实时进度可取消、统计卡/
-                      Top20 叠加图/收益排行表分页排序/CSV 导出、历史 run 回看）
+                      过滤面板 剔ST/最少K线数/含退市股、实时进度可取消、
+                      统计卡/Top20 叠加图/收益排行表分页排序/CSV 导出）；
+                      退市股历史补爬（--source delisted / 任务页手动任务，
+                      两所退市名单 367 只 + 新浪 klc_kl 全史，修幸存者偏差）
   nginx.conf          生产：静态托管 + /api 反代后端
 deploy/             （预留：将来放 NAS 专属编排变体）
 tests/e2e/          Playwright E2E（自拉后端 uvicorn + 前端 vite preview）
@@ -99,9 +101,11 @@ min=max 锁死不提速**（出口 IP 曾被封）；新浪源 1 QPS 起步 AIMD
 docker exec honey-money-backend-1 python -m app.crawler --limit 20   # 试跑前 20 只（新浪源）
 docker exec honey-money-backend-1 python -m app.crawler              # 全量/增量（新浪源，默认）
 docker exec honey-money-backend-1 python -m app.crawler --source eastmoney  # 东财源（解封后校验用）
+docker exec honey-money-backend-1 python -m app.crawler --source delisted   # 退市股历史补爬（367 只，新浪 klc_kl 全史；
+                                                                            #  无成交额/换手率置 NULL；与主爬虫共用限速通道）
 
 # 常用参数
-#   --source sina|eastmoney  默认 sina（直连可用，含换手率/流通股本；东财源见下）
+#   --source sina|eastmoney|delisted  默认 sina（delisted 见上，一次性补爬+幂等重跑）
 #   --mode incremental|full  默认 incremental：按库内断点续爬（按源隔离）；full 全量重爬
 #   --initial-qps/--max-qps  每通道限速（默认按源：sina 1→5，AIMD 动态调整）
 #   --jitter 0.3             请求间隔随机抖动 ±30%（防封，默认开）

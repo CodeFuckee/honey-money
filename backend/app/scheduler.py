@@ -38,6 +38,7 @@ SH_TZ = ZoneInfo("Asia/Shanghai")
 _SOURCE_DEFAULTS = {
     "sina": {"initial_qps": 1.0, "min_qps": 0.2, "max_qps": 5.0},
     "eastmoney": {"initial_qps": 1 / 30, "min_qps": 1 / 30, "max_qps": 1 / 30},
+    "delisted": {"initial_qps": 1.0, "min_qps": 0.2, "max_qps": 2.0},
 }
 _BATCH_SIZE, _BATCH_PAUSE, _ABORT_AFTER, _CONCURRENCY = 300, 30.0, 15, 4
 
@@ -108,6 +109,10 @@ def build_crawl_executor(dsn: str, proxy_pool_url: str):
         if task["source"] == "sina":
             direct = httpx_async_client(timeout=30.0)
             client = SinaClient(rate=rate, http=direct)
+        elif task["source"] == "delisted":
+            from .crawler.delisted import DelistedClient
+            direct = httpx_async_client(timeout=30.0)
+            client = DelistedClient(rate=rate, http=direct)
         else:
             direct = httpx_async_client(timeout=15.0)
             pool = httpx_async_client(base_url=proxy_pool_url, timeout=5.0)

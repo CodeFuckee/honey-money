@@ -21,6 +21,7 @@ import httpx
 import psycopg
 
 from .. import config
+from .delisted import DelistedClient
 from .eastmoney import EastmoneyClient
 from .proxies import ProxyBroker
 from .rate import RateLimiter
@@ -44,9 +45,11 @@ def parse_args(argv=None):
         prog="python -m app.crawler",
         description="A 股历史日线爬虫（多源：新浪(默认)/东财；按域名动态限速+断点续爬）",
     )
-    parser.add_argument("--source", choices=["sina", "eastmoney"], default="sina",
+    parser.add_argument("--source", choices=["sina", "eastmoney", "delisted"],
+                        default="sina",
                         help="数据源（默认 sina：直连可用且带换手率字段；"
-                             "eastmoney 出口 IP 曾被封禁，慎用）")
+                             "eastmoney 出口 IP 曾被封禁，慎用；delisted=退市股"
+                             "历史补爬，klc_kl 全史无换手率字段）")
     parser.add_argument("--mode", choices=["incremental", "full"], default="incremental",
                         help="incremental=按库内断点续爬（默认）；full=全量重爬")
     parser.add_argument("--limit", type=int, default=None, help="只处理清单前 N 只（试跑）")
@@ -88,6 +91,9 @@ async def amain(args) -> int:
     if args.source == "sina":
         direct = httpx.AsyncClient(timeout=30.0)
         client = SinaClient(rate=rate, http=direct)
+    elif args.source == "delisted":
+        direct = httpx.AsyncClient(timeout=30.0)
+        client = DelistedClient(rate=rate, http=direct)
     else:
         direct = httpx.AsyncClient(timeout=15.0)
         pool = httpx.AsyncClient(base_url=config.PROXY_POOL_URL, timeout=5.0)

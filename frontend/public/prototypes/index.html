@@ -1,0 +1,698 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>honey-money · 仪表盘原型对比</title>
+<style>
+  /* ===== PICKER（规范原文，勿改） ===== */
+  .proto-picker {
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 2147483647;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 4px;
+    border-radius: 999px;
+    background: rgba(10, 10, 10, 0.82);
+    -webkit-backdrop-filter: blur(12px) saturate(1.4);
+    backdrop-filter: blur(12px) saturate(1.4);
+    box-shadow:
+      0 0 0 1px rgba(255, 255, 255, 0.08) inset,
+      0 8px 24px rgba(0, 0, 0, 0.24),
+      0 2px 6px rgba(0, 0, 0, 0.12);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 13px;
+    line-height: 1;
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  .proto-picker-highlight {
+    position: absolute;
+    top: 4px;
+    left: 0;
+    height: 28px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.12);
+    will-change: transform;
+  }
+  .proto-picker[data-ready] .proto-picker-highlight {
+    transition:
+      transform 250ms cubic-bezier(0.23, 1, 0.32, 1),
+      width 250ms cubic-bezier(0.23, 1, 0.32, 1);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .proto-picker[data-ready] .proto-picker-highlight { transition: none; }
+  }
+  .proto-picker-item {
+    position: relative;
+    display: flex;
+    align-items: center;
+    height: 28px;
+    padding: 0 12px;
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+    color: rgba(255, 255, 255, 0.55);
+    font: inherit;
+    cursor: pointer;
+    transition: color 150ms ease-out;
+  }
+  .proto-picker-item:hover { color: rgba(255, 255, 255, 0.85); }
+  .proto-picker-item:active { transform: scale(0.97); }
+  .proto-picker-item:focus-visible {
+    outline: 2px solid rgba(255, 255, 255, 0.4);
+    outline-offset: 2px;
+  }
+  .proto-picker-item[data-active] { color: #fff; }
+  .proto-picker-divider {
+    width: 1px;
+    height: 16px;
+    margin: 0 4px;
+    background: rgba(255, 255, 255, 0.12);
+  }
+  .proto-picker-replay { padding: 0 10px; font-size: 14px; }
+  .proto-picker[data-position="top"] { bottom: auto; top: 24px; }
+  html, body { margin: 0; padding: 0; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+
+<nav class="proto-picker" aria-label="Prototype variants">
+  <span class="proto-picker-highlight" aria-hidden="true"></span>
+  <button class="proto-picker-item" data-active aria-current="true">终端工作台</button>
+  <button class="proto-picker-item">清爽卡片</button>
+  <button class="proto-picker-item">暗色交易台</button>
+  <span class="proto-picker-divider" aria-hidden="true"></span>
+  <button class="proto-picker-item proto-picker-replay" aria-label="Replay animation (R)">↻</button>
+</nav>
+
+<script>
+// ============================================================
+// 变体 1 —— 终端工作台
+// 轴：信息密度与侧栏导航（专业量化终端范式）
+// ============================================================
+function renderWorkbench() { return `
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    font-size: 13px;
+    color: #1f2937;
+    background: #f7f8fa;
+    font-variant-numeric: tabular-nums;
+  }
+  .wb { display: grid; grid-template-columns: 208px 1fr; min-height: 100vh; }
+
+  /* 侧栏 */
+  .wb-side { background: #fff; border-right: 1px solid #e5e7eb; padding: 18px 0; position: sticky; top: 0; height: 100vh; }
+  .wb-logo { padding: 0 18px 16px; border-bottom: 1px solid #f0f1f4; margin-bottom: 12px; }
+  .wb-logo b { font-size: 15px; letter-spacing: .2px; }
+  .wb-logo span { display: block; color: #9ca3af; font-size: 11px; margin-top: 3px; }
+  .wb-nav { display: flex; flex-direction: column; gap: 1px; }
+  .wb-nav a {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 18px; color: #4b5563; text-decoration: none;
+    border-left: 2px solid transparent; transition: background .15s ease-out, color .15s ease-out;
+  }
+  .wb-nav a:hover { background: #f6f7f9; color: #111827; }
+  .wb-nav a.on { background: #f0f7f4; color: #047857; border-left-color: #059669; font-weight: 600; }
+  .wb-nav i { font-style: normal; width: 16px; text-align: center; color: #9ca3af; font-size: 12px; }
+  .wb-nav a.on i { color: #059669; }
+  .wb-nav .soon { margin-left: auto; font-size: 10px; color: #c3c8d0; border: 1px solid #e8eaee; border-radius: 4px; padding: 1px 5px; }
+
+  /* 顶栏 ticker */
+  .wb-top { display: flex; align-items: center; gap: 22px; padding: 10px 22px; background: #fff; border-bottom: 1px solid #e5e7eb; position: sticky; top: 0; z-index: 5; }
+  .wb-top .idx { display: flex; gap: 8px; align-items: baseline; }
+  .wb-top .idx b { font-size: 13px; font-weight: 600; color: #374151; }
+  .wb-top .idx span { font-family: ui-monospace, 'SF Mono', Consolas, monospace; font-size: 12.5px; }
+  .wb-top .up { color: #dc2626; } .wb-top .dn { color: #059669; }
+  .wb-clock { margin-left: auto; color: #9ca3af; font-size: 12px; display: flex; align-items: center; gap: 7px; }
+  .wb-clock::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 5px #22c55e99; }
+
+  .wb-main { padding: 20px 22px 60px; display: flex; flex-direction: column; gap: 14px; }
+
+  /* KPI 行 */
+  .wb-kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .wb-kpi { background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; padding: 14px 16px;
+            animation: wbUp .28s cubic-bezier(.22,1,.36,1) both; animation-delay: calc(var(--i) * 45ms);
+            transition: border-color .15s ease-out, box-shadow .15s ease-out; }
+  .wb-kpi:hover { border-color: #d1d5db; box-shadow: 0 3px 10px rgba(17,24,39,.06); }
+  .wb-kpi .k { color: #6b7280; font-size: 12px; }
+  .wb-kpi .v { font-size: 22px; font-weight: 700; margin: 6px 0 3px; letter-spacing: -.3px; }
+  .wb-kpi .d { font-size: 11.5px; color: #9ca3af; }
+  .wb-kpi .d em { font-style: normal; color: #059669; font-weight: 600; }
+  .wb-kpi .mini { height: 4px; background: #eef1f4; border-radius: 2px; margin-top: 8px; overflow: hidden; }
+  .wb-kpi .mini i { display: block; height: 100%; width: 90.8%; background: linear-gradient(90deg,#34d399,#059669); border-radius: 2px;
+                    transform-origin: left; animation: wbGrow .5s .3s cubic-bezier(.22,1,.36,1) both; }
+
+  /* 面板 */
+  .wb-grid2 { display: grid; grid-template-columns: 1.7fr 1fr; gap: 12px; }
+  .wb-panel { background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; overflow: hidden;
+              animation: wbUp .28s cubic-bezier(.22,1,.36,1) both; animation-delay: calc(var(--i) * 45ms); }
+  .wb-panel h3 { margin: 0; padding: 12px 16px; font-size: 13px; border-bottom: 1px solid #f0f1f4; display: flex; align-items: center; gap: 8px; }
+  .wb-panel h3 em { font-style: normal; margin-left: auto; font-size: 11px; color: #9ca3af; font-weight: 400; }
+  .wb-tabs { margin-left: auto; display: flex; gap: 2px; background: #f3f4f6; padding: 2px; border-radius: 7px; }
+  .wb-tabs label { font-size: 11.5px; color: #6b7280; padding: 3px 10px; border-radius: 5px; cursor: pointer; transition: all .15s ease-out; font-weight: 500; }
+  .wb-tabs label:hover { color: #111827; }
+  #wb-tab-runs:checked ~ h3 .wb-tabs label[for="wb-tab-runs"],
+  #wb-tab-cover:checked ~ h3 .wb-tabs label[for="wb-tab-cover"] { background: #fff; color: #111827; box-shadow: 0 1px 3px rgba(17,24,39,.1); }
+  .wb-body { padding: 6px 16px 14px; }
+  .wb-pane { display: none; } .wb-pane.on { display: block; }
+  #wb-tab-runs:checked ~ .wb-body .wb-runs { display: block; }
+  #wb-tab-cover:checked ~ .wb-body .wb-cover { display: block; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th { text-align: left; color: #9ca3af; font-weight: 500; font-size: 11.5px; padding: 8px 8px; border-bottom: 1px solid #f0f1f4; }
+  td { padding: 8px; border-bottom: 1px solid #f6f7f9; }
+  tr:last-child td { border-bottom: 0; }
+  tbody tr { transition: background .15s ease-out; }
+  tbody tr:hover { background: #f8fafc; }
+  td.num { font-family: ui-monospace, 'SF Mono', Consolas, monospace; }
+  .ok { color: #059669; } .bad { color: #dc2626; }
+  .tag { font-size: 10.5px; border-radius: 4px; padding: 1.5px 7px; background: #f0f7f4; color: #047857; border: 1px solid #d3ece1; }
+  .tag.full { background: #fef7ec; color: #b45309; border-color: #f5e3c4; }
+
+  .wb-srcline { margin: 12px 0 6px; display: grid; gap: 10px; }
+  .wb-srcline .row { display: grid; grid-template-columns: 52px 1fr 86px; align-items: center; gap: 10px; font-size: 12.5px; }
+  .wb-srcline .bar { height: 6px; background: #eef1f4; border-radius: 3px; overflow: hidden; }
+  .wb-srcline .bar i { display: block; height: 100%; border-radius: 3px; transform-origin: left;
+                       animation: wbGrow .5s .25s cubic-bezier(.22,1,.36,1) both; }
+  .wb-srcline .row:nth-child(1) .bar i { width: 68.1%; background: #059669; }
+  .wb-srcline .row:nth-child(2) .bar i { width: 31.9%; background: #0ea5e9; }
+  .wb-srcline .num { font-family: ui-monospace, 'SF Mono', Consolas, monospace; color: #6b7280; text-align: right; }
+  .wb-note { font-size: 11.5px; color: #9ca3af; margin-top: 10px; }
+
+  /* 服务状态 */
+  .wb-svc { display: flex; flex-direction: column; }
+  .wb-svc .r { display: grid; grid-template-columns: 10px 1fr auto; gap: 10px; align-items: center; padding: 10px 16px; border-bottom: 1px solid #f6f7f9; transition: background .15s ease-out; }
+  .wb-svc .r:hover { background: #f8fafc; }
+  .wb-svc .r:last-child { border-bottom: 0; }
+  .wb-dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 5px #22c55e88; }
+  .wb-svc b { font-size: 12.5px; font-weight: 600; }
+  .wb-svc small { display: block; color: #9ca3af; font-size: 11px; margin-top: 2px; }
+  .wb-svc .st { font-size: 11px; color: #059669; background: #f0f7f4; border-radius: 4px; padding: 2px 8px; }
+
+  /* 路线图 */
+  .wb-road { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; animation: wbUp .28s .25s cubic-bezier(.22,1,.36,1) both; }
+  .wb-road .t { color: #9ca3af; font-size: 12px; margin-right: 4px; }
+  .wb-chip { font-size: 12px; border: 1px solid #e5e7eb; background: #fff; border-radius: 999px; padding: 5px 12px; color: #6b7280; display: flex; gap: 7px; align-items: center; }
+  .wb-chip i { width: 7px; height: 7px; border-radius: 50%; background: #d1d5db; font-style: normal; }
+  .wb-chip.doing { border-color: #d3ece1; background: #f0f7f4; color: #047857; }
+  .wb-chip.doing i { background: #059669; animation: wbPulse 2s ease-in-out infinite; }
+
+  @keyframes wbUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+  @keyframes wbGrow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+  @keyframes wbPulse { 0%,100% { box-shadow: 0 0 0 0 #05966933; } 50% { box-shadow: 0 0 0 4px #05966911; } }
+  @media (prefers-reduced-motion: reduce) {
+    .wb-kpi, .wb-panel, .wb-road, .wb-kpi .mini i, .wb-srcline .bar i { animation: none !important; }
+  }
+</style>
+
+<div class="wb">
+  <aside class="wb-side">
+    <div class="wb-logo"><b>honey-money</b><span>A股量化研究终端 v0.1.0</span></div>
+    <nav class="wb-nav">
+      <a class="on" href="javascript:void(0)"><i>▤</i>仪表盘</a>
+      <a href="javascript:void(0)"><i>◫</i>数据管线</a>
+      <a href="javascript:void(0)"><i>∿</i>回测<i class="soon">待迁入</i></a>
+      <a href="javascript:void(0)"><i>⚑</i>策略库<i class="soon">待迁入</i></a>
+      <a href="javascript:void(0)"><i>✎</i>教学页<i class="soon">待迁入</i></a>
+      <a href="javascript:void(0)"><i>⚙</i>设置</a>
+    </nav>
+  </aside>
+
+  <div>
+    <div class="wb-top">
+      <div class="idx"><b>上证指数</b><span class="up">3,245.68 ▲ +0.82%</span></div>
+      <div class="idx"><b>深证成指</b><span class="up">10,432.15 ▲ +1.10%</span></div>
+      <div class="idx"><b>创业板指</b><span class="dn">2,158.44 ▼ −0.35%</span></div>
+      <div class="wb-clock">10-03 09:42 · 交易中</div>
+    </div>
+
+    <main class="wb-main">
+      <section class="wb-kpis">
+        <div class="wb-kpi" style="--i:0"><div class="k">K线总数</div><div class="v">1,284,560</div><div class="d">日线 · 库内累计</div></div>
+        <div class="wb-kpi" style="--i:1"><div class="k">标的覆盖</div><div class="v">90.8%</div><div class="mini"><i></i></div><div class="d"><em>4,872</em> / 5,364 只</div></div>
+        <div class="wb-kpi" style="--i:2"><div class="k">今日入库</div><div class="v">18,304</div><div class="d">根 · 东财增量补录</div></div>
+        <div class="wb-kpi" style="--i:3"><div class="k">待爬队列</div><div class="v">492</div><div class="d">只 · 优先沪深300缺口</div></div>
+      </section>
+
+      <section class="wb-grid2">
+        <div class="wb-panel" style="--i:2">
+          <input type="radio" name="wb-tab" id="wb-tab-runs" checked hidden>
+          <input type="radio" name="wb-tab" id="wb-tab-cover" hidden>
+          <h3>数据管线
+            <div class="wb-tabs">
+              <label for="wb-tab-runs">运行记录</label>
+              <label for="wb-tab-cover">覆盖明细</label>
+            </div>
+          </h3>
+          <div class="wb-body">
+            <div class="wb-pane wb-runs">
+              <table>
+                <thead><tr><th>时间</th><th>来源</th><th>模式</th><th class="num">成功</th><th class="num">失败</th><th class="num">耗时</th></tr></thead>
+                <tbody>
+                  <tr><td>10-03 08:15</td><td>东财</td><td><span class="tag">增量</span></td><td class="num ok">312</td><td class="num bad">4</td><td class="num">6分12秒</td></tr>
+                  <tr><td>10-02 08:10</td><td>东财</td><td><span class="tag">增量</span></td><td class="num ok">298</td><td class="num bad">2</td><td class="num">5分58秒</td></tr>
+                  <tr><td>10-01 21:30</td><td>新浪</td><td><span class="tag full">全量</span></td><td class="num ok">4,872</td><td class="num bad">61</td><td class="num">3小时42分</td></tr>
+                  <tr><td>09-30 08:12</td><td>东财</td><td><span class="tag">增量</span></td><td class="num ok">305</td><td class="num bad">3</td><td class="num">6分05秒</td></tr>
+                  <tr><td>09-29 08:09</td><td>东财</td><td><span class="tag">增量</span></td><td class="num ok">289</td><td class="num bad">5</td><td class="num">5分47秒</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="wb-pane wb-cover">
+              <div class="wb-srcline">
+                <div class="row"><span>新浪</span><div class="bar"><i></i></div><span class="num">874,321 根 · 68.1%</span></div>
+                <div class="row"><span>东财</span><div class="bar"><i></i></div><span class="num">410,239 根 · 31.9%</span></div>
+              </div>
+              <div class="wb-note">待爬队列 492 只 · 调度策略：优先补齐沪深300成分股历史缺口，随后按市值降序推进。</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="wb-panel" style="--i:3">
+          <h3>服务状态<em>09:42:10 检测</em></h3>
+          <div class="wb-svc">
+            <div class="r"><span class="wb-dot"></span><span><b>后端 API</b><small>FastAPI · v0.1.0 · 响应 12ms</small></span><span class="st">运行中</span></div>
+            <div class="r"><span class="wb-dot"></span><span><b>PostgreSQL</b><small>5,364 只证券元数据</small></span><span class="st">已连接</span></div>
+            <div class="r"><span class="wb-dot"></span><span><b>代理池</b><small>38 / 42 个可用</small></span><span class="st">已连接</span></div>
+            <div class="r"><span class="wb-dot"></span><span><b>爬虫调度</b><small>空闲 · 上次运行 08:15</small></span><span class="st">空闲</span></div>
+          </div>
+        </div>
+      </section>
+
+      <div class="wb-road">
+        <span class="t">路线图</span>
+        <span class="wb-chip doing"><i></i>数据管线 · 进行中</span>
+        <span class="wb-chip"><i></i>回测引擎 Backtrader</span>
+        <span class="wb-chip"><i></i>策略库</span>
+        <span class="wb-chip"><i></i>教学页</span>
+      </div>
+    </main>
+  </div>
+</div>`; }
+
+// ============================================================
+// 变体 2 —— 清爽卡片
+// 轴：亲和力与呼吸感（现有卡片风的成熟进化）
+// ============================================================
+function renderCardflow() { return `
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #f5f6f8; font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif; color: #111827;
+         font-variant-numeric: tabular-nums; }
+  .cf { max-width: 880px; margin: 0 auto; padding: 44px 22px 90px; display: flex; flex-direction: column; gap: 18px; }
+
+  .cf-head { display: flex; align-items: flex-end; gap: 16px; animation: cfUp .3s cubic-bezier(.22,1,.36,1) both; }
+  .cf-head h1 { margin: 0; font-size: 27px; letter-spacing: -.4px; }
+  .cf-head p { margin: 5px 0 2px; color: #6b7280; font-size: 14px; }
+  .cf-ref { margin-left: auto; }
+  .cf-ref input { display: none; }
+  .cf-ref label { display: inline-flex; align-items: center; gap: 8px; padding: 10px 20px; border-radius: 10px;
+    background: #059669; color: #fff; font-size: 14px; font-weight: 500; cursor: pointer;
+    box-shadow: 0 1px 3px #05966955; transition: transform .15s ease-out, box-shadow .15s ease-out, background .15s ease-out; }
+  .cf-ref label:hover { background: #047857; box-shadow: 0 4px 12px #05966944; transform: translateY(-1px); }
+  .cf-ref label:active { transform: translateY(0) scale(.98); }
+  .cf-ref label i { font-style: normal; display: inline-block; }
+  .cf-ref input:checked + label i { animation: cfSpin .7s cubic-bezier(.45,0,.25,1); }
+
+  .cf-card { background: #fff; border: 1px solid #e7eaee; border-radius: 16px; padding: 22px;
+    animation: cfUp .3s cubic-bezier(.22,1,.36,1) both; animation-delay: calc(var(--i) * 70ms);
+    transition: box-shadow .18s ease-out, transform .18s ease-out, border-color .18s ease-out; }
+  .cf-card:hover { transform: translateY(-2px); box-shadow: 0 10px 28px rgba(17,24,39,.07); border-color: #dfe3e9; }
+
+  .cf-hero { display: grid; grid-template-columns: 132px 1fr; gap: 26px; align-items: center; }
+  .cf-ring { position: relative; width: 132px; height: 132px; }
+  .cf-ring svg { transform: rotate(-90deg); }
+  .cf-ring .bg { stroke: #eef1f4; }
+  .cf-ring .fg { stroke: url(#cfGrad); stroke-linecap: round; stroke-dasharray: 339.3; stroke-dashoffset: 31.2;
+    animation: cfRing .8s .25s cubic-bezier(.22,1,.36,1) both; }
+  .cf-ring .num { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  .cf-ring .num b { font-size: 25px; letter-spacing: -.5px; }
+  .cf-ring .num span { font-size: 11px; color: #9ca3af; margin-top: 2px; }
+  .cf-hero h2 { margin: 0 0 10px; font-size: 16.5px; }
+  .cf-hero .big { font-size: 14px; color: #374151; line-height: 1.9; }
+  .cf-hero .big b { font-size: 15px; }
+  .cf-hero .hint { font-size: 12.5px; color: #9ca3af; margin-top: 10px; }
+
+  .cf-market { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .cf-idx { background: #fff; border: 1px solid #e7eaee; border-radius: 14px; padding: 14px 16px;
+    animation: cfUp .3s cubic-bezier(.22,1,.36,1) both; animation-delay: calc(var(--i) * 70ms);
+    transition: transform .18s ease-out, box-shadow .18s ease-out; }
+  .cf-idx:hover { transform: translateY(-2px); box-shadow: 0 8px 20px rgba(17,24,39,.06); }
+  .cf-idx .n { font-size: 12.5px; color: #6b7280; }
+  .cf-idx .p { font-size: 20px; font-weight: 700; margin: 5px 0 3px; }
+  .cf-idx .c { font-size: 12.5px; font-weight: 600; }
+  .cf-up { color: #dc2626; } .cf-dn { color: #059669; }
+
+  .cf-grid { display: grid; grid-template-columns: 1.25fr 1fr; gap: 18px; }
+  .cf-card h3 { margin: 0 0 14px; font-size: 14px; color: #374151; display: flex; align-items: center; gap: 8px; }
+  .cf-card h3 em { font-style: normal; margin-left: auto; font-size: 11.5px; color: #9ca3af; font-weight: 400; }
+
+  .cf-srcline { display: grid; gap: 12px; margin-bottom: 14px; }
+  .cf-srcline .row { display: grid; grid-template-columns: 46px 1fr auto; gap: 12px; align-items: center; font-size: 13px; }
+  .cf-bar { height: 8px; background: #f0f2f5; border-radius: 4px; overflow: hidden; }
+  .cf-bar i { display: block; height: 100%; border-radius: 4px; transform-origin: left;
+    animation: cfGrow .55s .3s cubic-bezier(.22,1,.36,1) both; }
+  .cf-srcline .row:nth-child(1) .cf-bar i { width: 68.1%; background: linear-gradient(90deg,#34d399,#059669); }
+  .cf-srcline .row:nth-child(2) .cf-bar i { width: 31.9%; background: linear-gradient(90deg,#7dd3fc,#0ea5e9); }
+  .cf-srcline .num { color: #6b7280; font-size: 12.5px; }
+  .cf-run { display: flex; flex-direction: column; gap: 4px; background: #f8fafc; border: 1px solid #eef1f5;
+    border-radius: 10px; padding: 11px 14px; font-size: 12.5px; color: #374151; }
+  .cf-run .l1 { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
+  .cf-run .l2 { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; color: #6b7280; }
+  .cf-run b { color: #111827; }
+  .cf-run .ok { color: #059669; font-weight: 600; }
+  .cf-run .bad { color: #dc2626; font-weight: 600; }
+
+  .cf-svc { display: flex; flex-direction: column; gap: 4px; }
+  .cf-svc .r { display: flex; align-items: center; gap: 11px; padding: 9.5px 10px; border-radius: 10px;
+    transition: background .15s ease-out; }
+  .cf-svc .r:hover { background: #f8fafc; }
+  .cf-dot { width: 9px; height: 9px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 6px #22c55e88; flex: none; }
+  .cf-svc b { font-size: 13.5px; font-weight: 600; }
+  .cf-svc small { color: #9ca3af; font-size: 11.5px; margin-left: auto; }
+
+  .cf-road { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; animation: cfUp .3s .3s cubic-bezier(.22,1,.36,1) both; }
+  .cf-road .t { color: #9ca3af; font-size: 12.5px; }
+  .cf-chip { font-size: 12.5px; border: 1px dashed #d7dbe1; background: #fbfcfd; border-radius: 999px; padding: 6px 14px; color: #9ca3af; }
+  .cf-chip.doing { border-style: solid; border-color: #d3ece1; background: #f0f7f4; color: #047857; font-weight: 500; }
+
+  @keyframes cfUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+  @keyframes cfRing { from { stroke-dashoffset: 339.3; } to { stroke-dashoffset: 31.2; } }
+  @keyframes cfGrow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+  @keyframes cfSpin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) {
+    .cf-card, .cf-idx, .cf-head, .cf-road, .cf-bar i, .cf-ring .fg { animation: none !important; }
+    .cf-card:hover, .cf-idx:hover { transform: none; }
+  }
+</style>
+
+<div class="cf">
+  <div class="cf-head">
+    <div>
+      <h1>honey-money</h1>
+      <p>A股量化研究工作台 · 数据基建进行中</p>
+    </div>
+    <div class="cf-ref">
+      <input type="checkbox" id="cf-spin">
+      <label for="cf-spin"><i>↻</i>重新检测</label>
+    </div>
+  </div>
+
+  <div class="cf-card" style="--i:0">
+    <div class="cf-hero">
+      <div class="cf-ring">
+        <svg width="132" height="132" viewBox="0 0 132 132" fill="none">
+          <defs><linearGradient id="cfGrad" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#34d399"/><stop offset="1" stop-color="#059669"/>
+          </linearGradient></defs>
+          <circle class="bg" cx="66" cy="66" r="54" stroke-width="10"/>
+          <circle class="fg" cx="66" cy="66" r="54" stroke-width="10"/>
+        </svg>
+        <div class="num"><b>90.8%</b><span>覆盖进度</span></div>
+      </div>
+      <div>
+        <h2>日线数据库</h2>
+        <div class="big">已收录 <b>1,284,560</b> 根K线 · 覆盖 <b>4,872 / 5,364</b> 只A股<br>
+        待爬 <b>492</b> 只 · 今日入库 <b>18,304</b> 根</div>
+        <div class="hint">调度策略：优先补齐沪深300成分股历史缺口，随后按市值降序推进</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="cf-market">
+    <div class="cf-idx" style="--i:1"><div class="n">上证指数</div><div class="p">3,245.68</div><div class="c cf-up">▲ +0.82%</div></div>
+    <div class="cf-idx" style="--i:2"><div class="n">深证成指</div><div class="p">10,432.15</div><div class="c cf-up">▲ +1.10%</div></div>
+    <div class="cf-idx" style="--i:3"><div class="n">创业板指</div><div class="p">2,158.44</div><div class="c cf-dn">▼ −0.35%</div></div>
+  </div>
+
+  <div class="cf-grid">
+    <div class="cf-card" style="--i:2">
+      <h3>数据来源<em>多源互补 · 交叉校验</em></h3>
+      <div class="cf-srcline">
+        <div class="row"><span>新浪</span><div class="cf-bar"><i></i></div><span class="num">874,321 根 · 68.1%</span></div>
+        <div class="row"><span>东财</span><div class="cf-bar"><i></i></div><span class="num">410,239 根 · 31.9%</span></div>
+      </div>
+      <div class="cf-run">
+        <div class="l1">最近运行 <b>10-03 08:15</b> · 东财 · 增量 · 耗时 6分12秒</div>
+        <div class="l2">成功 <span class="ok">312</span> 只 · 失败 <span class="bad">4</span>只</div>
+      </div>
+    </div>
+
+    <div class="cf-card" style="--i:3">
+      <h3>服务状态<em>09:42 检测</em></h3>
+      <div class="cf-svc">
+        <div class="r"><span class="cf-dot"></span><b>后端 API</b><small>v0.1.0 · 12ms</small></div>
+        <div class="r"><span class="cf-dot"></span><b>PostgreSQL</b><small>已连接</small></div>
+        <div class="r"><span class="cf-dot"></span><b>代理池</b><small>38 / 42 可用</small></div>
+        <div class="r"><span class="cf-dot"></span><b>爬虫调度</b><small>空闲 · 08:15</small></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="cf-road">
+    <span class="t">接下来迁入：</span>
+    <span class="cf-chip doing">数据管线 · 进行中</span>
+    <span class="cf-chip">回测引擎</span>
+    <span class="cf-chip">策略库</span>
+    <span class="cf-chip">教学页</span>
+  </div>
+</div>`; }
+
+// ============================================================
+// 变体 3 —— 暗色交易台
+// 轴：人格与主题（Bloomberg 式暗色交易氛围）
+// ============================================================
+function renderDarkTerminal() { return `
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #0a0e14; color: #d7dde6;
+    font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    font-variant-numeric: tabular-nums; }
+  .dt { min-height: 100vh; display: flex; flex-direction: column; }
+
+  .dt-top { display: flex; align-items: center; gap: 14px; padding: 13px 24px;
+    background: #0d131c; border-bottom: 1px solid #1c2534; animation: dtUp .28s cubic-bezier(.22,1,.36,1) both; }
+  .dt-top .logo { font-weight: 700; font-size: 15px; letter-spacing: .3px; color: #f5b544; }
+  .dt-top .logo span { color: #5b6675; font-weight: 400; font-size: 12px; margin-left: 8px; }
+  .dt-leds { margin-left: auto; display: flex; gap: 16px; font-size: 11.5px; color: #7c8798; }
+  .dt-leds span { display: flex; align-items: center; gap: 6px; }
+  .dt-leds i { width: 7px; height: 7px; border-radius: 50%; background: #10b981; box-shadow: 0 0 6px #10b98199; font-style: normal;
+    animation: dtBlink 2.4s ease-in-out infinite; }
+
+  .dt-ticker { display: flex; gap: 30px; padding: 9px 24px; background: #0b1018; border-bottom: 1px solid #151d29;
+    font-size: 12.5px; animation: dtUp .28s .05s cubic-bezier(.22,1,.36,1) both; }
+  .dt-ticker .q { display: flex; gap: 9px; align-items: baseline; color: #8b96a7; }
+  .dt-ticker .q b { color: #e8edf4; font-weight: 600; }
+  .dt-num { font-family: ui-monospace, 'SF Mono', 'Cascadia Mono', Consolas, monospace; }
+  .dt-up { color: #f87171; text-shadow: 0 0 12px #f8717133; }
+  .dt-dn { color: #34d399; text-shadow: 0 0 12px #34d39933; }
+
+  .dt-main { flex: 1; padding: 20px 24px 70px; display: flex; flex-direction: column; gap: 14px; }
+
+  .dt-kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .dt-kpi { background: #10161f; border: 1px solid #1d2735; border-radius: 10px; padding: 15px 17px; position: relative; overflow: hidden;
+    animation: dtUp .28s cubic-bezier(.22,1,.36,1) both; animation-delay: calc(var(--i) * 55ms);
+    transition: border-color .15s ease-out, transform .15s ease-out; }
+  .dt-kpi:hover { border-color: #2b3a4f; transform: translateY(-1px); }
+  .dt-kpi::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 2px; background: #f5b544; opacity: .75; }
+  .dt-kpi .k { font-size: 11.5px; color: #7c8798; letter-spacing: .5px; }
+  .dt-kpi .v { font-size: 24px; font-weight: 700; margin: 7px 0 4px; color: #f2f6fb; letter-spacing: -.4px; }
+  .dt-kpi .d { font-size: 11.5px; color: #758193; }
+  .dt-kpi .d em { font-style: normal; color: #f5b544; }
+
+  .dt-grid { display: grid; grid-template-columns: 1.7fr 1fr; gap: 12px; }
+  .dt-panel { background: #10161f; border: 1px solid #1d2735; border-radius: 10px; overflow: hidden;
+    animation: dtUp .28s cubic-bezier(.22,1,.36,1) both; animation-delay: calc(var(--i) * 55ms); }
+  .dt-panel h3 { margin: 0; padding: 11px 16px; font-size: 12.5px; color: #aeb9c9; letter-spacing: 1px;
+    border-bottom: 1px solid #1a2432; display: flex; align-items: center; }
+  .dt-panel h3::before { content: '▮'; color: #f5b544; margin-right: 8px; font-size: 11px; }
+  .dt-panel h3 em { font-style: normal; margin-left: auto; color: #5b6675; font-size: 11px; letter-spacing: 0; }
+
+  .dt-body { padding: 4px 16px 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th { text-align: left; color: #6f7b8d; font-weight: 500; font-size: 11px; padding: 8px; border-bottom: 1px solid #1a2432; letter-spacing: .5px; }
+  td { padding: 8px; border-bottom: 1px solid #141c28; color: #aab4c3; }
+  tr:last-child td { border-bottom: 0; }
+  tbody tr { transition: background .15s ease-out; }
+  tbody tr:hover { background: #131b26; }
+  td.num { font-family: ui-monospace, 'SF Mono', Consolas, monospace; }
+  .dt-ok { color: #34d399; } .dt-bad { color: #f87171; }
+  .dt-tag { font-size: 10px; border: 1px solid #24425c; color: #7dd3fc; border-radius: 3px; padding: 1px 6px; letter-spacing: .5px; }
+  .dt-tag.full { border-color: #4a3a1a; color: #f5b544; }
+
+  .dt-cover { padding: 14px 16px; }
+  .dt-coverbar { height: 7px; background: #16202d; border-radius: 4px; overflow: hidden; margin: 4px 0 10px; }
+  .dt-coverbar i { display: block; height: 100%; width: 90.8%; border-radius: 4px;
+    background: linear-gradient(90deg, #b47f1e, #f5b544); transform-origin: left;
+    animation: dtGrow .55s .3s cubic-bezier(.22,1,.36,1) both; box-shadow: 0 0 10px #f5b54444; }
+  .dt-cov-row { display: flex; justify-content: space-between; font-size: 12px; color: #8b96a7; margin-bottom: 2px; }
+  .dt-cov-row b { color: #e8edf4; }
+  .dt-src { margin-top: 14px; display: grid; gap: 9px; }
+  .dt-src .row { display: grid; grid-template-columns: 46px 1fr auto; gap: 10px; align-items: center; font-size: 12px; color: #8b96a7; }
+  .dt-src .bar { height: 5px; background: #16202d; border-radius: 3px; overflow: hidden; }
+  .dt-src .bar i { display: block; height: 100%; border-radius: 3px; transform-origin: left;
+    animation: dtGrow .5s .35s cubic-bezier(.22,1,.36,1) both; }
+  .dt-src .row:nth-child(1) .bar i { width: 68.1%; background: #34d399; }
+  .dt-src .row:nth-child(2) .bar i { width: 31.9%; background: #38bdf8; }
+
+  .dt-svc .r { display: grid; grid-template-columns: 10px 1fr auto; gap: 10px; align-items: center;
+    padding: 10.5px 16px; border-bottom: 1px solid #141c28; transition: background .15s ease-out; }
+  .dt-svc .r:hover { background: #131b26; }
+  .dt-svc .r:last-child { border-bottom: 0; }
+  .dt-svc .dot { width: 7px; height: 7px; border-radius: 50%; background: #10b981; box-shadow: 0 0 7px #10b981aa; }
+  .dt-svc b { font-size: 12.5px; font-weight: 600; color: #e2e8f0; }
+  .dt-svc small { display: block; color: #758193; font-size: 11px; margin-top: 2px; }
+  .dt-svc .st { font-size: 10.5px; color: #34d399; border: 1px solid #1c3a2e; background: #0f1c17;
+    border-radius: 3px; padding: 2px 7px; letter-spacing: .5px; }
+
+  .dt-road { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; animation: dtUp .28s .3s cubic-bezier(.22,1,.36,1) both; }
+  .dt-road .t { color: #758193; font-size: 11.5px; letter-spacing: 1px; }
+  .dt-chip { font-size: 11.5px; border: 1px solid #1d2735; color: #8592a4; border-radius: 3px; padding: 5px 11px; letter-spacing: .5px; }
+  .dt-chip.doing { border-color: #4a3a1a; color: #f5b544; background: #171409; }
+
+  @keyframes dtUp { from { opacity: 0; transform: translateY(9px); } to { opacity: 1; transform: none; } }
+  @keyframes dtGrow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+  @keyframes dtBlink { 0%,100% { opacity: 1; } 50% { opacity: .45; } }
+  @media (prefers-reduced-motion: reduce) {
+    .dt-top, .dt-ticker, .dt-kpi, .dt-panel, .dt-road, .dt-coverbar i, .dt-src .bar i { animation: none !important; }
+    .dt-leds i { animation: none !important; }
+    .dt-kpi:hover { transform: none; }
+  }
+</style>
+
+<div class="dt">
+  <div class="dt-top">
+    <div class="logo">HONEY-MONEY<span>QUANT TERMINAL · v0.1.0</span></div>
+    <div class="dt-leds">
+      <span><i></i>API</span><span><i></i>PG</span><span><i></i>PROXY</span><span><i style="animation-delay:1.2s"></i>CRAWLER</span>
+    </div>
+  </div>
+
+  <div class="dt-ticker">
+    <div class="q"><b>上证指数</b><span class="dt-num dt-up">3,245.68 ▲ +0.82%</span></div>
+    <div class="q"><b>深证成指</b><span class="dt-num dt-up">10,432.15 ▲ +1.10%</span></div>
+    <div class="q"><b>创业板指</b><span class="dt-num dt-dn">2,158.44 ▼ −0.35%</span></div>
+    <div class="q" style="margin-left:auto; color:#758193">SESSION 10-03 09:42 · OPEN</div>
+  </div>
+
+  <main class="dt-main">
+    <section class="dt-kpis">
+      <div class="dt-kpi" style="--i:0"><div class="k">K线总数 DAILY BARS</div><div class="v dt-num">1,284,560</div><div class="d">库内累计</div></div>
+      <div class="dt-kpi" style="--i:1"><div class="k">标的覆盖 COVERAGE</div><div class="v dt-num">90.8<em style="font-size:14px">%</em></div><div class="d dt-num">4,872 / 5,364</div></div>
+      <div class="dt-kpi" style="--i:2"><div class="k">今日入库 TODAY IN</div><div class="v dt-num">18,304</div><div class="d">东财增量补录</div></div>
+      <div class="dt-kpi" style="--i:3"><div class="k">待爬队列 PENDING</div><div class="v dt-num">492</div><div class="d">优先沪深300缺口</div></div>
+    </section>
+
+    <section class="dt-grid">
+      <div class="dt-panel" style="--i:2">
+        <h3>数据管线 PIPELINE<em>RECENT RUNS</em></h3>
+        <div class="dt-body">
+          <table>
+            <thead><tr><th>时间</th><th>来源</th><th>模式</th><th class="num">成功</th><th class="num">失败</th><th class="num">耗时</th></tr></thead>
+            <tbody>
+              <tr><td class="num">10-03 08:15</td><td>东财</td><td><span class="dt-tag">增量</span></td><td class="num dt-ok">312</td><td class="num dt-bad">4</td><td class="num">6分12秒</td></tr>
+              <tr><td class="num">10-02 08:10</td><td>东财</td><td><span class="dt-tag">增量</span></td><td class="num dt-ok">298</td><td class="num dt-bad">2</td><td class="num">5分58秒</td></tr>
+              <tr><td class="num">10-01 21:30</td><td>新浪</td><td><span class="dt-tag full">全量</span></td><td class="num dt-ok">4,872</td><td class="num dt-bad">61</td><td class="num">3小时42分</td></tr>
+              <tr><td class="num">09-30 08:12</td><td>东财</td><td><span class="dt-tag">增量</span></td><td class="num dt-ok">305</td><td class="num dt-bad">3</td><td class="num">6分05秒</td></tr>
+              <tr><td class="num">09-29 08:09</td><td>东财</td><td><span class="dt-tag">增量</span></td><td class="num dt-ok">289</td><td class="num dt-bad">5</td><td class="num">5分47秒</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="dt-panel" style="--i:3">
+        <h3>服务矩阵 SERVICES<em>09:42:10</em></h3>
+        <div class="dt-svc">
+          <div class="r"><span class="dot"></span><span><b>后端 API</b><small>FastAPI · v0.1.0 · 12ms</small></span><span class="st">ONLINE</span></div>
+          <div class="r"><span class="dot"></span><span><b>PostgreSQL</b><small>5,364 只证券元数据</small></span><span class="st">ONLINE</span></div>
+          <div class="r"><span class="dot"></span><span><b>代理池</b><small>38 / 42 可用</small></span><span class="st">ONLINE</span></div>
+          <div class="r"><span class="dot"></span><span><b>爬虫调度</b><small>空闲 · 上次 08:15</small></span><span class="st">IDLE</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="dt-panel dt-cover" style="--i:4; border:0; padding:0">
+      <h3 style="border-bottom:0; padding-bottom:2px">覆盖进度 &amp; 来源分布 COVERAGE<em>新浪 874,321 · 东财 410,239</em></h3>
+      <div style="padding: 0 16px 14px">
+        <div class="dt-cov-row"><span>已爬 <b class="dt-num">4,872</b> / <span class="dt-num">5,364</span> 只</span><b class="dt-num" style="color:#f5b544">90.8%</b></div>
+        <div class="dt-coverbar"><i></i></div>
+        <div class="dt-src">
+          <div class="row"><span>新浪</span><div class="bar"><i></i></div><span class="dt-num">68.1%</span></div>
+          <div class="row"><span>东财</span><div class="bar"><i></i></div><span class="dt-num">31.9%</span></div>
+        </div>
+      </div>
+    </section>
+
+    <div class="dt-road">
+      <span class="t">ROADMAP</span>
+      <span class="dt-chip doing">数据管线 · 进行中</span>
+      <span class="dt-chip">回测引擎</span>
+      <span class="dt-chip">策略库</span>
+      <span class="dt-chip">教学页</span>
+    </div>
+  </main>
+</div>`; }
+
+// ===== PICKER 接线（规范原文） =====
+const variants = [renderWorkbench, renderCardflow, renderDarkTerminal];
+const stage = document.getElementById('stage');
+const picker = document.querySelector('.proto-picker');
+const highlight = picker.querySelector('.proto-picker-highlight');
+const items = [...picker.querySelectorAll('.proto-picker-item:not(.proto-picker-replay)')];
+const replay = picker.querySelector('.proto-picker-replay');
+let current = 0;
+
+function moveHighlight() {
+  const el = items[current];
+  highlight.style.width = el.offsetWidth + 'px';
+  highlight.style.transform = `translateX(${el.offsetLeft}px)`;
+}
+
+function mount(i) {
+  stage.innerHTML = '';
+  requestAnimationFrame(() => { stage.innerHTML = variants[i](); });
+}
+
+function setActive(i) {
+  if (i < 0 || i >= variants.length) return;
+  current = i;
+  items.forEach((el, j) => {
+    el.toggleAttribute('data-active', j === i);
+    if (j === i) el.setAttribute('aria-current', 'true');
+    else el.removeAttribute('aria-current');
+  });
+  moveHighlight();
+  const url = new URL(location);
+  url.searchParams.set('v', i + 1);
+  history.replaceState(null, '', url);
+  mount(i);
+}
+
+items.forEach((el, i) => el.addEventListener('click', () => setActive(i)));
+replay?.addEventListener('click', () => mount(current));
+window.addEventListener('resize', moveHighlight);
+
+document.addEventListener('keydown', (e) => {
+  if (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable) return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const num = parseInt(e.key, 10);
+  if (num >= 1 && num <= variants.length) setActive(num - 1);
+  else if (e.key === 'ArrowRight') setActive((current + 1) % variants.length);
+  else if (e.key === 'ArrowLeft') setActive((current - 1 + variants.length) % variants.length);
+  else if (e.key === 'r' || e.key === 'R') mount(current);
+});
+
+setActive((parseInt(new URLSearchParams(location.search).get('v'), 10) || 1) - 1);
+requestAnimationFrame(() => requestAnimationFrame(() => picker.setAttribute('data-ready', '')));
+</script>
+</body>
+</html>

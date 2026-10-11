@@ -138,7 +138,8 @@ watch(activeNav, nav => {
   else stopTasksPolling()
 })
 
-const TASK_SOURCES = [{ v: 'sina', label: '新浪财经' }, { v: 'eastmoney', label: '东方财富' }]
+const TASK_SOURCES = [{ v: 'sina', label: '新浪财经' }, { v: 'eastmoney', label: '东方财富' },
+  { v: 'delisted', label: '退市股补爬' }]
 const TASK_MODES = [{ v: 'incremental', label: '增量续爬' }, { v: 'full', label: '全量重爬' }]
 const sourceLabel = v => (TASK_SOURCES.find(s => s.v === v) || {}).label || v
 const modeLabel = v => (TASK_MODES.find(m => m.v === v) || {}).label || v
@@ -576,6 +577,7 @@ function pickNameOf(code) {
 const fullFilterSt = ref(true)        // 剔除名称含 ST/退
 const fullMinBars = ref(60)           // 区间内最少 K 线数（挡次新/长期停牌）
 const fullAdjust = ref(true)          // 后复权口径（关闭提速但跨除权失真）
+const fullIncludeDelisted = ref(true) // 含退市股（修幸存者偏差的本体）
 const fullRuns = ref([])              // 历史 run 列表
 const fullRunId = ref(null)           // 当前查看/运行中的 run
 const fullRun = ref(null)             // 该 run 详情（进度/统计）
@@ -663,7 +665,8 @@ async function startFullRun() {
         sell_tax: (learnSellTax.value || 0) / 10000,
         adjust: fullAdjust.value,
         filters: { exclude_st: fullFilterSt.value,
-                   min_bars: fullMinBars.value || 0 },
+                   min_bars: fullMinBars.value || 0,
+                   include_delisted: fullIncludeDelisted.value },
       }),
     })
     if (!r.ok) {
@@ -1546,6 +1549,7 @@ onMounted(refresh)
                             <input type="number" class="learn-input num" min="0" step="10"
                               v-model.number="fullMinBars" /></label>
                           <label class="learn-check"><input type="checkbox" v-model="fullAdjust" />后复权口径</label>
+                          <label class="learn-check"><input type="checkbox" v-model="fullIncludeDelisted" />含退市股</label>
                         </span>
                       </label>
                     </div>

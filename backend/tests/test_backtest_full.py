@@ -181,7 +181,8 @@ class TestFullBacktestApi:
         client.post("/api/backtest/full", json={
             "strategy": "ma_cross", "range": "1y"})
         spec = client.app.state._full_started[-1][1]
-        assert spec["filters"] == {"exclude_st": True, "min_bars": 60}
+        assert spec["filters"] == {"exclude_st": True, "min_bars": 60,
+                                   "include_delisted": True}
         assert spec["adjust"] is True
 
     def test_runs_list_and_detail(self, client):

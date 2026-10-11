@@ -88,7 +88,15 @@ class TestUpsertStockBasic:
         sql, params = fake_conn.cursor_obj.executemany_calls[0]
         assert "INSERT INTO stock_basic" in sql
         assert "ON CONFLICT (code) DO UPDATE" in sql
-        assert params == [("600000", 1, "浦发银行")]
+        assert params == [("600000", 1, "浦发银行", None)]   # 缺省 delisted=NULL→FALSE
+
+    def test_upsert_rows_with_delisted_flag(self, fake_conn):
+        stocks = [{"code": "000003", "market": 0, "name": "PT金田Ａ",
+                   "delisted": True}]
+        store_mod.Store().upsert_stock_basic(fake_conn, stocks)
+        sql, params = fake_conn.cursor_obj.executemany_calls[0]
+        assert "delisted" in sql
+        assert params == [("000003", 0, "PT金田Ａ", True)]
 
     def test_empty_stocks_noop(self, fake_conn):
         store_mod.Store().upsert_stock_basic(fake_conn, [])

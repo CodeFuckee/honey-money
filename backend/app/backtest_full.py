@@ -18,7 +18,8 @@ from . import config
 from .backtest.data import load_history
 from .backtest.runner import run_strategy
 
-DEFAULT_FILTERS = {"exclude_st": True, "min_bars": 60}
+DEFAULT_FILTERS = {"exclude_st": True, "min_bars": 60,
+                   "include_delisted": True}
 CHUNK = 300             # 每批加载的股票数（控制单条 SQL 与内存占用）
 SORTABLE = ("total_return", "annual_return", "max_drawdown", "sharpe",
             "win_rate", "trades", "code")
@@ -75,16 +76,22 @@ def _connect():
 # ------------------------------------------------------------ 纯函数 ----
 
 def filter_universe(stocks: list[dict], bars_counts: dict, *,
-                    exclude_st: bool = True, min_bars: int = 60):
-    """全市场清单过滤：剔 ST/退（按名称）+ 区间内最少 K 线数。
+                    exclude_st: bool = True, min_bars: int = 60,
+                    include_delisted: bool = True):
+    """全市场清单过滤：剔 ST/退（按名称，仅作用在市股）+ 区间内最少 K 线数
+    + 退市股开关（include_delisted=False 回到纯在市口径）。
 
-    返回 (kept, skipped)。名称含 ST（含 *ST）或「退」视为风险股剔除；
-    K 线数不足 min_bars 的次新股/长期停牌股剔除。
+    返回 (kept, skipped)。名称含 ST（含 *ST）或「退」的**在市**股视为风险股
+    剔除——退市股是修幸存者偏差的本体，不受该过滤影响；K 线数不足 min_bars
+    的次新股/长期停牌股剔除。
     """
     kept = []
     for s in stocks:
+        if not include_delisted and s.get("delisted"):
+            continue
         name = s.get("name") or ""
-        if exclude_st and ("ST" in name.upper() or "退" in name):
+        if exclude_st and not s.get("delisted") and (
+                "ST" in name.upper() or "退" in name):
             continue
         if bars_counts.get(s["code"], 0) < min_bars:
             continue
@@ -372,12 +379,34 @@ def _load_universe(run_id: int, spec: dict) -> tuple[list[dict], int]:
             counts = dict(cur.execute(
                 "SELECT code, count(DISTINCT trade_date) FROM daily_bar"
                 " WHERE trade_date >= %s GROUP BY code", (start,)))
-    stocks = [{"code": c, "name": n} for c, n in stocks]
     filters = spec.get("filters") or {}
+    include_delisted = bool(filters.get("include_delisted", True))
+    with _connect() as conn:
+        cur = conn.cursor()
+        # 参数化 NULL 不可用（IndeterminateDatatype），按分支拼装
+        if include_delisted:
+            rows = cur.execute(
+                "SELECT code, name, delisted FROM stock_basic "
+                "ORDER BY code").fetchall()
+        else:
+            rows = cur.execute(
+                "SELECT code, name, delisted FROM stock_basic "
+                "WHERE delisted = FALSE ORDER BY code").fetchall()
+        stocks = [{"code": c, "name": n, "delisted": bool(d)}
+                  for c, n, d in rows]
+        if start is None:
+            counts = dict(cur.execute(
+                "SELECT code, count(DISTINCT trade_date) FROM daily_bar"
+                " GROUP BY code").fetchall())
+        else:
+            counts = dict(cur.execute(
+                "SELECT code, count(DISTINCT trade_date) FROM daily_bar"
+                " WHERE trade_date >= %s GROUP BY code", (start,)))
     kept, skipped = filter_universe(
         stocks, counts,
         exclude_st=bool(filters.get("exclude_st", True)),
-        min_bars=int(filters.get("min_bars", 60)))
+        min_bars=int(filters.get("min_bars", 60)),
+        include_delisted=include_delisted)
     set_run_totals(run_id, total=len(kept), skipped=skipped)
     return kept, skipped
 

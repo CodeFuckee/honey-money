@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS stock_basic (
   code       VARCHAR(10) PRIMARY KEY,
   market     SMALLINT NOT NULL,
   name       VARCHAR(64) NOT NULL,
+  delisted   BOOLEAN NOT NULL DEFAULT FALSE,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -87,15 +88,21 @@ ON CONFLICT (code, trade_date, source) DO UPDATE SET
 """
 
 _UPSERT_BASIC = """
-INSERT INTO stock_basic (code, market, name)
-VALUES (%s, %s, %s)
+INSERT INTO stock_basic (code, market, name, delisted)
+VALUES (%s, %s, %s, COALESCE(%s, FALSE))
 ON CONFLICT (code) DO UPDATE SET
-  market = EXCLUDED.market, name = EXCLUDED.name, updated_at = now()
+  market = EXCLUDED.market, name = EXCLUDED.name,
+  delisted = EXCLUDED.delisted, updated_at = now()
 """
 
 
 class Store:
     def init_schema(self, conn) -> None:
+        # 老库补列：stock_basic.delisted（退市股补爬标记，2026-10-11）
+        with conn.cursor() as cur:
+            cur.execute("ALTER TABLE stock_basic "
+                        "ADD COLUMN IF NOT EXISTS delisted "
+                        "BOOLEAN NOT NULL DEFAULT FALSE")
         with conn.cursor() as cur:
             cur.execute(_PK_CHECK)
             row = cur.fetchone()
@@ -117,7 +124,8 @@ class Store:
             return
         with conn.cursor() as cur:
             cur.executemany(_UPSERT_BASIC, [
-                (s["code"], s["market"], s["name"]) for s in stocks
+                (s["code"], s["market"], s["name"], s.get("delisted"))
+                for s in stocks
             ])
 
     def max_trade_dates(self, conn, source: str | None = None) -> dict:

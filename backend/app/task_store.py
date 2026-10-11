@@ -70,6 +70,12 @@ class TaskStore:
         with conn.cursor() as cur:
             cur.execute(_DDL_TASK)
             cur.execute(_SEED, ("新浪每日增量", "sina", "incremental", "18:00", False))
+            # 预置手动任务（按名字幂等）：退市名单变化慢，季度手动触发一次即可
+            cur.execute(
+                "INSERT INTO crawl_task (name, source, mode, schedule_time, enabled)"
+                " SELECT '退市股历史补爬', 'delisted', 'full', NULL::time, FALSE"
+                " WHERE NOT EXISTS (SELECT 1 FROM crawl_task"
+                "                    WHERE name = '退市股历史补爬')")
     def list_tasks(self, conn) -> list[dict]:
         with conn.cursor() as cur:
             cur.execute(f"SELECT {_TASK_COLS} FROM crawl_task ORDER BY id")
