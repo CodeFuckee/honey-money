@@ -48,10 +48,15 @@ def create_app(*, scheduler: TaskScheduler | None = None,
                 Store().init_schema(conn)          # 含 crawl_run 任务关联列
                 task_store.init_schema(conn)       # crawl_task + 预置任务
                 backtest_full.ensure_schema(conn)  # 全量回测双表
-                backtest_full.mark_interrupted_on_startup()  # 重启恢复：running→interrupted
-                conn.commit()
+                conn.commit()                      # 建表先提交（下面的标记走独立连接）
         except Exception as exc:                   # PG 暂不可达：服务照常起，
             print(f"[startup] 任务表初始化失败（调度扫描会重试）: {exc}")
+        try:
+            # 重启恢复：遗留 running 标 interrupted（须在建表提交后执行，
+            # 否则第二连接看不到未提交的新表并使整个初始化回滚）
+            backtest_full.mark_interrupted_on_startup()
+        except Exception as exc:
+            print(f"[startup] 全量回测中断标记失败（表未建好时跳过）: {exc}")
         if config.SCHEDULER_ENABLED:
             await scheduler.start()
         # vectorbt numba 编译预热（后台）：部署后首次用户回测从数十秒降到秒级
