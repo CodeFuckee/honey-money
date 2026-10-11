@@ -701,12 +701,6 @@ async function cancelFullRun() {
                     { method: 'POST' }) } catch { /* 轮询会收敛终态 */ }
 }
 
-async function viewFullRun() {
-  stopFullPoll()
-  fullRowsPage.value = 0
-  await loadFullRun()
-}
-
 function sortFull(col) {
   if (fullRowsSort.value === col) fullRowsDesc.value = !fullRowsDesc.value
   else { fullRowsSort.value = col; fullRowsDesc.value = true }
@@ -1556,23 +1550,19 @@ onMounted(refresh)
                       </label>
                     </div>
                     <div class="learn-params-row">
-                      <select v-if="fullRuns.length" class="learn-select full-history-select" :value="fullRunId ?? ''"
-                        @change="fullRunId = Number($event.target.value) || null; viewFullRun()">
-                        <option v-for="r in fullRuns" :key="r.id" :value="r.id">
-                          #{{ r.id }} {{ r.strategy }} · {{ r.range }} · {{ { running: '运行中', done: '完成', canceled: '已取消', failed: '失败', interrupted: '已中断' }[r.status] || r.status }} · {{ r.done }}/{{ r.total }}
-                        </option>
-                      </select>
-                      <button class="btn btn-primary" :disabled="fullStarting || fullRunning"
-                        @click="startFullRun">
-                        <svg class="ic" viewBox="0 0 14 14" aria-hidden="true">
-                          <circle cx="7" cy="7" r="5.4" fill="none" stroke="currentColor" stroke-width="1.3"/>
-                          <path d="M1.6 7h10.8M7 1.6c-3.4 3.4-3.4 7.4 0 10.8 3.4-3.4 3.4-7.4 0-10.8z"
-                            fill="none" stroke="currentColor" stroke-width="1.1"/></svg>
-                        {{ fullStarting ? '发起中…' : '发起全量' }}</button>
-                      <button v-if="fullRunning" class="btn" @click="cancelFullRun">
-                        <svg class="ic" viewBox="0 0 12 12" aria-hidden="true">
-                          <path d="M2.5 2.5l7 7M9.5 2.5l-7 7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
-                        取消</button>
+                      <div class="learn-run-group">
+                        <button v-if="fullRunning" class="btn" @click="cancelFullRun">
+                          <svg class="ic" viewBox="0 0 12 12" aria-hidden="true">
+                            <path d="M2.5 2.5l7 7M9.5 2.5l-7 7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+                          取消</button>
+                        <button class="btn btn-primary" :disabled="fullStarting || fullRunning"
+                          @click="startFullRun">
+                          <svg class="ic" viewBox="0 0 14 14" aria-hidden="true">
+                            <circle cx="7" cy="7" r="5.4" fill="none" stroke="currentColor" stroke-width="1.3"/>
+                            <path d="M1.6 7h10.8M7 1.6c-3.4 3.4-3.4 7.4 0 10.8 3.4-3.4 3.4-7.4 0-10.8z"
+                              fill="none" stroke="currentColor" stroke-width="1.1"/></svg>
+                          {{ fullStarting ? '发起中…' : '发起全量' }}</button>
+                      </div>
                     </div>
                     <div v-if="fullError" class="error-banner"><span>{{ fullError }}</span></div>
                     <div v-if="fullRun" class="detail" data-testid="full-status">
@@ -2438,6 +2428,8 @@ body {
   padding: 4px 10px; border-radius: 3px; white-space: nowrap; }
 /* 按钮内联线性图标 */
 .btn .ic { width: 12px; height: 12px; vertical-align: -1px; margin-right: 5px; }
+/* 全市场段按钮组：与「跑回测」同位右对齐 */
+.learn-run-group { margin-left: auto; display: flex; gap: 10px; align-items: flex-end; }
 .learn-full-controls { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; min-height: 32px; }
 .learn-check { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--fg-2); white-space: nowrap; }
 .learn-check .learn-input.num { width: 76px; }

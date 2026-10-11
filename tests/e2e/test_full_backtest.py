@@ -187,17 +187,6 @@ class TestFullBacktest:
         expect(fail_row).to_contain_text("（失败：区间内无行情数据）")
         expect(fail_row.locator("td").nth(2)).to_contain_text("—")
 
-    def test_e2e_004_history_switch(self, servers, page, full_api):
-        """P1 历史 run 下拉切换回看 → 详情随 id 切换（全市场段内）。"""
-        _, frontend_port = servers
-        open_learn(page, frontend_port)
-        goto_full_mode(page)
-        expect(page.locator("[data-testid=full-status]")
-               ).to_contain_text("任务 #7")
-        page.locator(".full-history-select").select_option("6")
-        expect(page.locator("[data-testid=full-status]")
-               ).to_contain_text("任务 #6")
-
     def test_e2e_005_cancel_running(self, servers, page, full_api):
         """P1 运行中取消 → 已取消态（取消端点改写详情为 canceled）。"""
         _, holder = full_api
