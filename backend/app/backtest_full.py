@@ -385,7 +385,10 @@ def _load_universe(run_id: int, spec: dict) -> tuple[list[dict], int]:
 def _run_one_stock(code: str, name: str, pack: dict, spec: dict) -> dict:
     """单股回测：从批数据包中切出该股，复用单股引擎（语义同 POST /api/backtest）。"""
     bars = pack.get("bars") or {}
-    if code not in (bars.get("close") or {}).columns:
+    close = bars.get("close")
+    # 注意不可写 `(bars.get("close") or {}).columns`：close 是 DataFrame，
+    # 对其求真值直接 ValueError ambiguous
+    if close is None or code not in close.columns:
         return {"code": code, "name": name, "status": "failed",
                 "total_return": None, "annual_return": None,
                 "max_drawdown": None, "sharpe": None, "win_rate": None,

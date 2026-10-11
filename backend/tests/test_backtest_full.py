@@ -297,6 +297,48 @@ class TestLoadUniverseSql:
         assert len(params) == 1 and params[0]
 
 
+class TestRunOneStock:
+    """回归：真实 pack（OHLC DataFrame 宽表）下 _run_one_stock 的取列与缺码分支。
+    原实现 `(bars.get("close") or {}).columns` 对 DataFrame 求真值 →
+    ValueError: The truth value of a DataFrame is ambiguous（每股必挂）。"""
+
+    def _pack(self, codes):
+        import pandas as pd
+        idx = pd.to_datetime(["2026-01-02", "2026-01-03"])
+        frame = pd.DataFrame({c: [10.0, 10.5] for c in codes}, index=idx)
+        return {"bars": {k: frame.copy() for k in
+                         ("open", "high", "low", "close", "volume")},
+                "factors": None}
+
+    SPEC = {"strategy": "buy_hold", "params": {}, "exec_mode": "next_open",
+            "commission": 2.5e-4, "sell_tax": 5e-4}
+
+    def test_slices_single_column_and_passes_factors(self, monkeypatch):
+        captured = {}
+
+        def fake_run(bars, **kw):
+            captured["cols"] = list(bars["close"].columns)
+            captured["factors"] = kw.get("factors")
+            return {"metrics": {"total_return": 0.1}, "equity": [
+                ["2026-01-02", 1.0, 1.0], ["2026-01-03", 1.1, 1.05]]}
+
+        monkeypatch.setattr(bf, "run_strategy", fake_run)
+        row = bf._run_one_stock("600519", "贵州茅台",
+                                self._pack(["600519", "000001"]), self.SPEC)
+        assert captured["cols"] == ["600519"]       # 只切该股一列
+        assert row["status"] == "ok"
+        assert row["buyhold_return"] == pytest.approx(0.05)
+
+    def test_missing_code_fails_gracefully_not_ambiguous(self, monkeypatch):
+        monkeypatch.setattr(
+            bf, "run_strategy",
+            lambda *a, **k: pytest.fail("缺码不应进入引擎"))
+        row = bf._run_one_stock("999999", "不存在",
+                                self._pack(["600519"]), self.SPEC)
+        assert row["status"] == "failed"
+        assert "区间内无行情数据" in row["reason"]
+
+
 class TestExecuteRun:
     """worker 编排循环：monkeypatch 取数/引擎/落库，验证推进、失败隔离、取消。"""
 
