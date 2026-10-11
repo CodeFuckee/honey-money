@@ -120,7 +120,7 @@ class TestLearnPage:
                 resp_body["text"] = resp.text()
 
         page.on("response", _capture)
-        page.get_by_role("button", name="▶ 跑回测").click()
+        page.get_by_role("button", name="跑回测").click()
 
         expect(page.locator(".learn-chart canvas").first).to_be_visible()
         # 回归：LineChart 未注册时 canvas 只有轴网格、曲线全空（用户截图事件）
@@ -155,7 +155,7 @@ class TestLearnPage:
         expect(pool).to_be_visible()
         self._pick(page, "600519")                           # 池输入同源多选控件
         page.locator(".learn-select").nth(1).select_option("close")   # 撮合模式
-        page.get_by_role("button", name="▶ 跑回测").click()
+        page.get_by_role("button", name="跑回测").click()
         body = json.loads(calls[-1]["body"])
         assert body["strategy"] == "momentum"
         assert body["codes"] == ["600519"]                # UI 层验证发送选中集合
@@ -179,7 +179,7 @@ class TestLearnPage:
         _, frontend_port = servers
         open_learn(page, frontend_port)
         self._pick(page, "600519")
-        page.get_by_role("button", name="▶ 跑回测").click()
+        page.get_by_role("button", name="跑回测").click()
         expect(page.locator(".learn-empty .state")
                ).to_contain_text("区间内无行情数据")
 
@@ -192,7 +192,7 @@ class TestLearnPage:
             body="<html><head><title>504</title></head><body>nginx</body></html>"))
         open_learn(page, frontend_port)
         self._pick(page, "600519")
-        page.get_by_role("button", name="▶ 跑回测").click()
+        page.get_by_role("button", name="跑回测").click()
         expect(page.locator(".error-banner")).to_contain_text("服务返回异常")
         expect(page.locator(".error-banner")).to_contain_text("504")
 
@@ -207,7 +207,7 @@ class TestLearnPage:
         option = page.locator(".p-autocomplete-option", has_text="贵州茅台")
         expect(option.first).to_be_visible()
         option.first.click()
-        page.get_by_role("button", name="▶ 跑回测").click()
+        page.get_by_role("button", name="跑回测").click()
         body = json.loads(calls[-1]["body"])
         assert body["codes"] == ["600519"]
 
@@ -226,10 +226,10 @@ class TestLearnPage:
         _, frontend_port = servers
         open_learn(page, frontend_port)
         self._pick(page, "600519")
-        page.get_by_role("button", name="▶ 跑回测").click()
+        page.get_by_role("button", name="跑回测").click()
         expect(page.locator(".adj-ok", has_text="后复权口径")).to_be_visible()
         holder["bt"] = {**BT_RESULT, "adjust_applied": False}
-        page.get_by_role("button", name="▶ 跑回测").click()
+        page.get_by_role("button", name="跑回测").click()
         expect(page.locator(".task-risk", has_text="不复权口径")).to_be_visible()
 
 
@@ -249,11 +249,12 @@ class TestLearnPage:
         _, frontend_port = servers
         open_learn(page, frontend_port)
         page.locator(".learn-nav", has_text="双均线交叉").click()
+        page.locator(".learn-mode-btn", has_text="批量").click()   # 显式批量模式
         self._pick(page, "600519", "000001", "000002")
         expect(page.locator(".learn-ac")).to_contain_text("600519")
         expect(page.locator(".learn-ac")).to_contain_text("000001")
         expect(page.locator(".learn-ac")).to_contain_text("000002")
-        page.get_by_role("button", name="▶ 跑回测").click()
+        page.get_by_role("button", name="跑回测").click()
 
         rows = page.locator(".learn-cmp tbody tr")
         expect(rows).to_have_count(3)
@@ -285,8 +286,9 @@ class TestLearnPage:
         holder["bt"] = by_code
         _, frontend_port = servers
         open_learn(page, frontend_port)
+        page.locator(".learn-mode-btn", has_text="批量").click()   # 显式批量模式
         self._pick(page, "600519", "000002")
-        page.get_by_role("button", name="▶ 跑回测").click()
+        page.get_by_role("button", name="跑回测").click()
 
         rows = page.locator(".learn-cmp tbody tr")
         expect(rows).to_have_count(2)                  # 1 成功 + 1 失败行

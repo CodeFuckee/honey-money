@@ -318,13 +318,13 @@ const learnCodePick = ref([])         // 多选标签：[{code, name, label}]（
 const batchProgress = ref(null)       // {done, total} 批量进度
 const batchResults = ref([])          // 批量模式每股结果
 const batchFailed = ref([])           // 批量失败清单 [{code, name, reason}]
+const learnMode = ref('single')       // single | batch | full（分段切换器）
 function resolveCodes() {
   return learnCodePick.value
     .map(x => (typeof x === 'string' ? x : (x?.code ?? '')).trim())
     .filter(Boolean)
 }
-const batchMode = computed(() =>
-  learnStrat.value !== 'momentum' && resolveCodes().length >= 2)
+const batchMode = computed(() => learnMode.value === 'batch')
 const learnRange = ref('3y')
 const learnExec = ref('next_open')
 const learnParams = ref({ ...DEFAULT_PARAMS.ma_cross })
@@ -367,11 +367,16 @@ watch(activeNav, nav => {
 const learnStratMeta = computed(() => STRATS.find(s => s.id === learnStrat.value))
 const learnIsMomentum = computed(() => learnStrat.value === 'momentum')
 
-watch(learnStrat, id => { learnParams.value = { ...DEFAULT_PARAMS[id] } })
+watch(learnStrat, id => {
+  learnParams.value = { ...DEFAULT_PARAMS[id] }
+  // 动量为横截面组合策略：只有多标的形态，锁定批量模式（单股/全市场段禁用）
+  if (id === 'momentum') learnMode.value = 'batch'
+})
 
 function openLearnWith(code, name) {
   learnCodePick.value = [{ code, name: name || code,
                            label: name ? `${code} ${name}` : code }]
+  learnMode.value = 'single'
   activeNav.value = 'learn'
 }
 
@@ -380,6 +385,43 @@ function _pickToCode(x) {
 }
 
 const fmtSignedPct = v => (v >= 0 ? '+' : '') + (v * 100).toFixed(1) + '%'
+
+// ===== 结果容器三态文案（按模式） =====
+const codeFieldLabel = computed(() => learnIsMomentum.value
+  ? '轮动股票池（可搜索多选，≥2 只）'
+  : learnMode.value === 'batch'
+    ? '股票代码（可搜索多选，≥2 只横向对比）'
+    : '股票代码（可搜索多选，回测一只）')
+const resultTitle = computed(() => ({
+  single: '单股回测结果', batch: '批量对比', full: '全市场回测结果',
+}[learnMode.value]))
+const resultHint = computed(() => ({
+  single: '收益对照买入持有',
+  batch: '按总收益降序 · 失败股标注原因',
+  full: 'Top 20 叠加 · 全量排行可导出',
+}[learnMode.value]))
+const loadingText = computed(() => learnMode.value === 'full'
+  ? '全市场任务执行中…'
+  : learnMode.value === 'batch' ? '批量回测中…' : '回测中…')
+const emptyTitle = computed(() => ({
+  single: '选好策略与参数，点「跑回测」开始',
+  batch: '选择 ≥2 只股票做横向对比',
+  full: '发起全市场任务后，这里展示统计与排行',
+}[learnMode.value]))
+const emptyDetail = computed(() => ({
+  single: '收盘出信号：当日收盘成交 = 未来函数（作弊），次日开盘成交 = 规矩——切换对比两者收益差',
+  batch: '每股独立回测（含复权因子懒加载），完成后生成对比表与叠加净值图',
+  full: '历史任务可用上方下拉回看',
+}[learnMode.value]))
+const resultLoading = computed(() => learnMode.value === 'full'
+  ? fullStarting.value || fullRunning.value
+  : learnLoading.value)
+const resultEmpty = computed(() => {
+  if (learnMode.value === 'full') return !fullViewable.value
+  if (learnMode.value === 'batch')
+    return !(batchResults.value.length || batchFailed.value.length)
+  return !learnResult.value
+})
 
 async function _runOne(code, shared, raw = false) {
   const body = {
@@ -435,12 +477,18 @@ async function runLearn() {
     return
   }
   const batch = batchMode.value
+  if (batch && !learnIsMomentum.value && codes.length < 2) {
+    learnLoading.value = false
+    learnError.value = '批量对比请至少选择 2 只股票（单只请切到单股模式）'
+    return
+  }
   try {
     if (!batch) {                                    // 单股 / 轮动（一次请求）
       const bodyCodes = learnIsMomentum.value ? codes : [codes[0]]
       const raw = await _runOne(bodyCodes[0], {}, true)
       if (raw.ok === false) throw new Error(raw.reason)   // 参数/网关异常 → 横幅
       learnResult.value = { ...raw, codes: bodyCodes }
+      learnLoading.value = false            // 先落 loading，结果模板才挂载图表容器
       await nextTick()
       renderLearnChart()
       return
@@ -471,6 +519,7 @@ async function runLearn() {
       }
     }
     await Promise.all([worker(), worker(), worker(), worker()])
+    learnLoading.value = false            // 先落 loading，结果模板才挂载图表容器
     batchResults.value = [...results].sort((a, b) =>
       (b.metrics?.total_return ?? -9) - (a.metrics?.total_return ?? -9))
     batchFailed.value = failed
@@ -872,6 +921,7 @@ if (typeof window !== 'undefined') {
     strat: learnStrat.value,
     picks: JSON.parse(JSON.stringify(learnCodePick.value)),
     batchMode: batchMode.value,
+    mode: learnMode.value,
     codes: resolveCodes(),
     loading: learnLoading.value,
     error: learnError.value,
@@ -1419,18 +1469,130 @@ onMounted(refresh)
                 <p class="sub">六大经典策略 · 真实行情回测 · 收益对照买入持有</p>
               </div>
               <div class="toolbar-right">
-                <span class="ph-tag">教学 · 数据为不复权口径</span>
+                <span class="tag-note">教学 · 数据为不复权口径</span>
               </div>
             </div>
 
             <div class="learn-grid">
-              <!-- 左列：策略导航 + 原理卡 -->
+              <!-- 左列：策略导航（原理卡移至右列设置区下方） -->
               <div class="learn-side">
                 <button v-for="s in STRATS" :key="s.id" class="learn-nav"
                   :class="{ active: learnStrat === s.id }" @click="learnStrat = s.id">
                   <span class="learn-nav-name">{{ s.name }}</span>
                   <span class="learn-nav-tag">{{ s.tag }}</span>
                 </button>
+              </div>
+
+              <!-- 右列：设置 → 原理 → 结果 -->
+              <div class="learn-main">
+                <div class="card learn-params">
+                  <div class="card-head">
+                    <span class="card-title">回测设置</span>
+                    <div class="learn-mode-seg">
+                      <button class="learn-mode-btn" data-mode="single"
+                        :class="{ active: learnMode === 'single' }"
+                        :disabled="learnIsMomentum" title="动量为多标的组合策略，无单股模式"
+                        @click="learnMode = 'single'">单股</button>
+                      <button class="learn-mode-btn" data-mode="batch"
+                        :class="{ active: learnMode === 'batch' }"
+                        @click="learnMode = 'batch'">批量对比</button>
+                      <button class="learn-mode-btn" data-mode="full"
+                        :class="{ active: learnMode === 'full' }"
+                        :disabled="learnIsMomentum" title="动量轮动为横截面组合策略，暂不支持全市场"
+                        @click="learnMode = 'full'">全市场</button>
+                    </div>
+                  </div>
+
+                  <!-- 单股 / 批量：共用参数区 -->
+                  <template v-if="learnMode !== 'full'">
+                    <div class="learn-params-row">
+                      <label class="learn-field" :class="{ wide: learnIsMomentum }">
+                        <span>{{ codeFieldLabel }}</span>
+                        <AutoComplete v-model="learnCodePick" :suggestions="codeSuggestions"
+                          optionLabel="label" dropdown multiple
+                          placeholder="输入代码或名称搜索后选中，如 600519 / 茅台"
+                          @complete="searchCodes" class="learn-ac" /></label>
+                      <label class="learn-field"><span>回测区间</span>
+                        <select v-model="learnRange" class="learn-select">
+                          <option value="1y">近 1 年</option><option value="3y">近 3 年</option>
+                          <option value="5y">近 5 年</option><option value="all">全史</option>
+                        </select></label>
+                      <label class="learn-field"><span>撮合模式</span>
+                        <select v-model="learnExec" class="learn-select">
+                          <option value="next_open">次日开盘（正确）</option>
+                          <option value="close">当日收盘（未来函数）</option>
+                        </select></label>
+                    </div>
+                    <div class="learn-params-row">
+                      <label v-for="f in (STRAT_FIELDS[learnStrat] || [])" :key="f.k" class="learn-field">
+                        <span>{{ f.label }}</span>
+                        <input :type="f.type === 'number' ? 'number' : 'text'" class="learn-input num"
+                          :min="f.min" :max="f.max" :step="f.step"
+                          v-model.number="learnParams[f.k]" />
+                      </label>
+                      <label class="learn-field"><span>佣金 ‱（双边）</span>
+                        <input type="number" class="learn-input num" min="0" max="10" step="0.5"
+                          v-model.number="learnCommission" /></label>
+                      <label class="learn-field"><span>印花税 ‱（卖出）</span>
+                        <input type="number" class="learn-input num" min="0" max="10" step="1"
+                          v-model.number="learnSellTax" /></label>
+                      <button class="btn btn-primary learn-run" :disabled="learnLoading" @click="runLearn">
+                        <svg class="ic" viewBox="0 0 12 12" aria-hidden="true"><path d="M3 1.8l7 4.2-7 4.2z" fill="currentColor"/></svg>
+                        {{ learnLoading ? '回测中…' : '跑回测' }}</button>
+                    </div>
+                  </template>
+
+                  <!-- 全市场：过滤面板 + 发起/取消/历史 -->
+                  <template v-else>
+                    <div class="learn-params-row">
+                      <label class="learn-field wide"><span>全市场过滤</span>
+                        <span class="learn-full-controls">
+                          <label class="learn-check"><input type="checkbox" v-model="fullFilterSt" />剔除 ST/退</label>
+                          <label class="learn-check">最少K线数
+                            <input type="number" class="learn-input num" min="0" step="10"
+                              v-model.number="fullMinBars" /></label>
+                          <label class="learn-check"><input type="checkbox" v-model="fullAdjust" />后复权口径</label>
+                        </span>
+                      </label>
+                    </div>
+                    <div class="learn-params-row">
+                      <select v-if="fullRuns.length" class="learn-select full-history-select" :value="fullRunId ?? ''"
+                        @change="fullRunId = Number($event.target.value) || null; viewFullRun()">
+                        <option v-for="r in fullRuns" :key="r.id" :value="r.id">
+                          #{{ r.id }} {{ r.strategy }} · {{ r.range }} · {{ { running: '运行中', done: '完成', canceled: '已取消', failed: '失败', interrupted: '已中断' }[r.status] || r.status }} · {{ r.done }}/{{ r.total }}
+                        </option>
+                      </select>
+                      <button class="btn btn-primary" :disabled="fullStarting || fullRunning"
+                        @click="startFullRun">
+                        <svg class="ic" viewBox="0 0 14 14" aria-hidden="true">
+                          <circle cx="7" cy="7" r="5.4" fill="none" stroke="currentColor" stroke-width="1.3"/>
+                          <path d="M1.6 7h10.8M7 1.6c-3.4 3.4-3.4 7.4 0 10.8 3.4-3.4 3.4-7.4 0-10.8z"
+                            fill="none" stroke="currentColor" stroke-width="1.1"/></svg>
+                        {{ fullStarting ? '发起中…' : '发起全量' }}</button>
+                      <button v-if="fullRunning" class="btn" @click="cancelFullRun">
+                        <svg class="ic" viewBox="0 0 12 12" aria-hidden="true">
+                          <path d="M2.5 2.5l7 7M9.5 2.5l-7 7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+                        取消</button>
+                    </div>
+                    <div v-if="fullError" class="error-banner"><span>{{ fullError }}</span></div>
+                    <div v-if="fullRun" class="detail" data-testid="full-status">
+                      <template v-if="fullRunning">
+                        全量回测中：已完成 {{ fullRun.done }} / {{ fullRun.total }} 只（失败 {{ fullRun.failed }}，过滤跳过 {{ fullRun.skipped }}）… 可随时取消
+                      </template>
+                      <template v-else-if="fullRun.status === 'interrupted'">
+                        上次任务因后端重启中断（已完成 {{ fullRun.done }}/{{ fullRun.total }}），可重新发起
+                      </template>
+                      <template v-else-if="fullRun.status === 'failed'">
+                        全量回测失败：{{ fullRun.error }}
+                      </template>
+                      <template v-else-if="fullViewable">
+                        任务 #{{ fullRun.id }}（{{ fullRun.status === 'canceled' ? '已取消' : '已完成' }}）：参与 {{ fullRun.total }} 只 · 过滤跳过 {{ fullRun.skipped }} · 失败 {{ fullRun.failed }}
+                      </template>
+                    </div>
+                  </template>
+                </div>
+
+                <!-- 原理卡（当前策略说明，自左列移入） -->
                 <div class="card learn-card" v-if="learnStratMeta">
                   <div class="learn-brief">{{ learnStratMeta.brief }}</div>
                   <div class="learn-lessons">
@@ -1438,146 +1600,77 @@ onMounted(refresh)
                     <ul><li v-for="l in learnStratMeta.lessons" :key="l">{{ l }}</li></ul>
                   </div>
                 </div>
-              </div>
-
-              <!-- 右列：参数面板 + 结果 -->
-              <div class="learn-main">
-                <div class="card learn-params">
-                  <div class="learn-params-row">
-                    <label class="learn-field" :class="{ wide: learnIsMomentum }">
-                      <span>{{ learnIsMomentum
-                        ? '轮动股票池（可搜索多选，≥2 只）'
-                        : '股票代码（可搜索多选：选 1 只单股回测，选多只自动批量对比）' }}</span>
-                      <AutoComplete v-model="learnCodePick" :suggestions="codeSuggestions"
-                        optionLabel="label" dropdown multiple
-                        placeholder="输入代码或名称搜索后选中，如 600519 / 茅台"
-                        @complete="searchCodes" class="learn-ac" /></label>
-                    <label class="learn-field"><span>回测区间</span>
-                      <select v-model="learnRange" class="learn-select">
-                        <option value="1y">近 1 年</option><option value="3y">近 3 年</option>
-                        <option value="5y">近 5 年</option><option value="all">全史</option>
-                      </select></label>
-                    <label class="learn-field"><span>撮合模式</span>
-                      <select v-model="learnExec" class="learn-select">
-                        <option value="next_open">次日开盘（正确）</option>
-                        <option value="close">当日收盘（未来函数）</option>
-                      </select></label>
-                  </div>
-                  <div class="learn-params-row">
-                    <label v-for="f in (STRAT_FIELDS[learnStrat] || [])" :key="f.k" class="learn-field">
-                      <span>{{ f.label }}</span>
-                      <input :type="f.type === 'number' ? 'number' : 'text'" class="learn-input num"
-                        :min="f.min" :max="f.max" :step="f.step"
-                        v-model.number="learnParams[f.k]" />
-                    </label>
-                    <label class="learn-field"><span>佣金 ‱（双边）</span>
-                      <input type="number" class="learn-input num" min="0" max="10" step="0.5"
-                        v-model.number="learnCommission" /></label>
-                    <label class="learn-field"><span>印花税 ‱（卖出）</span>
-                      <input type="number" class="learn-input num" min="0" max="10" step="1"
-                        v-model.number="learnSellTax" /></label>
-                    <button class="btn btn-primary learn-run" :disabled="learnLoading" @click="runLearn">
-                      {{ learnLoading ? '回测中…' : '▶ 跑回测' }}</button>
-                  </div>
-                </div>
-
-                <!-- 全量回测：同策略对全市场一次性后台回测 -->
-                <div class="card learn-params">
-                  <div class="learn-params-row">
-                    <label class="learn-field" :class="{ wide: false }">
-                      <span>🌐 全量回测（{{ learnIsMomentum ? '动量轮动暂不支持' : '全市场 · 后台任务' }}）</span>
-                      <span class="learn-full-controls">
-                        <label class="learn-check"><input type="checkbox" v-model="fullFilterSt" /> 剔除 ST/退</label>
-                        <label class="learn-check"><input type="number" class="learn-input num" min="0" step="10"
-                          v-model.number="fullMinBars" /> 最少K线数</label>
-                        <label class="learn-check"><input type="checkbox" v-model="fullAdjust" /> 后复权</label>
-                        <button class="btn btn-primary" :disabled="learnIsMomentum || fullStarting || fullRunning"
-                          :title="learnIsMomentum ? '动量轮动为横截面组合策略，暂不支持全量' : ''"
-                          @click="startFullRun">{{ fullStarting ? '发起中…' : '🌐 全量回测' }}</button>
-                        <button v-if="fullRunning" class="btn" @click="cancelFullRun">取消</button>
-                        <select v-if="fullRuns.length" class="learn-select" :value="fullRunId ?? ''"
-                          @change="fullRunId = Number($event.target.value) || null; viewFullRun()">
-                          <option v-for="r in fullRuns" :key="r.id" :value="r.id">
-                            #{{ r.id }} {{ r.strategy }} · {{ r.range }} · {{ { running: '运行中', done: '完成', canceled: '已取消', failed: '失败', interrupted: '已中断' }[r.status] || r.status }} · {{ r.done }}/{{ r.total }}
-                          </option>
-                        </select>
-                      </span>
-                    </label>
-                  </div>
-                  <div v-if="fullError" class="error-banner"><span>{{ fullError }}</span></div>
-                  <div v-if="fullRun" class="detail" data-testid="full-status">
-                    <template v-if="fullRunning">
-                      全量回测中：已完成 {{ fullRun.done }} / {{ fullRun.total }} 只（失败 {{ fullRun.failed }}，过滤跳过 {{ fullRun.skipped }}）… 可随时取消
-                    </template>
-                    <template v-else-if="fullRun.status === 'interrupted'">
-                      上次任务因后端重启中断（已完成 {{ fullRun.done }}/{{ fullRun.total }}），可重新发起
-                    </template>
-                    <template v-else-if="fullRun.status === 'failed'">
-                      全量回测失败：{{ fullRun.error }}
-                    </template>
-                    <template v-else-if="fullViewable">
-                      任务 #{{ fullRun.id }}（{{ fullRun.status === 'canceled' ? '已取消' : '已完成' }}）：参与 {{ fullRun.total }} 只 · 过滤跳过 {{ fullRun.skipped }} · 失败 {{ fullRun.failed }}
-                    </template>
-                  </div>
-                </div>
-
-                <!-- 全量回测结果：统计卡 + Top20 叠加图 + 排行表 -->
-                <template v-if="fullViewable">
-                  <div class="learn-metrics">
-                    <div class="card lm"><div class="lm-k">参与股票</div><div class="lm-v">{{ fullRun.stats?.count ?? 0 }}</div></div>
-                    <div class="card lm"><div class="lm-k">正收益占比</div><div class="lm-v">{{ fullRun.stats ? ((fullRun.stats.positive_pct ?? 0) * 100).toFixed(1) + '%' : '—' }}</div></div>
-                    <div class="card lm"><div class="lm-k">总收益中位数</div><div class="lm-v">{{ fullRun.stats?.median_return != null ? fmtPctSigned(fullRun.stats.median_return) : '—' }}</div></div>
-                    <div class="card lm"><div class="lm-k">跑赢买入持有</div><div class="lm-v">{{ fullRun.stats?.beat_buyhold_pct != null ? ((fullRun.stats.beat_buyhold_pct) * 100).toFixed(1) + '%' : '—' }}</div></div>
-                  </div>
-                  <div class="card chart-card"><div ref="fullChartEl" class="learn-chart"></div>
-                    <div class="detail" style="padding: 0 14px 10px">收益 Top 20 归一化净值叠加（策略净值，起点=1）</div></div>
-                  <div class="card detail-table-card">
-                    <table class="runs-table learn-full-cmp">
-                      <thead><tr>
-                        <th>代码</th><th>名称</th>
-                        <th v-for="([k, label]) in FULL_SORT_COLS" :key="k" class="full-sort"
-                          @click="sortFull(k)">{{ label }}{{ fullRowsSort === k ? (fullRowsDesc ? ' ↓' : ' ↑') : '' }}</th>
-                      </tr></thead>
-                      <tbody>
-                        <tr v-for="r in fullRows.rows" :key="r.code" :class="{ 'learn-fail-row': r.status !== 'ok' }">
-                          <td class="mono"><a href="javascript:void 0" class="full-code" @click="pickFullStock(r.code)">{{ r.code }}</a></td>
-                          <td>{{ r.name }}<span v-if="r.reason" class="full-fail-reason">（失败：{{ r.reason }}）</span></td>
-                          <td :class="(r.total_return ?? 0) >= 0 ? 'chg-up' : 'chg-down'">{{ fmtPctSigned(r.total_return) }}</td>
-                          <td>{{ fmtPctSigned(r.annual_return) }}</td>
-                          <td class="chg-down">{{ r.max_drawdown != null ? (r.max_drawdown * 100).toFixed(1) + '%' : '—' }}</td>
-                          <td>{{ r.sharpe?.toFixed(2) ?? '—' }}</td>
-                          <td>{{ r.win_rate != null ? (r.win_rate * 100).toFixed(0) + '%' : '—' }}</td>
-                          <td>{{ r.trades ?? '—' }}</td>
-                        </tr>
-                      </tbody>
-                    </table>
-                    <div class="detail" style="padding: 8px 14px">
-                      共 {{ fullRows.total }} 行 · 第 {{ fullRowsPage + 1 }} / {{ fullPages }} 页
-                      <button class="btn" :disabled="fullRowsPage <= 0" @click="fullRowsPage--; loadFullRows()">上一页</button>
-                      <button class="btn" :disabled="fullRowsPage >= fullPages - 1" @click="fullRowsPage++; loadFullRows()">下一页</button>
-                      <a class="btn" :href="fullExportUrl" download>⬇ 导出 CSV</a>
-                    </div>
-                  </div>
-                </template>
 
                 <div v-if="learnError" class="error-banner"><span>{{ learnError }}</span></div>
 
-                <div v-if="batchMode && learnLoading && batchProgress" class="card learn-empty">
-                  <div class="state">批量回测中… 已完成 {{ batchProgress.done }} / {{ batchProgress.total }} 只</div>
-                  <div class="detail">每股独立回测（含复权因子懒加载），完成后自动生成对比表与叠加净值图</div>
-                </div>
+                <!-- 结果容器：三态同框架（加载骨架 / 空态 / 按模式结果），消灭布局跳动 -->
+                <div class="result-frame">
+                  <div class="result-head">
+                    <span class="card-title">{{ resultTitle }}</span>
+                    <span class="card-hint">{{ resultHint }}</span>
+                  </div>
 
-                <!-- 有单股结果或批量结果才渲染结果区（批量分支不写 learnResult） -->
-                <template v-if="learnResult || batchResults.length || batchFailed.length">
-                  <div v-if="learnResult && learnResult.status === 'down'" class="card learn-empty">
-                    <div class="state">回测不可用</div>
-                    <div class="detail">{{ learnResult.detail }}</div>
+                  <div v-if="resultLoading" class="card learn-empty sk-zone">
+                    <div class="state">{{ loadingText }}</div>
+                    <div class="sk sk-line"></div><div class="sk sk-main"></div>
+                    <div class="sk sk-line"></div><div class="sk sk-line short"></div>
                   </div>
-                  <div v-else-if="learnResult && learnResult.message" class="card learn-empty">
-                    <div class="state">{{ learnResult.message }}</div>
+
+                  <div v-else-if="resultEmpty" class="card learn-empty">
+                    <div class="state">{{ emptyTitle }}</div>
+                    <div class="detail">{{ emptyDetail }}</div>
                   </div>
-                  <!-- 批量对比视图：每股一行指标 + 归一化净值叠加 -->
-                  <template v-else-if="batchResults.length || batchFailed.length">
+
+                  <!-- ===== 单股结果 ===== -->
+                  <template v-else-if="learnMode === 'single'">
+                    <div v-if="learnResult && learnResult.status === 'down'" class="card learn-empty">
+                      <div class="state">回测不可用</div>
+                      <div class="detail">{{ learnResult.detail }}</div>
+                    </div>
+                    <div v-else-if="learnResult && learnResult.message" class="card learn-empty">
+                      <div class="state">{{ learnResult.message }}</div>
+                    </div>
+                    <template v-else-if="learnResult && learnResult.metrics">
+                      <div v-if="learnResult.adjust_applied"
+                        class="adj-ok">已按后复权口径计算收益（除权除息已修正）</div>
+                      <div v-else class="task-risk">
+                        复权因子不可用，本次为不复权口径——跨除权日的收益存在假跳空失真
+                      </div>
+                      <div class="learn-metrics">
+                        <div class="card lm"><div class="lm-k">总收益</div><div class="lm-v" :class="learnResult.metrics.total_return >= 0 ? 'chg-up' : 'chg-down'">{{ (learnResult.metrics.total_return * 100).toFixed(1) }}%</div></div>
+                        <div class="card lm"><div class="lm-k">年化收益</div><div class="lm-v" :class="learnResult.metrics.annual_return >= 0 ? 'chg-up' : 'chg-down'">{{ (learnResult.metrics.annual_return * 100).toFixed(1) }}%</div></div>
+                        <div class="card lm"><div class="lm-k">最大回撤</div><div class="lm-v chg-down">{{ (learnResult.metrics.max_drawdown * 100).toFixed(1) }}%</div></div>
+                        <div class="card lm"><div class="lm-k">夏普比率</div><div class="lm-v">{{ learnResult.metrics.sharpe?.toFixed(2) }}</div></div>
+                        <div class="card lm"><div class="lm-k">胜率</div><div class="lm-v">{{ (learnResult.metrics.win_rate * 100).toFixed(0) }}%</div></div>
+                        <div class="card lm"><div class="lm-k">盈亏比</div><div class="lm-v">{{ learnResult.metrics.profit_loss_ratio?.toFixed(2) }}</div></div>
+                        <div class="card lm"><div class="lm-k">交易次数</div><div class="lm-v">{{ learnResult.metrics.trades }}</div></div>
+                      </div>
+                      <div class="card chart-card"><div ref="learnChartEl" class="learn-chart"></div></div>
+                      <div class="card detail-table-card" v-if="learnResult.trades.length">
+                        <table class="runs-table">
+                          <thead><tr><th>方向</th><th>标的</th><th>买入日</th><th>买入价</th><th>卖出日</th><th>卖出价</th><th>收益率</th></tr></thead>
+                          <tbody>
+                            <tr v-for="(t, i) in learnResult.trades" :key="i">
+                              <td>{{ t.direction === 'long' ? '多' : t.direction }}</td>
+                              <td class="mono">{{ t.symbol || learnResult.codes?.[0] }}</td>
+                              <td class="mono">{{ t.entry_date }}</td>
+                              <td class="mono">{{ t.entry_price?.toFixed?.(2) ?? t.entry_price }}</td>
+                              <td class="mono">{{ t.exit_date || '持有中' }}</td>
+                              <td class="mono">{{ t.exit_price != null ? (t.exit_price?.toFixed?.(2) ?? t.exit_price) : '—' }}</td>
+                              <td :class="(t.pnl_pct || 0) >= 0 ? 'chg-up' : 'chg-down'">
+                                {{ t.pnl_pct != null ? ((t.pnl_pct >= 0 ? '+' : '') + (t.pnl_pct * 100).toFixed(2) + '%') : '—' }}</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                      <div v-if="learnResult.gap_dates?.length" class="task-risk">
+                        检测到疑似除权跳空日：{{ learnResult.gap_dates.join('、') }}——不复权数据跨除权日回测存在假亏损噪声，结果仅供参考
+                      </div>
+                    </template>
+                  </template>
+
+                  <!-- ===== 批量对比 ===== -->
+                  <template v-else-if="learnMode === 'batch'">
                     <div class="card learn-empty" v-if="!batchResults.length">
                       <div class="state">全部股票回测失败</div>
                       <div class="detail" v-for="f in batchFailed" :key="f.code">
@@ -1618,47 +1711,47 @@ onMounted(refresh)
                     </template>
                   </template>
 
-                  <template v-else-if="learnResult && learnResult.metrics">
-                    <div v-if="learnResult.adjust_applied"
-                      class="adj-ok">已按后复权口径计算收益（除权除息已修正）</div>
-                    <div v-else class="task-risk">
-                      复权因子不可用，本次为不复权口径——跨除权日的收益存在假跳空失真
-                    </div>
+                  <!-- ===== 全市场结果 ===== -->
+                  <template v-else>
                     <div class="learn-metrics">
-                      <div class="card lm"><div class="lm-k">总收益</div><div class="lm-v" :class="learnResult.metrics.total_return >= 0 ? 'chg-up' : 'chg-down'">{{ (learnResult.metrics.total_return * 100).toFixed(1) }}%</div></div>
-                      <div class="card lm"><div class="lm-k">年化收益</div><div class="lm-v" :class="learnResult.metrics.annual_return >= 0 ? 'chg-up' : 'chg-down'">{{ (learnResult.metrics.annual_return * 100).toFixed(1) }}%</div></div>
-                      <div class="card lm"><div class="lm-k">最大回撤</div><div class="lm-v chg-down">{{ (learnResult.metrics.max_drawdown * 100).toFixed(1) }}%</div></div>
-                      <div class="card lm"><div class="lm-k">夏普比率</div><div class="lm-v">{{ learnResult.metrics.sharpe?.toFixed(2) }}</div></div>
-                      <div class="card lm"><div class="lm-k">胜率</div><div class="lm-v">{{ (learnResult.metrics.win_rate * 100).toFixed(0) }}%</div></div>
-                      <div class="card lm"><div class="lm-k">盈亏比</div><div class="lm-v">{{ learnResult.metrics.profit_loss_ratio?.toFixed(2) }}</div></div>
-                      <div class="card lm"><div class="lm-k">交易次数</div><div class="lm-v">{{ learnResult.metrics.trades }}</div></div>
+                      <div class="card lm"><div class="lm-k">参与股票</div><div class="lm-v">{{ fullRun.stats?.count ?? 0 }}</div></div>
+                      <div class="card lm"><div class="lm-k">正收益占比</div><div class="lm-v">{{ fullRun.stats ? ((fullRun.stats.positive_pct ?? 0) * 100).toFixed(1) + '%' : '—' }}</div></div>
+                      <div class="card lm"><div class="lm-k">总收益中位数</div><div class="lm-v">{{ fullRun.stats?.median_return != null ? fmtPctSigned(fullRun.stats.median_return) : '—' }}</div></div>
+                      <div class="card lm"><div class="lm-k">跑赢买入持有</div><div class="lm-v">{{ fullRun.stats?.beat_buyhold_pct != null ? ((fullRun.stats.beat_buyhold_pct) * 100).toFixed(1) + '%' : '—' }}</div></div>
                     </div>
-                    <div class="card chart-card"><div ref="learnChartEl" class="learn-chart"></div></div>
-                    <div class="card detail-table-card" v-if="learnResult.trades.length">
-                      <table class="runs-table">
-                        <thead><tr><th>方向</th><th>标的</th><th>买入日</th><th>买入价</th><th>卖出日</th><th>卖出价</th><th>收益率</th></tr></thead>
+                    <div class="card chart-card"><div ref="fullChartEl" class="learn-chart"></div>
+                      <div class="detail" style="padding: 0 14px 10px">收益 Top 20 归一化净值叠加（策略净值，起点=1）</div></div>
+                    <div class="card detail-table-card">
+                      <table class="runs-table learn-full-cmp">
+                        <thead><tr>
+                          <th>代码</th><th>名称</th>
+                          <th v-for="([k, label]) in FULL_SORT_COLS" :key="k" class="full-sort"
+                            @click="sortFull(k)">{{ label }}{{ fullRowsSort === k ? (fullRowsDesc ? ' ↓' : ' ↑') : '' }}</th>
+                        </tr></thead>
                         <tbody>
-                          <tr v-for="(t, i) in learnResult.trades" :key="i">
-                            <td>{{ t.direction === 'long' ? '多' : t.direction }}</td>
-                            <td class="mono">{{ t.symbol || learnResult.codes?.[0] }}</td>
-                            <td class="mono">{{ t.entry_date }}</td>
-                            <td class="mono">{{ t.entry_price?.toFixed?.(2) ?? t.entry_price }}</td>
-                            <td class="mono">{{ t.exit_date || '持有中' }}</td>
-                            <td class="mono">{{ t.exit_price != null ? (t.exit_price?.toFixed?.(2) ?? t.exit_price) : '—' }}</td>
-                            <td :class="(t.pnl_pct || 0) >= 0 ? 'chg-up' : 'chg-down'">
-                              {{ t.pnl_pct != null ? ((t.pnl_pct >= 0 ? '+' : '') + (t.pnl_pct * 100).toFixed(2) + '%') : '—' }}</td>
+                          <tr v-for="r in fullRows.rows" :key="r.code" :class="{ 'learn-fail-row': r.status !== 'ok' }">
+                            <td class="mono"><a href="javascript:void 0" class="full-code" @click="pickFullStock(r.code)">{{ r.code }}</a></td>
+                            <td>{{ r.name }}<span v-if="r.reason" class="full-fail-reason">（失败：{{ r.reason }}）</span></td>
+                            <td :class="(r.total_return ?? 0) >= 0 ? 'chg-up' : 'chg-down'">{{ fmtPctSigned(r.total_return) }}</td>
+                            <td>{{ fmtPctSigned(r.annual_return) }}</td>
+                            <td class="chg-down">{{ r.max_drawdown != null ? (r.max_drawdown * 100).toFixed(1) + '%' : '—' }}</td>
+                            <td>{{ r.sharpe?.toFixed(2) ?? '—' }}</td>
+                            <td>{{ r.win_rate != null ? (r.win_rate * 100).toFixed(0) + '%' : '—' }}</td>
+                            <td>{{ r.trades ?? '—' }}</td>
                           </tr>
                         </tbody>
                       </table>
-                    </div>
-                    <div v-if="learnResult.gap_dates?.length" class="task-risk">
-                      检测到疑似除权跳空日：{{ learnResult.gap_dates.join('、') }}——不复权数据跨除权日回测存在假亏损噪声，结果仅供参考
+                      <div class="detail" style="padding: 8px 14px">
+                        共 {{ fullRows.total }} 行 · 第 {{ fullRowsPage + 1 }} / {{ fullPages }} 页
+                        <button class="btn" :disabled="fullRowsPage <= 0" @click="fullRowsPage--; loadFullRows()">上一页</button>
+                        <button class="btn" :disabled="fullRowsPage >= fullPages - 1" @click="fullRowsPage++; loadFullRows()">下一页</button>
+                        <a class="btn" :href="fullExportUrl" download>
+                          <svg class="ic" viewBox="0 0 12 12" aria-hidden="true">
+                            <path d="M6 1.5v6M3.5 5l2.5 2.5L8.5 5M2 10.5h8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                          导出 CSV</a>
+                      </div>
                     </div>
                   </template>
-                </template>
-                <div v-else-if="!learnLoading" class="card learn-empty">
-                  <div class="state">选好策略与参数，点「跑回测」开始</div>
-                  <div class="detail">收盘出信号：当日收盘成交 = 未来函数（作弊），次日开盘成交 = 规矩——切换对比两者收益差</div>
                 </div>
               </div>
             </div>
@@ -1687,7 +1780,7 @@ onMounted(refresh)
   --sidebar-w: 256px;
   --content-pad: 32px 40px 24px;
   --h1-size: 28px;
-  --h1-weight: 400;
+  --h1-weight: 600;
   --bar-h: 6px;
   --nav-active-bar: none;
   --sidebar-bg: #ffffff;
@@ -2218,7 +2311,7 @@ body {
 .task-meta { display: flex; gap: 24px; flex-wrap: wrap; margin-top: 14px; font-size: 13px; color: var(--fg-2); }
 .task-meta b { color: var(--fg); font-weight: 600; }
 .task-risk {
-  margin-top: 10px; padding: 8px 12px; font-size: 12.5px;
+  margin-top: 10px; padding: 8px 12px; font-size: 12px;
   background: var(--ph-tag-bg); color: var(--ph-tag-fg); border-left: 3px solid var(--dot-warn);
 }
 .task-actions { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
@@ -2226,7 +2319,7 @@ body {
 .btn-danger { color: var(--dot-down); border-color: var(--dot-down); }
 .btn-danger:hover { background: var(--error-bg); }
 .task-runs { margin-top: 16px; border-top: 1px solid var(--card-border-color); padding-top: 14px; }
-.runs-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.runs-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .runs-table th { text-align: left; padding: 6px 10px; background: #f4f4f4; color: var(--fg-2); font-weight: 600; }
 .runs-table td { padding: 7px 10px; border-bottom: 1px solid #ededed; color: var(--fg-2); }
 .runs-table .mono { font-variant-numeric: tabular-nums; }
@@ -2256,13 +2349,13 @@ body {
 }
 .dialog-title { margin: 0 0 18px; font-size: 18px; font-weight: 600; color: var(--fg); }
 .dialog-field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
-.dialog-field > span { font-size: 12.5px; color: var(--fg-2); }
+.dialog-field > span { font-size: 12px; color: var(--fg-2); }
 .dialog-select {
   height: 38px; padding: 0 10px; font: inherit; font-size: 13.5px;
   border: 1px solid var(--ph-input-border); background: var(--ph-input-bg); color: var(--fg);
 }
 .dialog .task-risk { margin: 4px 0 0; }
-.task-error { margin: 8px 0 0; font-size: 12.5px; color: var(--dot-down); }
+.task-error { margin: 8px 0 0; font-size: 12px; color: var(--dot-down); }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
 
 /* ===== 个股历史行情详情页 ===== */
@@ -2323,6 +2416,28 @@ body {
 .lm-v { font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .learn-chart { width: 100%; height: 420px; }
 .learn-empty { padding: 36px; text-align: center; }
+/* 卡片头部规范：标题 + 右侧控件（教学页各卡统一） */
+.card-head, .result-head { display: flex; align-items: center; gap: 14px; margin-bottom: 12px; }
+.card-head .card-title, .result-head .card-title { font-size: 14px; font-weight: 600; }
+.result-head .card-hint { font-size: 12px; color: var(--fg-3); }
+/* 模式分段切换器（单股/批量/全市场） */
+.learn-mode-seg { display: inline-flex; border: 1px solid #c6c6c6; }
+.learn-mode-btn { padding: 6px 16px; font-size: 12px; background: #fff; border: 0;
+  border-right: 1px solid #c6c6c6; cursor: pointer; color: var(--fg-2); }
+.learn-mode-btn:last-child { border-right: 0; }
+.learn-mode-btn:hover:not(:disabled):not(.active) { background: #eaeaea; }
+.learn-mode-btn.active { background: var(--accent); color: #fff; }
+.learn-mode-btn:disabled { opacity: .4; cursor: not-allowed; }
+/* 结果容器：三态同高框架 */
+.result-frame { margin-top: 16px; }
+.result-frame .result-head { padding-bottom: 10px; border-bottom: 1px solid #e0e0e0; }
+.result-frame .sk-zone { text-align: left; }
+.result-frame .sk-zone .sk { margin: 10px 2px; }
+/* 中性说明徽章（警示黄仅用于真警示） */
+.tag-note { font-size: 12px; color: var(--fg-2); background: #e8e8e8;
+  padding: 4px 10px; border-radius: 3px; white-space: nowrap; }
+/* 按钮内联线性图标 */
+.btn .ic { width: 12px; height: 12px; vertical-align: -1px; margin-right: 5px; }
 .learn-full-controls { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; min-height: 32px; }
 .learn-check { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--fg-2); white-space: nowrap; }
 .learn-check .learn-input.num { width: 76px; }
@@ -2330,10 +2445,10 @@ body {
 .full-sort:hover { color: var(--fg-1); }
 .full-code { color: inherit; text-decoration: underline dotted #bbb; }
 .full-code:hover { color: var(--accent, #1976d2); }
-.full-fail-reason { color: #b42318; font-size: 11.5px; }
+.full-fail-reason { color: #b42318; font-size: 12px; }
 .learn-empty .detail { margin-top: 8px; }
 
-.learn-cmp { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.learn-cmp { width: 100%; border-collapse: collapse; font-size: 12px; }
 .learn-cmp th, .learn-full-cmp th { text-align: left; padding: 8px 10px; background: #f4f4f4; color: var(--fg-2); font-weight: 600; }
 .learn-cmp td, .learn-full-cmp td { padding: 7px 10px; border-bottom: 1px solid #ededed; font-variant-numeric: tabular-nums; }
 .learn-fail-row td { color: var(--dot-down); font-size: 12px; }

@@ -120,13 +120,27 @@ def open_learn(page, frontend_port):
     expect(page.get_by_role("heading", name="量化教学")).to_be_visible()
 
 
+def open_learn(page, frontend_port):
+    page.goto(f"http://127.0.0.1:{frontend_port}/")
+    page.get_by_role("button", name="教学").click()
+    expect(page.get_by_role("heading", name="量化教学")).to_be_visible()
+
+
+def goto_full_mode(page):
+    """切到「全市场」回测模式段。"""
+    page.locator(".learn-mode-btn", has_text="全市场").click()
+    expect(page.locator(".learn-mode-btn", has_text="全市场")
+           ).to_have_class(re.compile("active"))
+
+
 class TestFullBacktest:
     def test_e2e_001_run_to_results(self, servers, page, full_api):
         """P0 发起全量回测 → 进度 → 统计卡 + Top 图 + 排行表（含失败行）。"""
         _, holder = full_api
         _, frontend_port = servers
         open_learn(page, frontend_port)
-        page.get_by_role("button", name="🌐 全量回测").click()
+        goto_full_mode(page)
+        page.get_by_role("button", name="发起全量").click()
         holder["details"][7] = [RUN_RUNNING, RUN_DONE]   # 轮询序列：running→done
         expect(page.locator("[data-testid=full-status]")
                ).to_contain_text("已完成 1 / 3", timeout=10000)
@@ -149,6 +163,7 @@ class TestFullBacktest:
         calls, _ = full_api
         _, frontend_port = servers
         open_learn(page, frontend_port)
+        goto_full_mode(page)
         expect(page.locator(".learn-full-cmp tbody tr")).to_have_count(3)
         page.locator(".full-sort", has_text="年化").click()    # 换列 → desc=true
         page.locator(".full-sort", has_text="年化").click()    # 同列 → desc=false
@@ -166,18 +181,20 @@ class TestFullBacktest:
         """P1 失败股行标注原因，指标列显示 —，成功行正常。"""
         _, frontend_port = servers
         open_learn(page, frontend_port)
+        goto_full_mode(page)
         expect(page.locator(".learn-full-cmp tbody tr")).to_have_count(3)
         fail_row = page.locator(".learn-full-cmp tbody tr", has_text="301001")
         expect(fail_row).to_contain_text("（失败：区间内无行情数据）")
         expect(fail_row.locator("td").nth(2)).to_contain_text("—")
 
     def test_e2e_004_history_switch(self, servers, page, full_api):
-        """P1 历史 run 下拉切换回看 → 详情随 id 切换。"""
+        """P1 历史 run 下拉切换回看 → 详情随 id 切换（全市场段内）。"""
         _, frontend_port = servers
         open_learn(page, frontend_port)
+        goto_full_mode(page)
         expect(page.locator("[data-testid=full-status]")
                ).to_contain_text("任务 #7")
-        page.locator(".learn-full-controls select").select_option("6")
+        page.locator(".full-history-select").select_option("6")
         expect(page.locator("[data-testid=full-status]")
                ).to_contain_text("任务 #6")
 
@@ -186,21 +203,23 @@ class TestFullBacktest:
         _, holder = full_api
         _, frontend_port = servers
         open_learn(page, frontend_port)
-        page.get_by_role("button", name="🌐 全量回测").click()
+        goto_full_mode(page)
+        page.get_by_role("button", name="发起全量").click()
         holder["details"][7] = RUN_RUNNING             # 点击后进入运行态
         expect(page.get_by_role("button", name="取消")).to_be_visible()
         page.get_by_role("button", name="取消").click()
         expect(page.locator("[data-testid=full-status]")
                ).to_contain_text("已取消", timeout=10000)
 
-    def test_e2e_006_momentum_disables_button(self, servers, page, full_api):
-        """P2 动量策略 → 全量按钮置灰带提示。"""
+    def test_e2e_006_momentum_disables_full_segment(self, servers, page,
+                                                    full_api):
+        """P2 动量策略 → 「全市场」模式段禁用带提示（横截面组合策略）。"""
         _, frontend_port = servers
         open_learn(page, frontend_port)
         page.locator(".learn-nav", has_text="动量轮动").click()
-        btn = page.get_by_role("button", name="🌐 全量回测")
-        expect(btn).to_be_disabled()
-        expect(btn).to_have_attribute("title", re.compile("动量"))
+        seg = page.locator(".learn-mode-btn", has_text="全市场")
+        expect(seg).to_be_disabled()
+        expect(seg).to_have_attribute("title", re.compile("动量"))
 
     def test_e2e_007_conflict_409_shown(self, servers, page, full_api):
         """P2 已有任务运行时再发起 → 409 → 页面错误横幅。"""
@@ -209,6 +228,31 @@ class TestFullBacktest:
         holder["create_body"] = {"detail": "已有全量回测任务在运行，请等待完成或取消"}
         _, frontend_port = servers
         open_learn(page, frontend_port)
-        page.get_by_role("button", name="🌐 全量回测").click()
+        goto_full_mode(page)
+        page.get_by_role("button", name="发起全量").click()
         expect(page.locator(".learn-params .error-banner")
                ).to_contain_text("已有全量回测任务在运行")
+
+    def test_e2e_008_mode_segment_switch(self, servers, page, full_api):
+        """P0 模式分段切换：单股/批量共享代码控件；全市场隐藏代码控件、
+        显示过滤面板，主按钮切换为「发起全量」。"""
+        _, frontend_port = servers
+        open_learn(page, frontend_port)
+        seg = page.locator(".learn-mode-btn")
+        expect(seg).to_have_count(3)
+        expect(page.locator(".learn-mode-btn", has_text="单股")
+               ).to_have_class(re.compile("active"))
+        # 批量段：代码控件仍在
+        page.locator(".learn-mode-btn", has_text="批量").click()
+        expect(page.locator(".learn-ac")).to_be_visible()
+        expect(page.get_by_role("button", name="跑回测")).to_be_visible()
+        # 全市场段：代码控件隐藏，过滤面板出现，主按钮变为发起全量
+        goto_full_mode(page)
+        expect(page.locator(".learn-ac")).to_have_count(0)
+        expect(page.locator(".learn-full-controls")).to_be_visible()
+        expect(page.get_by_role("button", name="发起全量")).to_be_visible()
+        expect(page.get_by_role("button", name="跑回测")).to_have_count(0)
+        # 切回单股
+        page.locator(".learn-mode-btn", has_text="单股").click()
+        expect(page.locator(".learn-ac")).to_be_visible()
+        expect(page.get_by_role("button", name="跑回测")).to_be_visible()
