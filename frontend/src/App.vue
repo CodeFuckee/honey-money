@@ -23,6 +23,116 @@ const pendingInfra = ref(true)
 const pendingCrawl = ref(true)
 const activeNav = ref('dash')                 // dash | data | src-sina | src-ef | backtest | learn
 
+// ===== 路由：URL 路径 ↔ 页面，查询串 ↔ 参数（刷新/分享/前进后退恢复） =====
+// 手写 History API 同步（单组件架构，无需 vue-router）；nginx/vite preview
+// 均有 SPA 回退，深链接刷新可用。页面切换 pushState，参数变化 replaceState。
+const ROUTE_BY_NAV = {
+  dash: '/', data: '/data', 'src-sina': '/data/sina',
+  'src-ef': '/data/eastmoney', tasks: '/tasks', backtest: '/backtest',
+  learn: '/learn', stock: '/stock',
+}
+const NAV_BY_PATH = Object.fromEntries(
+  Object.entries(ROUTE_BY_NAV).map(([nav, path]) => [path, nav]))
+
+function buildQuery() {
+  const q = new URLSearchParams()
+  const nav = activeNav.value
+  if (nav === 'learn') {
+    q.set('strategy', learnStrat.value)
+    q.set('mode', learnMode.value)
+    if (learnCodePick.value.length)
+      q.set('codes', learnCodePick.value.map(_pickToCode).join(','))
+    q.set('range', learnRange.value)
+    q.set('exec', learnExec.value)
+    q.set('fee', learnCommission.value)
+    q.set('tax', learnSellTax.value)
+    const pa = Object.entries(learnParams.value)
+    if (pa.length) q.set('pa', pa.map(([k, v]) => `${k}:${v}`).join(','))
+    q.set('fst', fullFilterSt.value ? 1 : 0)
+    q.set('mbars', fullMinBars.value)
+    q.set('adj', fullAdjust.value ? 1 : 0)
+    q.set('incd', fullIncludeDelisted.value ? 1 : 0)
+  } else if (nav === 'stock') {
+    if (stock.value?.code) q.set('code', stock.value.code)
+    if (stockAdjust.value) q.set('adjust', stockAdjust.value)
+    if (stock.value?.source) q.set('source', stock.value.source)
+  } else if (nav === 'data' || nav === 'src-sina' || nav === 'src-ef') {
+    if (browseQuery.value) q.set('q', browseQuery.value)
+    if (browsePage.value) q.set('page', browsePage.value)
+  }
+  return q
+}
+
+function syncUrl() {
+  const path = ROUTE_BY_NAV[activeNav.value] || '/'
+  const qs = buildQuery().toString()
+  history.replaceState(null, '', path + (qs ? `?${qs}` : ''))
+}
+
+let syncTimer = null
+function scheduleSync() {
+  clearTimeout(syncTimer)
+  syncTimer = setTimeout(syncUrl, 250)         // 参数变化防抖，replace 不灌历史
+}
+
+function setNav(nav) {
+  activeNav.value = nav
+  history.pushState(null, '', ROUTE_BY_NAV[nav] || '/')
+  scheduleSync()
+}
+
+function applyUrl() {
+  const u = new URL(window.location.href)
+  const nav = NAV_BY_PATH[u.pathname]
+  if (nav) activeNav.value = nav
+  const q = u.searchParams
+  // 教学（白名单校验，非法值静默忽略）
+  if (STRATS.some(s => s.id === q.get('strategy')))
+    learnStrat.value = q.get('strategy')
+  if (['single', 'batch', 'full'].includes(q.get('mode')))
+    learnMode.value = q.get('mode')
+  if (q.get('codes') != null)
+    learnCodePick.value = q.get('codes').split(',').filter(Boolean)
+      .map(c => ({ code: c, name: c, label: c }))
+  if (['1y', '3y', '5y', 'all'].includes(q.get('range')))
+    learnRange.value = q.get('range')
+  if (['next_open', 'close'].includes(q.get('exec')))
+    learnExec.value = q.get('exec')
+  if (q.get('fee') != null && !Number.isNaN(+q.get('fee')))
+    learnCommission.value = +q.get('fee')
+  if (q.get('tax') != null && !Number.isNaN(+q.get('tax')))
+    learnSellTax.value = +q.get('tax')
+  if (q.get('pa')) {
+    const pa = {}
+    for (const kv of q.get('pa').split(',')) {
+      const [k, v] = kv.split(':')
+      if (k) pa[k] = v !== '' && !Number.isNaN(+v) ? +v : v
+    }
+    if (Object.keys(pa).length) learnParams.value = pa
+  }
+  if (q.get('fst') != null) fullFilterSt.value = q.get('fst') === '1'
+  if (q.get('mbars') != null && !Number.isNaN(+q.get('mbars')))
+    fullMinBars.value = +q.get('mbars')
+  if (q.get('adj') != null) fullAdjust.value = q.get('adj') === '1'
+  if (q.get('incd') != null) fullIncludeDelisted.value = q.get('incd') === '1'
+  // 个股详情
+  if (NAV_BY_PATH[u.pathname] === 'stock' && q.get('code')) {
+    stock.value = { code: q.get('code'), name: q.get('code'),
+                    source: q.get('source') || 'sina' }
+    stockAdjust.value = q.get('adjust') || ''
+    detailPage.value = 0
+  }
+  // 数据浏览
+  if (['data', 'src-sina', 'src-ef'].includes(NAV_BY_PATH[u.pathname]) &&
+      (q.get('q') != null || q.get('page'))) {
+    browseQuery.value = q.get('q') ?? ''
+    browsePage.value = +q.get('page') || 0
+    loadBrowse()
+  }
+}
+
+
+
 // 数据源子页（对应 Carbon 原型 ⑥⑦ 屏）：按来源筛选的数据浏览占位页
 const SRC_ITEMS = [
   { id: 'src-sina', label: '新浪财经', field: 'sina', tagCls: 'src-sina' },
@@ -267,12 +377,12 @@ function openStock(e) {
   stock.value = { code: data.code, name: data.name, source }
   detailPage.value = 0
   stockNav.value = activeNav.value
-  activeNav.value = 'stock'
+  setNav('stock')
 }
 const stockNav = ref('data')       // 详情页返回目标（数据页/来源子页）
 
 function backToList() {
-  activeNav.value = stockNav.value || 'data'
+  setNav(stockNav.value || 'data')
 }
 
 // ===== 量化教学：经典回测策略（backend vectorbt 引擎，/api/backtest） =====
@@ -378,7 +488,7 @@ function openLearnWith(code, name) {
   learnCodePick.value = [{ code, name: name || code,
                            label: name ? `${code} ${name}` : code }]
   learnMode.value = 'single'
-  activeNav.value = 'learn'
+  setNav('learn')
 }
 
 function _pickToCode(x) {
@@ -976,7 +1086,16 @@ function fmtBig(n, unitDiv = 1) {
 const fmtAmount = n => fmtBig(n)
 const fmtShares = n => fmtBig(n, 1)
 
-onMounted(refresh)
+onMounted(() => { applyUrl(); refresh() })
+// 参数集合变化 → 防抖同步 URL（页面内参数变化 replace，不灌浏览历史）；
+// 前进/后退 → 从 URL 恢复。函数引用在 setup 末尾注册，避开 TDZ。
+window.addEventListener('popstate', applyUrl)
+watch(
+  [activeNav, learnStrat, learnMode, learnCodePick, learnRange, learnExec,
+   learnCommission, learnSellTax, learnParams, fullFilterSt, fullMinBars,
+   fullAdjust, fullIncludeDelisted, stock, stockAdjust, browseQuery,
+   browsePage],
+  () => scheduleSync(), { deep: true })
 </script>
 
 <template>
@@ -1017,7 +1136,7 @@ onMounted(refresh)
               { id: 'backtest', label: '回测' }, { id: 'learn', label: '教学' }]"
             :key="n.id" class="nav-item"
             :class="{ active: activeNav === n.id, 'sub-active': (activeNav.startsWith('src-') || activeNav === 'stock') && n.id === 'data' }"
-            @click="activeNav = n.id">
+            @click="setNav(n.id)">
             <svg v-if="n.id === 'dash'" class="nav-icon" viewBox="0 0 20 20" fill="none">
               <rect x="2.5" y="2.5" width="6.5" height="6.5" rx="1.2" stroke="currentColor" stroke-width="1.5"/>
               <rect x="11" y="2.5" width="6.5" height="6.5" rx="1.2" stroke="currentColor" stroke-width="1.5"/>
@@ -1044,7 +1163,7 @@ onMounted(refresh)
             </svg>{{ n.label }}</button>
           <div class="group">数据源</div>
           <button v-for="s in SRC_ITEMS" :key="s.id" class="src-item"
-            :class="{ active: activeNav === s.id }" @click="activeNav = s.id">{{ s.label }}</button>
+            :class="{ active: activeNav === s.id }" @click="setNav(s.id)">{{ s.label }}</button>
           <div class="sidebar-foot">v0.1.0 · 工程骨架</div>
         </aside>
 
