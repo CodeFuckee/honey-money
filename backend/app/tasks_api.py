@@ -109,11 +109,14 @@ def register_task_routes(app: FastAPI, *, scheduler: TaskScheduler,
                     ran = task_store.ran_today(conn, t["id"],
                                                now.date().isoformat())
                     last = task_store.recent_runs(conn, t["id"], limit=1)
+                    # 手动任务（调度时刻 NULL）无下次执行时刻——
+                    # None 直接 isoformat 会崩掉整个列表（任务数据不可用）
+                    nxt = next_run_at(t, now, ran_today=ran) if t["enabled"] \
+                        else None
                     tasks.append({
                         **t,
                         "phase": state["phases"].get(t["id"], "idle"),
-                        "next_run_at": (next_run_at(t, now, ran_today=ran)
-                                        .isoformat() if t["enabled"] else None),
+                        "next_run_at": nxt.isoformat() if nxt else None,
                         "progress": state["progress"].get(t["id"]),
                         "last_run": last[0] if last else None,
                     })

@@ -140,6 +140,22 @@ class TestScan:
         assert sched.runtime_state()["phases"] == {1: "idle"}
         assert sched.last_results[1]["trigger"] == "schedule"
 
+    def test_null_schedule_manual_task_never_scheduled(self):
+        """手动任务（schedule_time NULL）：scan 不入队也不崩——曾 AttributeError
+        拖垮整个扫描循环（连排程任务都不扫，生产启用退市补爬后暴露）。"""
+        tasks = [FakeTask(1),
+                 FakeTask(2, source="delisted", mode="full",
+                          schedule_time=None, enabled=True)]
+        sched = make_scheduler(tasks=tasks, clock=FakeClock(sh(hour=18, minute=5)))
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(sched.scan_once())
+            loop.run_until_complete(sched.drain_once())
+        finally:
+            loop.close()
+        assert all(e["task_id"] != 2 for e in sched._queue)
+        assert sched.last_results.get(2) is None
+
     def test_disabled_task_never_scheduled(self):
         sched = make_scheduler(tasks=[FakeTask(1, enabled=False)],
                                clock=FakeClock(sh(hour=18, minute=5)))

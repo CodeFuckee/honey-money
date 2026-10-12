@@ -207,6 +207,8 @@ class TaskScheduler:
             for task in tasks:
                 if not task["enabled"]:
                     continue
+                if not task["schedule_time"]:
+                    continue          # 纯手动任务（无调度时刻）不参与排程
                 if self._phases.get(task["id"]) in ("queued", "running"):
                     continue
                 if await asyncio.to_thread(self._tasks.ran_today, conn, task["id"],

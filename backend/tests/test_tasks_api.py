@@ -160,6 +160,17 @@ class TestGetTasks:
         assert body["status"] == "down"
         assert body["tasks"] == []
 
+    def test_enabled_null_schedule_task_next_run_none(self):
+        """启用但无调度时刻的手动任务：列表正常返回且 next_run_at=None
+        （曾 AttributeError 致整个任务列表 down：任务数据不可用）。"""
+        row = {**TASK_ROW, "source": "delisted", "schedule_time": None}
+        client, _, _ = make_client(tasks=[row])
+        resp = client.get("/api/tasks")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "up"
+        assert body["tasks"][0]["next_run_at"] is None
+
     def test_disabled_task_next_run_none(self):
         row = {**TASK_ROW, "enabled": False}
         client, _, _ = make_client(tasks=[row])
