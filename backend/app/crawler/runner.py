@@ -123,7 +123,8 @@ class CrawlRunner:
                                   f"熔停保护：停止派发，保存进度退出")
                     else:
                         state["consec_fail"] = 0
-                        await results.put((stock["code"], bars.rows))
+                        await results.put(
+                            (stock["code"], bars.rows, bars.source))
 
                 state["done"] += 1
                 if self._progress:
@@ -160,8 +161,10 @@ class CrawlRunner:
             item = await results.get()
             if item is None:
                 return
-            code, rows = item
+            code, rows, bars_source = item
+            # 数据源以客户端声明为准（退市股走新浪通道但任务源是 delisted）
             n = await asyncio.to_thread(
-                self._store.upsert_daily_bars, self._conn, code, rows, source)
+                self._store.upsert_daily_bars, self._conn, code, rows,
+                bars_source or source)
             summary.ok_stocks += 1
             summary.bars_upserted += n

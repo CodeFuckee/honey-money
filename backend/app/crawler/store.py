@@ -140,6 +140,15 @@ class Store:
                     "SELECT code, max(trade_date) FROM daily_bar GROUP BY code")
             return dict(cur.fetchall())
 
+    def migrate_delisted_source(self, conn) -> int:
+        """退市补爬曾按任务源存 source='delisted'，统一迁回 'sina'
+        （数据本就来自新浪，详情页按源过滤才可见）。幂等：迁移后恒 0 行。"""
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE daily_bar SET source = 'sina' WHERE source = 'delisted'")
+            n = cur.rowcount
+        return n
+
     def upsert_daily_bars(self, conn, code: str, rows: list[tuple],
                           source: str = "eastmoney") -> int:
         if not rows:

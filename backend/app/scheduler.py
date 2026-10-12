@@ -113,6 +113,11 @@ def build_crawl_executor(dsn: str, proxy_pool_url: str):
             from .crawler.delisted import DelistedClient
             direct = httpx_async_client(timeout=30.0)
             client = DelistedClient(rate=rate, http=direct)
+            with psycopg.connect(dsn) as conn:  # 历史 delisted 源迁回 sina（幂等）
+                n = store.migrate_delisted_source(conn)
+                conn.commit()
+                if n:
+                    print(f"[migrate] {n} 行 source delisted → sina")
         else:
             direct = httpx_async_client(timeout=15.0)
             pool = httpx_async_client(base_url=proxy_pool_url, timeout=5.0)

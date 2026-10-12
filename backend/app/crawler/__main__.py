@@ -121,6 +121,10 @@ async def amain(args) -> int:
 
         with psycopg.connect(config.DATABASE_URL) as conn:
             store.init_schema(conn)
+            if args.source == "delisted":
+                n = store.migrate_delisted_source(conn)
+                if n:
+                    print(f"[migrate] {n} 行 source delisted → sina")
             store.upsert_stock_basic(conn, stocks)
             conn.commit()
             runner = CrawlRunner(

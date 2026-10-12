@@ -17,11 +17,12 @@ ROW = ("2026-09-29", 9.15, 9.18, 9.25, 9.09, 805097, 739740988.0, 1.75, 0.22, 0.
 
 
 class FakeBars:
-    def __init__(self, code, rows):
+    def __init__(self, code, rows, source=None):
         self.code = code
         self.name = "fake"
         self.dktotal = len(rows)
         self.rows = rows
+        self.source = source   # None = 客户端未声明，落库回退任务源
 
 
 class FakeClient:
@@ -314,3 +315,25 @@ class FakeClientProxy:
 
     async def fetch_daily_bars(self, market, code, *, beg="0", **kw):
         return await self._fetch(market, code, beg=beg, **kw)
+
+
+class TestClientDeclaredSourceWins:
+    """回归：退市补爬任务源是 delisted，但数据来自新浪通道——落库 source
+    以客户端声明为准（详情页按源过滤才可见）。"""
+
+    def test_bars_source_overrides_task_source(self):
+        class SinaSourceClient(FakeClient):
+            async def fetch_daily_bars(self, market, code, *, beg="0", **kw):
+                self.calls.append({"code": code})
+                await asyncio.sleep(0)
+                return FakeBars(code, [ROW], source="sina")
+
+        client, store = SinaSourceClient(), FakeStore()
+        summary = run(make_runner(client, store).run(STOCKS, source="delisted"))
+        assert summary.ok_stocks == 3
+        assert store.sources == ["sina", "sina", "sina"]
+
+    def test_falls_back_to_task_source_when_unspecified(self):
+        client, store = FakeClient(), FakeStore()
+        run(make_runner(client, store).run(STOCKS, source="eastmoney"))
+        assert store.sources == ["eastmoney"] * 3
