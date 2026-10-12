@@ -128,7 +128,7 @@ def fetch_stock_bars(dsn: str, code: str, *, limit: int = 250, offset: int = 0,
     offset = max(0, offset)
     source = source.strip().lower()
     sql = (_BARS_SQL.replace("{src_clause}", "AND source = %s")
-           if source else _BARS_SQL.replace("{src_clause}", "true"))
+           if source else _BARS_SQL.replace("{src_clause}", "AND true"))
     params = ((code, source, limit, offset) if source
               else (code, limit, offset))
 

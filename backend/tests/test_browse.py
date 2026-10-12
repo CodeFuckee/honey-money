@@ -122,11 +122,15 @@ class TestBarsSourceFilter:
         assert body["bars"][0]["source"] == "sina"
 
     def test_no_source_keeps_legacy_no_filter(self):
-        """source 缺省（空）：不过滤，兼容旧行为，参数不含 source。"""
+        """source 缺省（空）：不过滤，兼容旧行为，参数不含 source。
+        回归：无 source 填充曾是裸 `true`（拼出 `WHERE code = %s true`
+        语法错误，FakeConn 不校验语法故单测长期假阳性）。"""
         body, conn = self._fetch()
         sql, params = conn.cursor_obj.executed[0]
         assert "source = %s" not in sql
         assert params == ("600519", 250, 0)
+        assert "= %s true" not in sql.replace("AND true", "")  # 无裸 true 碎片
+        assert "AND true" in sql                               # 合法占位
 
     def test_rows_include_outstanding_share(self):
         """SELECT 补 outstanding_share（新浪专有），行 dict 含该键。"""
