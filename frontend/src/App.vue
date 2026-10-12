@@ -158,7 +158,7 @@ function openCreate() {
 function openEdit(t) {
   taskError.value = ''
   taskDialog.value = { mode: 'edit', id: t.id, name: t.name, source: t.source,
-                       taskMode: t.mode, schedule_time: t.schedule_time }
+                       taskMode: t.mode, schedule_time: t.schedule_time || '18:00' }
 }
 async function saveTask() {
   const d = taskDialog.value
@@ -1339,7 +1339,7 @@ onMounted(refresh)
                     <div class="task-tags">
                       <span class="chip" :class="t.source === 'eastmoney' ? 'ef' : 'sina'">{{ sourceLabel(t.source) }}源</span>
                       <span class="chip mode">{{ modeLabel(t.mode) }}</span>
-                      <span class="chip time">每日 {{ t.schedule_time }}</span>
+                      <span class="chip time">{{ t.schedule_time ? '每日 ' + t.schedule_time : '手动' }}</span>
                       <span class="phase-badge"><span class="pdot" :class="phaseInfo(t)[1]"></span>{{ phaseInfo(t)[0] }}</span>
                     </div>
                   </div>

@@ -43,14 +43,17 @@ def create_app(*, scheduler: TaskScheduler | None = None,
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        try:
-            with connect(config.DATABASE_URL) as conn:
-                Store().init_schema(conn)          # 含 crawl_run 任务关联列
-                task_store.init_schema(conn)       # crawl_task + 预置任务
-                backtest_full.ensure_schema(conn)  # 全量回测双表
-                conn.commit()                      # 建表先提交（下面的标记走独立连接）
-        except Exception as exc:                   # PG 暂不可达：服务照常起，
-            print(f"[startup] 任务表初始化失败（调度扫描会重试）: {exc}")
+        # 三个初始化各自独立事务/失败域：一个挂不回滚其他
+        # （教训：任务 seed 曾与建表同事务，NULL 违约连带回滚新表）
+        for name, init in (("基础表", Store().init_schema),
+                           ("任务表", task_store.init_schema),
+                           ("全量回测表", backtest_full.ensure_schema)):
+            try:
+                with connect(config.DATABASE_URL) as conn:
+                    init(conn)
+                    conn.commit()
+            except Exception as exc:               # PG 暂不可达：服务照常起
+                print(f"[startup] {name}初始化失败（不影响其他表）: {exc}")
         try:
             # 重启恢复：遗留 running 标 interrupted（须在建表提交后执行，
             # 否则第二连接看不到未提交的新表并使整个初始化回滚）

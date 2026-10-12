@@ -69,6 +69,9 @@ class TaskStore:
     def init_schema(self, conn) -> None:
         with conn.cursor() as cur:
             cur.execute(_DDL_TASK)
+            # 手动任务无调度时刻：列放宽为可空（退市股历史补爬 2026-10-11）
+            cur.execute("ALTER TABLE crawl_task "
+                        "ALTER COLUMN schedule_time DROP NOT NULL")
             cur.execute(_SEED, ("新浪每日增量", "sina", "incremental", "18:00", False))
             # 预置手动任务（按名字幂等）：退市名单变化慢，季度手动触发一次即可
             cur.execute(

@@ -48,8 +48,8 @@ def next_run_at(task: dict, now: dt.datetime, *, ran_today: bool) -> dt.datetime
 
     已过今日计划点或今日已计划执行 → 明天同一时刻；否则今晚。
     """
-    if not task["enabled"]:
-        return None
+    if not task["enabled"] or not task["schedule_time"]:
+        return None                      # 禁用 / 纯手动任务不参与排程
     hh, mm = task["schedule_time"].split(":")
     due = now.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
     if due > now and not ran_today:
