@@ -201,6 +201,16 @@
   （搜索 480 / 行情表 / K线图占位条 160）。
 
 ### Fixed
+- **退市股补爬真机三连修**：① 任务页预置手动任务的 `NULL` 调度时间违反
+  `schedule_time` NOT NULL——连带同事务的建表回滚（同款坑第二次），列放宽
+  可空 + lifespan 三个初始化各自独立失败域；② 详情页 bars 无 source 分支
+  拼出 `WHERE code = %s true` 语法错误（前端恒带 source 从未踩到，探针裸调
+  暴露）；③ 退市补爬按任务源把 140 万行存成 `source='delisted'`（数据本来自
+  新浪，按源过滤查不到）——落库改尊重客户端声明 + 历史源幂等迁移；
+- **退市股尾部无价致 trade_stats float(None) 崩**：尾部 NaN 列的未平仓
+  交易浮动盈亏为 null（JSON 安全约定的合法产物），统计时 `float(None)` 崩
+  （在市股最后一行是真实价格从不触发；单股路径索引无尾部 NaN 也不触发）。
+  未平仓盈亏不计入胜率/盈亏比，交易次数按全部交易计；引擎级回归 1 条；
 - **全量回测逐股回测每股必挂（真机验证暴露）**：`_run_one_stock` 的
   `(bars.get("close") or {}).columns` 对 close **DataFrame** 求真值 →
   `ValueError: The truth value of a DataFrame is ambiguous`——生产首跑
