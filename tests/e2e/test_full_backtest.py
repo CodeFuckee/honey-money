@@ -29,6 +29,10 @@ RUN_RUNNING = {**RUN_DONE, "status": "running", "done": 1, "failed": 0,
                "stats": None, "finished_at": None}
 RUN_CANCELED = {**RUN_DONE, "status": "canceled", "done": 2, "failed": 0,
                 "stats": None, "finished_at": "2026-10-11T10:02:00"}
+RUN_RUNNING_LIVE = {**RUN_DONE, "status": "running", "done": 2, "failed": 0,
+                    "stats": {"count": 2, "positive_pct": 1.0,
+                              "median_return": 0.15, "beat_buyhold_pct": 1.0},
+                    "finished_at": None}
 RUN_OLD = {**RUN_DONE, "id": 6, "strategy": "donchian", "failed": 0,
            "stats": {"count": 3, "positive_pct": 1.0,
                      "median_return": 0.30, "beat_buyhold_pct": 0.66}}
@@ -46,6 +50,8 @@ ROWS = {"total": 53, "rows": [
      "total_return": None, "annual_return": None, "max_drawdown": None,
      "sharpe": None, "win_rate": None, "trades": None,
      "buyhold_return": None, "reason": "区间内无行情数据"}]}
+
+ROWS_1 = {"total": 1, "rows": [ROWS["rows"][0]]}
 
 CURVES = {"curves": [
     {"code": "600519", "name": "贵州茅台", "total_return": 0.26,
@@ -78,7 +84,12 @@ def full_api(page):
         if re.search(r"/api/backtest/full/runs/\d+/rows", url):
             calls.append({"kind": "rows", "url": url})
             rid = int(re.search(r"/runs/(\d+)/rows", url).group(1))
-            fulfill_json(holder["rows"].get(rid, ROWS))
+            seq = (holder.get("rows_seq") or {}).get(rid)
+            if seq:
+                body = seq.pop(0) if len(seq) > 1 else seq[0]
+            else:
+                body = holder["rows"].get(rid, ROWS)
+            fulfill_json(body)
             return
         if re.search(r"/api/backtest/full/runs/\d+/top", url):
             fulfill_json(holder["curves"])
@@ -249,3 +260,30 @@ class TestFullBacktest:
         page.locator(".learn-mode-btn", has_text="单股").click()
         expect(page.locator(".learn-ac")).to_be_visible()
         expect(page.get_by_role("button", name="跑回测")).to_be_visible()
+
+    def test_e2e_009_live_incremental_display(self, servers, page, full_api):
+        """P0 运行中逐股实时上屏：排行表随轮询增长、统计卡实时部分统计、
+        结果区标注「实时更新」；完成后切终值（节流 Top20 由前端节流逻辑保证）。"""
+        _, holder = full_api
+        _, frontend_port = servers
+        # 运行列表首项即运行中任务：进页自动接续轮询（运行中实时上屏的真实入口）
+        holder["runs"] = [RUN_RUNNING_LIVE, RUN_OLD]
+        holder["details"][7] = [RUN_RUNNING_LIVE, RUN_RUNNING_LIVE,
+                                RUN_RUNNING_LIVE, RUN_DONE]
+        holder["rows_seq"] = {7: [ROWS_1, ROWS_1, ROWS_1, ROWS]}
+        open_learn(page, frontend_port)
+        goto_full_mode(page)
+        # running 阶段：1 行即上屏 + 统计卡部分值 + 实时更新标注
+        expect(page.locator(".learn-full-cmp tbody tr")
+               ).to_have_count(1, timeout=10000)
+        expect(page.locator(".learn-metrics .lm", has_text="正收益占比")
+               ).to_contain_text("100.0%")
+        expect(page.locator(".result-head .card-hint")
+               ).to_contain_text("实时更新")
+        # 轮询后行数增长（1 → 3），完成态统计切终值、hint 回常规
+        expect(page.locator(".learn-full-cmp tbody tr")
+               ).to_have_count(3, timeout=15000)
+        expect(page.locator(".learn-metrics .lm", has_text="正收益占比")
+               ).to_contain_text("50.0%", timeout=15000)
+        expect(page.locator(".result-head .card-hint")
+               ).to_contain_text("Top 20")

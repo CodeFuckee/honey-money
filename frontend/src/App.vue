@@ -396,11 +396,15 @@ const codeFieldLabel = computed(() => learnIsMomentum.value
 const resultTitle = computed(() => ({
   single: '单股回测结果', batch: '批量对比', full: '全市场回测结果',
 }[learnMode.value]))
-const resultHint = computed(() => ({
-  single: '收益对照买入持有',
-  batch: '按总收益降序 · 失败股标注原因',
-  full: 'Top 20 叠加 · 全量排行可导出',
-}[learnMode.value]))
+const resultHint = computed(() => {
+  if (learnMode.value === 'full' && fullRunning.value)
+    return `已统计 ${fullRun.value?.done ?? 0} 只 · 实时更新`
+  return {
+    single: '收益对照买入持有',
+    batch: '按总收益降序 · 失败股标注原因',
+    full: 'Top 20 叠加 · 全量排行可导出',
+  }[learnMode.value]
+})
 const loadingText = computed(() => learnMode.value === 'full'
   ? '全市场任务执行中…'
   : learnMode.value === 'batch' ? '批量回测中…' : '回测中…')
@@ -414,11 +418,14 @@ const emptyDetail = computed(() => ({
   batch: '每股独立回测（含复权因子懒加载），完成后生成对比表与叠加净值图',
   full: '历史任务可用上方下拉回看',
 }[learnMode.value]))
-const resultLoading = computed(() => learnMode.value === 'full'
-  ? fullStarting.value || fullRunning.value
-  : learnLoading.value)
+const resultLoading = computed(() => {
+  if (learnMode.value === 'full')
+    return fullStarting.value || (fullRunning.value
+      && (fullRun.value?.done ?? 0) === 0)   // 首只完成前骨架，之后实时结果上屏
+  return learnLoading.value
+})
 const resultEmpty = computed(() => {
-  if (learnMode.value === 'full') return !fullViewable.value
+  if (learnMode.value === 'full') return !fullResultsVisible.value
   if (learnMode.value === 'batch')
     return !(batchResults.value.length || batchFailed.value.length)
   return !learnResult.value
@@ -598,6 +605,9 @@ const fullRunning = computed(() =>
 const fullViewable = computed(() =>
   ['done', 'canceled'].includes(fullRun.value?.status)
   && (fullRun.value?.done ?? 0) > 0)
+// 运行中逐股实时上屏：已有完成股即渲染结果区（排行表/统计/Top20 增量刷新）
+const fullResultsVisible = computed(() =>
+  fullViewable.value || (fullRunning.value && (fullRun.value?.done ?? 0) > 0))
 const fullPages = computed(() =>
   Math.max(1, Math.ceil((fullRows.value.total || 0) / FULL_PAGE_SIZE)))
 const fullExportUrl = computed(() =>
@@ -677,21 +687,40 @@ async function startFullRun() {
     fullRun.value = { id: fullRunId.value, status: 'running' }
     fullRows.value = { total: 0, rows: [] }
     fullCurves.value = []
+    lastTopDone = 0
+    lastTopAt = 0
     startFullPoll()
     loadFullRuns()                               // 刷新历史列表
   } catch (e) { fullError.value = String(e) }
   finally { fullStarting.value = false }
 }
 
+let lastTopDone = 0
+let lastTopAt = 0
+
+function maybeRefreshTop() {
+  // Top20 现算 20 只回测，节流：每新增 ≥25 只或每 30 秒重算一次
+  const done = fullRun.value?.done ?? 0
+  const now = Date.now()
+  if (done > 0 && (done - lastTopDone >= 25 || now - lastTopAt >= 30000)) {
+    lastTopDone = done
+    lastTopAt = now
+    loadFullCurves()
+  }
+}
+
 function startFullPoll() {
   stopFullPoll()
   fullPollTimer = setInterval(async () => {
-    await loadFullRun(fullRunning.value === false)
-    if (!fullRunning.value) {
-      stopFullPoll()
-      if (fullViewable.value) await Promise.all([loadFullRows(), loadFullCurves()])
-      loadFullRuns()
+    await loadFullRun()                        // 详情（running 态带实时统计）
+    if (fullRunning.value) {
+      if ((fullRun.value?.done ?? 0) > 0) await loadFullRows()   // 排行表实时增长
+      maybeRefreshTop()
+      return
     }
+    stopFullPoll()
+    if (fullViewable.value) await Promise.all([loadFullRows(), loadFullCurves()])
+    loadFullRuns()
   }, 2000)
 }
 

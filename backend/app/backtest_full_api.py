@@ -68,6 +68,9 @@ def register_full_backtest_routes(app: FastAPI) -> None:
         run = bf.get_run(run_id)
         if run is None:
             raise HTTPException(404, "任务不存在")
+        # 运行中实时部分统计（逐股上屏的统计卡数据源；完成态用落库终值）
+        if run["status"] == "running" and run.get("stats") is None:
+            run["stats"] = bf.compute_stats(bf.ok_rows(run_id))
         return run
 
     @app.get("/api/backtest/full/runs/{run_id}/rows")

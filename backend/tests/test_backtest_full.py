@@ -144,6 +144,7 @@ def client(monkeypatch):
     monkeypatch.setattr(bf, "start_run_job",
                         lambda run_id, spec: started.append((run_id, spec)))
     monkeypatch.setattr(bf, "list_runs", lambda: [dict(RUN)])
+    monkeypatch.setattr(bf, "ok_rows", lambda rid: [])
     monkeypatch.setattr(bf, "get_run", lambda rid: dict(RUN) if rid == 7 else None)
     monkeypatch.setattr(bf, "request_cancel", lambda rid: rid == 7)
 
@@ -191,6 +192,30 @@ class TestFullBacktestApi:
         detail = client.get("/api/backtest/full/runs/7").json()
         assert detail["done"] == 40 and detail["total"] == 100
         assert client.get("/api/backtest/full/runs/999").status_code == 404
+
+    def test_run_detail_live_stats_when_running(self, client, monkeypatch):
+        """运行中详情实时返回部分统计（逐股上屏的统计卡数据源）。"""
+        monkeypatch.setattr(bf, "ok_rows", lambda rid: [
+            {"status": "ok", "total_return": 0.10, "buyhold_return": 0.05},
+            {"status": "ok", "total_return": -0.20, "buyhold_return": 0.05},
+            {"status": "ok", "total_return": 0.30, "buyhold_return": 0.30},
+        ])
+        detail = client.get("/api/backtest/full/runs/7").json()
+        assert detail["status"] == "running"
+        assert detail["stats"]["count"] == 3
+        assert detail["stats"]["beat_buyhold_pct"] == pytest.approx(1 / 3)
+
+    def test_run_detail_done_uses_stored_stats(self, client, monkeypatch):
+        """完成态用落库 stats，不再实时重算。"""
+        stored = {**RUN, "status": "done",
+                  "stats": {"count": 99, "positive_pct": 0.5,
+                            "median_return": 0.1, "beat_buyhold_pct": 0.6}}
+        monkeypatch.setattr(bf, "get_run", lambda rid: stored)
+        monkeypatch.setattr(
+            bf, "ok_rows",
+            lambda rid: pytest.fail("done 态不应实时重算"))
+        detail = client.get("/api/backtest/full/runs/7").json()
+        assert detail["stats"]["count"] == 99
 
     def test_cancel(self, client):
         assert client.post("/api/backtest/full/runs/7/cancel").json()["ok"]
