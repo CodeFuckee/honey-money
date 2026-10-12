@@ -24,6 +24,13 @@
     顺带修复图表容器在 loading 骨架期间不挂载导致图表初始化扑空。
 
 ### Added
+- **前端子路由 + URL 参数（刷新/分享恢复页面与参数）**：手写 History API
+  路由（单组件架构不引 vue-router）——路径 ↔ 页面（/learn /stock /data/
+  /data/sina /data/eastmoney /tasks /backtest，未知路径回仪表盘），查询串 ↔
+  参数（教学页全套 strategy/mode/codes/pa/fst/mbars/adj/incd 等 + 个股详情
+  code/adjust/source + 数据浏览 q/page）；导航点击 pushState、参数变化防抖
+  replaceState 不灌历史、前进/后退恢复；nginx/vite preview 均有 SPA 回退，
+  深链接刷新可用。E2E 新增 5 条，全套 47 全绿。
 - **全市场回测结果逐股实时上屏**：运行期间结果区从「完成后一次性展示」改为
   增量渲染——排行表随 2s 轮询实时增长（排序/翻页可用）、统计卡实时滚动并在
   标题旁标注「已统计 N 只 · 实时更新」、Top20 叠加图节流重算（每新增 ≥25 只
