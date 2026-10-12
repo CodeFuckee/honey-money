@@ -198,3 +198,21 @@ class TestAdjustedBacktest:
             f"交易价应换算回真实价: {t}"
         assert r["metrics"]["total_return"] == pytest.approx(
             102.0 / 98.0 - 1, abs=0.005)
+
+
+class TestDelistedTrailingNan:
+    """退市股列尾部 NaN（2002 年后无价）：未平仓交易 pnl 为 null——
+    trade_stats 不得 float(None) 崩（生产全量回测真机暴露）。"""
+
+    def test_trailing_nan_column_buy_hold(self):
+        idx = pd.date_range("1991-01-14", periods=300, freq="B")
+        vals = np.full(300, np.nan)
+        vals[:100] = np.linspace(5, 6, 100)
+        bars = {k: pd.DataFrame({"000003": vals}, index=idx) for k in
+                ("open", "high", "low", "close", "volume")}
+        r = run_backtest(bars, target=pd.Series(1.0, index=idx),
+                         exec_mode="next_open", factors=None)
+        assert r["metrics"]["trades"] >= 1    # 次数含未平仓；盈亏统计只算可计算的
+        assert r["metrics"]["total_return"] is not None
+        # 未平仓交易：pnl_pct 序列化为 null（JSON 安全），保留在明细里
+        assert any(t.get("pnl_pct") is None for t in r["trades"])

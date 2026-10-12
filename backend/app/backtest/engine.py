@@ -168,7 +168,8 @@ def run_backtest(bars: dict, *, entries=None, exits=None, target=None, weights=N
 
     metrics = perf_metrics(net)
     metrics.update(trade_stats(
-        (t["pnl_pct"] for t in trades if "pnl_pct" in t)))
+        (t["pnl_pct"] for t in trades if t.get("pnl_pct") is not None)))
+    metrics["trades"] = len(trades)   # 次数按全部交易计（未平仓 pnl 为 null 不入盈亏）
     return {"metrics": metrics, "equity": equity, "drawdown": drawdown,
             "trades": trades, "gap_dates": detect_gap_dates(open_, close)}
 

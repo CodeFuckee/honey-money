@@ -42,8 +42,12 @@ def perf_metrics(net: pd.Series) -> dict:
 
 
 def trade_stats(pnls) -> dict:
-    """按平仓交易收益序列统计胜率与盈亏比（无亏损交易时不返回 inf）。"""
-    pnls = [float(p) for p in pnls]
+    """按平仓交易收益序列统计胜率与盈亏比（无亏损交易时不返回 inf）。
+
+    None 为未平仓交易的浮动盈亏（JSON null；退市股尾部无价时 vectorbt
+    算不出）——不计入统计，否则 float(None) 崩。
+    """
+    pnls = [float(p) for p in pnls if p is not None]
     wins = [p for p in pnls if p > 0]
     losses = [abs(p) for p in pnls if p < 0]
     avg_win = sum(wins) / len(wins) if wins else 0.0
