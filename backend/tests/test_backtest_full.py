@@ -499,3 +499,60 @@ class TestExecuteRun:
         asyncio.run(bf.execute_run(7, {"strategy": "ma_cross", "range": "3y"}))
         status, stats, error = rec["final"][0]
         assert status == "failed" and "PG 不可达" in error
+
+
+class TestRowsOkRowsIntegration:
+    """真实 get_rows → ok_rows 函数链（不 mock 函数，只假连接）：
+    两处并发演进曾签名分裂（ok_rows 不收 delisted → 生产 500）。"""
+
+    class FakeCur:
+        def __init__(self, executed):
+            self.executed = executed
+            self.rows = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def execute(self, q, p=None):
+            self.executed.append(q)
+            return self
+
+        def fetchone(self):
+            return (0,)
+
+        def fetchall(self):
+            return []
+
+        def __iter__(self):
+            return iter([])
+
+    class FakeConn:
+        def __init__(self, executed):
+            self.executed = executed
+
+        def cursor(self):
+            return TestRowsOkRowsIntegration.FakeCur(self.executed)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def test_get_rows_delisted_only_flows_to_ok_rows(self, monkeypatch):
+        executed = []
+        monkeypatch.setattr(bf, "_connect", lambda: self.FakeConn(executed))
+        bf.get_rows(7, delisted="only")
+        ok_sql = executed[-1]                      # get_rows 末尾调 ok_rows
+        assert "COALESCE(b.delisted, FALSE) = TRUE" in ok_sql
+
+    def test_get_rows_all_has_no_group_filter(self, monkeypatch):
+        executed = []
+        monkeypatch.setattr(bf, "_connect", lambda: self.FakeConn(executed))
+        bf.get_rows(7)
+        ok_sql = executed[-1]
+        assert "delisted, FALSE) = TRUE" not in ok_sql
+        assert "delisted, FALSE) = FALSE" not in ok_sql

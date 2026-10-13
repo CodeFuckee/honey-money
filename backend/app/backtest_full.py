@@ -328,15 +328,19 @@ def get_rows(run_id: int, sort: str = "total_return", desc: bool = True,
             "stats": compute_stats(ok_rows(run_id, delisted))}
 
 
-def ok_rows(run_id: int) -> list[dict]:
-    """统计用的成功行（收益两列 + 退市标记，退市股单独总结用）。"""
+def ok_rows(run_id: int, delisted: str = "all") -> list[dict]:
+    """统计用的成功行（收益两列 + 退市标记），支持退市股分组口径
+    （get_rows 的分组统计与本函数必须同参——两处并发演进曾签名分裂）。"""
+    delist_where = {"only": " AND COALESCE(b.delisted, FALSE) = TRUE",
+                    "exclude": " AND COALESCE(b.delisted, FALSE) = FALSE"
+                    }.get(delisted, "")
     with _connect() as conn:
         rows = conn.cursor().execute(
             "SELECT r.status, r.total_return, r.buyhold_return,"
             " COALESCE(b.delisted, FALSE)"
             " FROM backtest_full_row r"
             " LEFT JOIN stock_basic b ON b.code = r.code"
-            " WHERE r.run_id=%s", (run_id,)).fetchall()
+            " WHERE r.run_id=%s" + delist_where, (run_id,)).fetchall()
     return [{"status": r[0], "total_return": r[1], "buyhold_return": r[2],
              "delisted": bool(r[3])} for r in rows]
 
