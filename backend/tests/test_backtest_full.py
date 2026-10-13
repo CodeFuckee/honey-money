@@ -205,17 +205,23 @@ class TestFullBacktestApi:
         assert detail["stats"]["count"] == 3
         assert detail["stats"]["beat_buyhold_pct"] == pytest.approx(1 / 3)
 
-    def test_run_detail_done_uses_stored_stats(self, client, monkeypatch):
-        """完成态用落库 stats，不再实时重算。"""
+    def test_run_detail_done_recomputes_stats(self, client, monkeypatch):
+        """完成态也动态重算：历史 run 落库的是旧形状 stats（无 best/worst/
+        delisted），重算让新旧 run 统一为新形状（重算仅毫秒级）。"""
         stored = {**RUN, "status": "done",
                   "stats": {"count": 99, "positive_pct": 0.5,
                             "median_return": 0.1, "beat_buyhold_pct": 0.6}}
         monkeypatch.setattr(bf, "get_run", lambda rid: stored)
-        monkeypatch.setattr(
-            bf, "ok_rows",
-            lambda rid: pytest.fail("done 态不应实时重算"))
+        monkeypatch.setattr(bf, "ok_rows", lambda rid: [
+            {"status": "ok", "total_return": 0.3, "buyhold_return": 0.1,
+             "delisted": True},
+            {"status": "ok", "total_return": -0.2, "buyhold_return": -0.05,
+             "delisted": False},
+        ])
         detail = client.get("/api/backtest/full/runs/7").json()
-        assert detail["stats"]["count"] == 99
+        assert detail["stats"]["count"] == 2
+        assert detail["stats"]["best_return"] == 0.3
+        assert detail["stats"]["delisted"]["count"] == 1
 
     def test_cancel(self, client):
         assert client.post("/api/backtest/full/runs/7/cancel").json()["ok"]

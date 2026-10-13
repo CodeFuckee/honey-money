@@ -69,8 +69,13 @@ def register_full_backtest_routes(app: FastAPI) -> None:
         if run is None:
             raise HTTPException(404, "任务不存在")
         # 运行中实时部分统计（逐股上屏的统计卡数据源；完成态用落库终值）
-        if run["status"] == "running" and run.get("stats") is None:
-            run["stats"] = bf.compute_stats(bf.ok_rows(run_id))
+        # 统计一律动态重算：run 15 等历史 run 落库的是旧形状（无 best/worst/
+        # delisted），落库缓存反而制造新旧形状分裂；重算仅毫秒级（两列聚合）。
+        if run["status"] in ("running", "done") and run["status"] != "failed":
+            try:
+                run["stats"] = bf.compute_stats(bf.ok_rows(run_id)) or run.get("stats")
+            except Exception:
+                pass
         return run
 
     @app.get("/api/backtest/full/runs/{run_id}/rows")
