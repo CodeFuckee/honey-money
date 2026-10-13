@@ -100,23 +100,37 @@ def filter_universe(stocks: list[dict], bars_counts: dict, *,
 
 
 def compute_stats(rows: list[dict]) -> dict | None:
-    """统计卡四项：参与数 / 正收益占比 / 总收益中位数 / 跑赢买入持有占比。"""
+    """统计卡：参与数 / 正收益占比 / 总收益中位数 / 跑赢买入持有占比
+    + 最好/最差收益 + 退市股单独总结（修幸存者偏差视角的对照组）。"""
     ok = [r for r in rows
           if r.get("status") == "ok" and r.get("total_return") is not None]
     if not ok:
         return None
-    rets = sorted(r["total_return"] for r in ok)
-    n = len(rets)
-    median = rets[n // 2] if n % 2 else (rets[n // 2 - 1] + rets[n // 2]) / 2
-    beat = [r for r in ok if r.get("buyhold_return") is not None]
-    return {
-        "count": n,
-        "positive_pct": sum(1 for x in rets if x > 0) / n,
-        "median_return": median,
-        "beat_buyhold_pct": (sum(1 for r in beat
-                                 if r["total_return"] > r["buyhold_return"])
-                             / len(beat)) if beat else None,
-    }
+
+    def _group_stats(sub: list[dict]) -> dict | None:
+        if not sub:
+            return None
+        rets = sorted(r["total_return"] for r in sub)
+        n = len(rets)
+        median = rets[n // 2] if n % 2 else (rets[n // 2 - 1] + rets[n // 2]) / 2
+        beat = [r for r in sub if r.get("buyhold_return") is not None]
+        return {
+            "count": n,
+            "positive_pct": sum(1 for x in rets if x > 0) / n,
+            "median_return": median,
+            "best_return": rets[-1],
+            "worst_return": rets[0],
+            "beat_buyhold_pct": (sum(1 for r in beat
+                                     if r["total_return"] > r["buyhold_return"])
+                                 / len(beat)) if beat else None,
+        }
+
+    overall = _group_stats(ok)
+    delisted_rows = [r for r in ok if r.get("delisted")]
+    overall["delisted"] = _group_stats(delisted_rows)
+    overall["delisted_failed"] = sum(
+        1 for r in rows if r.get("delisted") and r.get("status") != "ok")
+    return overall
 
 
 def row_from_result(code: str, name: str, result: dict) -> dict:
@@ -302,13 +316,16 @@ def get_rows(run_id: int, sort: str = "total_return", desc: bool = True,
 
 
 def ok_rows(run_id: int) -> list[dict]:
-    """统计用的成功行（仅取两个收益列）。"""
+    """统计用的成功行（收益两列 + 退市标记，退市股单独总结用）。"""
     with _connect() as conn:
         rows = conn.cursor().execute(
-            "SELECT status, total_return, buyhold_return"
-            " FROM backtest_full_row WHERE run_id=%s", (run_id,)).fetchall()
-    return [{"status": r[0], "total_return": r[1], "buyhold_return": r[2]}
-            for r in rows]
+            "SELECT r.status, r.total_return, r.buyhold_return,"
+            " COALESCE(b.delisted, FALSE)"
+            " FROM backtest_full_row r"
+            " LEFT JOIN stock_basic b ON b.code = r.code"
+            " WHERE r.run_id=%s", (run_id,)).fetchall()
+    return [{"status": r[0], "total_return": r[1], "buyhold_return": r[2],
+             "delisted": bool(r[3])} for r in rows]
 
 
 def top_codes(run_id: int, n: int) -> list[dict]:

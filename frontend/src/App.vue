@@ -1859,7 +1859,21 @@ watch(
                       <div class="card lm"><div class="lm-k">参与股票</div><div class="lm-v">{{ fullRun.stats?.count ?? 0 }}</div></div>
                       <div class="card lm"><div class="lm-k">正收益占比</div><div class="lm-v">{{ fullRun.stats ? ((fullRun.stats.positive_pct ?? 0) * 100).toFixed(1) + '%' : '—' }}</div></div>
                       <div class="card lm"><div class="lm-k">总收益中位数</div><div class="lm-v">{{ fullRun.stats?.median_return != null ? fmtPctSigned(fullRun.stats.median_return) : '—' }}</div></div>
+                      <div class="card lm"><div class="lm-k">最好收益</div><div class="lm-v chg-up">{{ fullRun.stats?.best_return != null ? fmtPctSigned(fullRun.stats.best_return) : '—' }}</div></div>
+                      <div class="card lm"><div class="lm-k">最差收益</div><div class="lm-v chg-down">{{ fullRun.stats?.worst_return != null ? fmtPctSigned(fullRun.stats.worst_return) : '—' }}</div></div>
                       <div class="card lm"><div class="lm-k">跑赢买入持有</div><div class="lm-v">{{ fullRun.stats?.beat_buyhold_pct != null ? ((fullRun.stats.beat_buyhold_pct) * 100).toFixed(1) + '%' : '—' }}</div></div>
+                    </div>
+                    <!-- 退市股单独总结：修幸存者偏差的对照组 -->
+                    <div v-if="fullRun.stats?.delisted" class="card delisted-note">
+                      <b>退市股单独总结（{{ fullRun.stats.delisted.count }} 只）：</b>
+                      中位收益 {{ fmtPctSigned(fullRun.stats.delisted.median_return) }} ·
+                      最好 {{ fmtPctSigned(fullRun.stats.delisted.best_return) }} ·
+                      最差 {{ fmtPctSigned(fullRun.stats.delisted.worst_return) }} ·
+                      正收益占比 {{ ((fullRun.stats.delisted.positive_pct ?? 0) * 100).toFixed(1) }}%<template v-if="fullRun.stats.delisted_failed > 0"> · 另有 {{ fullRun.stats.delisted_failed }} 只回测失败</template>。
+                      退市股通常大幅跑输在市股——这正是全市场回测必须包含退市股、以消除幸存者偏差的意义。
+                    </div>
+                    <div v-else-if="fullRun.stats" class="card delisted-note muted">
+                      本次回测样本中无退市股（或退市股全部失败未产出收益）。
                     </div>
                     <div class="card chart-card"><div ref="fullChartEl" class="learn-chart"></div>
                       <div class="detail" style="padding: 0 14px 10px">收益 Top 20 归一化净值叠加（策略净值，起点=1）</div></div>
@@ -2611,4 +2625,14 @@ body {
   .learn-grid { grid-template-columns: 1fr; }
   .learn-metrics { grid-template-columns: repeat(3, 1fr); }
 }
+
+/* 全量回测：最好/最差收益 + 退市股总结条 */
+.lm-v.chg-up { color: #da1e28; }
+.lm-v.chg-down { color: #198038; }
+.delisted-note {
+  margin-top: 12px; padding: 12px 16px; font-size: 13px; line-height: 1.7;
+  background: #fff8e6; border: 1px solid #f1c21b; border-radius: 2px;
+  color: #393939;
+}
+.delisted-note.muted { background: #f4f4f4; border-color: #e0e0e0; color: #525252; }
 </style>
