@@ -81,12 +81,15 @@ def register_full_backtest_routes(app: FastAPI) -> None:
     @app.get("/api/backtest/full/runs/{run_id}/rows")
     def full_run_rows(run_id: int, sort: str = "total_return",
                       desc: bool = True, page: int = 0,
-                      size: int = Query(default=50, ge=1, le=200)):
+                      size: int = Query(default=50, ge=1, le=200),
+                      delisted: str = Query(default="all")):
         if bf.get_run(run_id) is None:
             raise HTTPException(404, "任务不存在")
         if sort not in SORTABLE:
             sort = "total_return"
-        return bf.get_rows(run_id, sort, desc, page, size)
+        if delisted not in bf.DELISTED_MODES:
+            delisted = "all"
+        return bf.get_rows(run_id, sort, desc, page, size, delisted)
 
     @app.get("/api/backtest/full/runs/{run_id}/top")
     def full_run_top(run_id: int, n: int = Query(default=20, ge=1, le=100)):

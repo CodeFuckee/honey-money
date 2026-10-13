@@ -240,8 +240,10 @@ class TestRowsAndExportApi:
 
     @pytest.fixture
     def rows_client(self, client, monkeypatch):
-        monkeypatch.setattr(bf, "get_rows", lambda rid, sort, desc, page, size:
-                            {"total": 2, "rows": TestRowsAndExportApi.ROWS})
+        monkeypatch.setattr(bf, "get_rows",
+                            lambda rid, sort, desc, page, size, delisted="all":
+                            {"total": 2, "rows": TestRowsAndExportApi.ROWS,
+                             "stats": None})
         monkeypatch.setattr(bf, "export_csv", lambda rid:
                             "code,name,total_return\n600519,贵州茅台,0.26\n")
         return client
@@ -260,6 +262,35 @@ class TestRowsAndExportApi:
         assert r.headers["content-type"].startswith("text/csv")
         body = r.text.lstrip("\ufeff")             # BOM 供 Excel 直开，断言前剥掉
         assert "600519" in body and body.splitlines()[0].startswith("code,")
+
+    def test_rows_delisted_group_with_stats(self, client, monkeypatch):
+        """退市股分组：rows 接口 delisted=only 过滤透传 + 响应带该口径统计。"""
+        captured = {}
+
+        def fake_get_rows(rid, sort, desc, page, size, delisted="all"):
+            captured["delisted"] = delisted
+            return {"total": 1, "rows": [TestRowsAndExportApi.ROWS[1]],
+                    "stats": {"count": 1, "positive_pct": 0.0,
+                              "median_return": -0.9, "beat_buyhold_pct": 0.0}}
+
+        monkeypatch.setattr(bf, "get_rows", fake_get_rows)
+        body = client.get(
+            "/api/backtest/full/runs/7/rows?delisted=only").json()
+        assert captured["delisted"] == "only"
+        assert body["stats"]["count"] == 1
+        assert body["rows"][0]["code"] == "000001"
+
+    def test_rows_delisted_param_whitelist(self, client, monkeypatch):
+        """delisted 参数白名单：非法值回退 all。"""
+        captured = {}
+
+        def fake_get_rows(rid, sort, desc, page, size, delisted="all"):
+            captured["delisted"] = delisted
+            return {"total": 0, "rows": [], "stats": None}
+
+        monkeypatch.setattr(bf, "get_rows", fake_get_rows)
+        client.get("/api/backtest/full/runs/7/rows?delisted=bogus")
+        assert captured["delisted"] == "all"
 
 
 # ---------------------------------------------------------------- worker ----

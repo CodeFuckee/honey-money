@@ -288,31 +288,44 @@ def request_cancel(run_id: int) -> bool:
     return True
 
 
+DELISTED_MODES = ("all", "only", "exclude")     # 退市股分组过滤白名单
+
+
 def get_rows(run_id: int, sort: str = "total_return", desc: bool = True,
-             page: int = 0, size: int = 50) -> dict:
-    """明细分页（列名白名单防注入）。失败行排其后（按 code）。"""
+             page: int = 0, size: int = 50, delisted: str = "all") -> dict:
+    """明细分页（列名白名单防注入）+ 该口径的部分统计。
+
+    delisted：all=全部；only=仅退市股；exclude=仅在市股（join stock_basic）。
+    退市股总结区块与主排行表共用本接口，各自带口径统计。
+    """
     if sort not in SORTABLE:
         sort = "total_return"
     order = (f"{sort} DESC NULLS LAST" if desc
              else f"{sort} ASC NULLS LAST")
     if sort != "code":
         order += ", code ASC"
+    join = ("JOIN stock_basic s ON s.code = r.code"
+            if delisted in ("only", "exclude") else "")
+    delist_where = {"only": " AND s.delisted = TRUE",
+                    "exclude": " AND s.delisted = FALSE"}.get(delisted, "")
     with _connect() as conn:
-        total = conn.cursor().execute(
-            "SELECT count(*) FROM backtest_full_row WHERE run_id=%s",
-            (run_id,)).fetchone()[0]
-        rows = conn.cursor().execute(
-            f"""SELECT code, name, status, total_return, annual_return,
-                       max_drawdown, sharpe, win_rate, trades,
-                       buyhold_return, reason
-                FROM backtest_full_row WHERE run_id=%s
+        cur = conn.cursor()
+        total = cur.execute(
+            f"SELECT count(*) FROM backtest_full_row r {join} "
+            f"WHERE r.run_id=%s{delist_where}", (run_id,)).fetchone()[0]
+        rows = cur.execute(
+            f"""SELECT r.code, r.name, r.status, r.total_return,
+                       r.annual_return, r.max_drawdown, r.sharpe,
+                       r.win_rate, r.trades, r.buyhold_return, r.reason
+                FROM backtest_full_row r {join} WHERE r.run_id=%s{delist_where}
                 ORDER BY {order} LIMIT %s OFFSET %s""",
             (run_id, size, page * size)).fetchall()
     keys = ("code", "name", "status", "total_return", "annual_return",
             "max_drawdown", "sharpe", "win_rate", "trades", "buyhold_return",
             "reason")
     return {"total": total,
-            "rows": [dict(zip(keys, r)) for r in rows]}
+            "rows": [dict(zip(keys, r)) for r in rows],
+            "stats": compute_stats(ok_rows(run_id, delisted))}
 
 
 def ok_rows(run_id: int) -> list[dict]:

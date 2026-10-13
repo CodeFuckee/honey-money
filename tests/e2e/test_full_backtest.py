@@ -52,6 +52,17 @@ ROWS = {"total": 53, "rows": [
      "buyhold_return": None, "reason": "区间内无行情数据"}]}
 
 ROWS_1 = {"total": 1, "rows": [ROWS["rows"][0]]}
+DELIST_ROWS = {"total": 2, "rows": [
+    {"code": "000003", "name": "PT金田Ａ", "status": "ok",
+     "total_return": -0.6185, "annual_return": -0.09, "max_drawdown": 0.7,
+     "sharpe": -0.5, "win_rate": 0.3, "trades": 1,
+     "buyhold_return": -0.6185, "reason": None},
+    {"code": "000004", "name": "国华退", "status": "ok",
+     "total_return": -0.9681, "annual_return": -0.15, "max_drawdown": 0.95,
+     "sharpe": -0.8, "win_rate": 0.1, "trades": 1,
+     "buyhold_return": -0.9681, "reason": None}],
+    "stats": {"count": 2, "positive_pct": 0.0,
+              "median_return": -0.79, "beat_buyhold_pct": 0.5}}
 
 CURVES = {"curves": [
     {"code": "600519", "name": "贵州茅台", "total_return": 0.26,
@@ -89,6 +100,8 @@ def full_api(page):
                 body = seq.pop(0) if len(seq) > 1 else seq[0]
             else:
                 body = holder["rows"].get(rid, ROWS)
+            if "delisted=only" in url:
+                body = DELIST_ROWS
             fulfill_json(body)
             return
         if re.search(r"/api/backtest/full/runs/\d+/top", url):
@@ -155,9 +168,9 @@ class TestFullBacktest:
         holder["details"][7] = [RUN_RUNNING, RUN_DONE]   # 轮询序列：running→done
         expect(page.locator("[data-testid=full-status]")
                ).to_contain_text("已完成 1 / 3", timeout=10000)
-        expect(page.locator(".learn-metrics .lm", has_text="正收益占比")
+        expect(page.locator(".full-total-metrics .lm", has_text="正收益占比")
                ).to_contain_text("50.0%")
-        expect(page.locator(".learn-metrics .lm", has_text="跑赢买入持有")
+        expect(page.locator(".full-total-metrics .lm", has_text="跑赢买入持有")
                ).to_contain_text("100.0%")
         rows = page.locator(".learn-full-cmp tbody tr")
         expect(rows).to_have_count(3)
@@ -276,14 +289,23 @@ class TestFullBacktest:
         # running 阶段：1 行即上屏 + 统计卡部分值 + 实时更新标注
         expect(page.locator(".learn-full-cmp tbody tr")
                ).to_have_count(1, timeout=10000)
-        expect(page.locator(".learn-metrics .lm", has_text="正收益占比")
+        expect(page.locator(".full-total-metrics .lm", has_text="正收益占比")
                ).to_contain_text("100.0%")
-        expect(page.locator(".result-head .card-hint")
+        expect(page.locator(".result-frame > .result-head:not(.delist-head) .card-hint")
                ).to_contain_text("实时更新")
         # 轮询后行数增长（1 → 3），完成态统计切终值、hint 回常规
         expect(page.locator(".learn-full-cmp tbody tr")
                ).to_have_count(3, timeout=15000)
-        expect(page.locator(".learn-metrics .lm", has_text="正收益占比")
+        expect(page.locator(".full-total-metrics .lm", has_text="正收益占比")
                ).to_contain_text("50.0%", timeout=15000)
-        expect(page.locator(".result-head .card-hint")
+        expect(page.locator(".result-frame > .result-head:not(.delist-head) .card-hint")
                ).to_contain_text("Top 20")
+        # 退市股票总结区块：独立统计卡 + 退市排行表（样式与全市场结果一致）
+        expect(page.locator(".result-head .card-title", has_text="退市股票总结")
+               ).to_be_visible()
+        expect(page.locator(".delist-metrics .lm", has_text="退市股参与")
+               ).to_contain_text("2")
+        expect(page.locator(".delist-metrics .lm", has_text="正收益占比")
+               ).to_contain_text("0.0%")
+        expect(page.locator(".learn-delist-cmp tbody tr", has_text="PT金田Ａ")
+               ).to_contain_text("-61.9%")

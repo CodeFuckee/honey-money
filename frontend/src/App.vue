@@ -703,6 +703,11 @@ const fullRowsSort = ref('total_return')
 const fullRowsDesc = ref(true)
 const fullRowsPage = ref(0)
 const FULL_PAGE_SIZE = 50
+// 退市股总结（独立分组）：排行/分页/排序 + 该口径统计卡
+const delistRows = ref({ total: 0, rows: [], stats: null })
+const delistRowsSort = ref('total_return')
+const delistRowsDesc = ref(true)
+const delistRowsPage = ref(0)
 const fullCurves = ref([])            // Top-N 归一化净值曲线
 const fullChartEl = ref(null)
 let fullChart = null
@@ -762,6 +767,28 @@ async function loadFullRows() {
   } catch { fullRows.value = { total: 0, rows: [] } }
 }
 
+async function loadDelistRows() {
+  const q = new URLSearchParams({
+    sort: delistRowsSort.value, desc: String(delistRowsDesc.value),
+    page: String(delistRowsPage.value), size: String(FULL_PAGE_SIZE),
+    delisted: 'only',
+  })
+  try {
+    delistRows.value = await (await fetch(
+      `/api/backtest/full/runs/${fullRunId.value}/rows?${q}`)).json()
+  } catch { delistRows.value = { total: 0, rows: [], stats: null } }
+}
+
+function sortDelist(col) {
+  if (delistRowsSort.value === col) delistRowsDesc.value = !delistRowsDesc.value
+  else { delistRowsSort.value = col; delistRowsDesc.value = true }
+  delistRowsPage.value = 0
+  loadDelistRows()
+}
+
+const delistPages = computed(() =>
+  Math.max(1, Math.ceil((delistRows.value.total || 0) / FULL_PAGE_SIZE)))
+
 async function loadFullCurves() {
   try {
     const r = await (await fetch(
@@ -796,7 +823,9 @@ async function startFullRun() {
     fullRunId.value = (await r.json()).run_id
     fullRun.value = { id: fullRunId.value, status: 'running' }
     fullRows.value = { total: 0, rows: [] }
+    delistRows.value = { total: 0, rows: [], stats: null }
     fullCurves.value = []
+    delistRowsPage.value = 0
     lastTopDone = 0
     lastTopAt = 0
     startFullPoll()
@@ -824,12 +853,14 @@ function startFullPoll() {
   fullPollTimer = setInterval(async () => {
     await loadFullRun()                        // 详情（running 态带实时统计）
     if (fullRunning.value) {
-      if ((fullRun.value?.done ?? 0) > 0) await loadFullRows()   // 排行表实时增长
+      if ((fullRun.value?.done ?? 0) > 0)
+        await Promise.all([loadFullRows(), loadDelistRows()])  // 排行表实时增长
       maybeRefreshTop()
       return
     }
     stopFullPoll()
-    if (fullViewable.value) await Promise.all([loadFullRows(), loadFullCurves()])
+    if (fullViewable.value)
+      await Promise.all([loadFullRows(), loadDelistRows(), loadFullCurves()])
     loadFullRuns()
   }, 2000)
 }
@@ -1855,7 +1886,7 @@ watch(
 
                   <!-- ===== 全市场结果 ===== -->
                   <template v-else>
-                    <div class="learn-metrics">
+                    <div class="learn-metrics full-total-metrics">
                       <div class="card lm"><div class="lm-k">参与股票</div><div class="lm-v">{{ fullRun.stats?.count ?? 0 }}</div></div>
                       <div class="card lm"><div class="lm-k">正收益占比</div><div class="lm-v">{{ fullRun.stats ? ((fullRun.stats.positive_pct ?? 0) * 100).toFixed(1) + '%' : '—' }}</div></div>
                       <div class="card lm"><div class="lm-k">总收益中位数</div><div class="lm-v">{{ fullRun.stats?.median_return != null ? fmtPctSigned(fullRun.stats.median_return) : '—' }}</div></div>
@@ -1877,6 +1908,44 @@ watch(
                     </div>
                     <div class="card chart-card"><div ref="fullChartEl" class="learn-chart"></div>
                       <div class="detail" style="padding: 0 14px 10px">收益 Top 20 归一化净值叠加（策略净值，起点=1）</div></div>
+
+                    <!-- 退市股票总结：独立分组，样式与全市场回测结果一致 -->
+                    <div class="result-head delist-head" style="margin-top: 20px">
+                      <span class="card-title">退市股票总结</span>
+                      <span class="card-hint">已摘牌股票独立统计 · 修幸存者偏差口径</span>
+                    </div>
+                    <div class="learn-metrics delist-metrics" v-if="delistRows.stats">
+                      <div class="card lm"><div class="lm-k">退市股参与</div><div class="lm-v">{{ delistRows.stats.count ?? 0 }}</div></div>
+                      <div class="card lm"><div class="lm-k">正收益占比</div><div class="lm-v">{{ delistRows.stats.positive_pct != null ? (delistRows.stats.positive_pct * 100).toFixed(1) + '%' : '—' }}</div></div>
+                      <div class="card lm"><div class="lm-k">总收益中位数</div><div class="lm-v">{{ delistRows.stats.median_return != null ? fmtPctSigned(delistRows.stats.median_return) : '—' }}</div></div>
+                      <div class="card lm"><div class="lm-k">跑赢买入持有</div><div class="lm-v">{{ delistRows.stats.beat_buyhold_pct != null ? ((delistRows.stats.beat_buyhold_pct) * 100).toFixed(1) + '%' : '—' }}</div></div>
+                    </div>
+                    <div class="card detail-table-card" v-if="delistRows.rows.length">
+                      <table class="runs-table learn-delist-cmp">
+                        <thead><tr>
+                          <th>代码</th><th>名称</th>
+                          <th v-for="([k, label]) in FULL_SORT_COLS" :key="k" class="full-sort"
+                            @click="sortDelist(k)">{{ label }}{{ delistRowsSort === k ? (delistRowsDesc ? ' ↓' : ' ↑') : '' }}</th>
+                        </tr></thead>
+                        <tbody>
+                          <tr v-for="r in delistRows.rows" :key="r.code" :class="{ 'learn-fail-row': r.status !== 'ok' }">
+                            <td class="mono"><a href="javascript:void 0" class="full-code" @click="pickFullStock(r.code)">{{ r.code }}</a></td>
+                            <td>{{ r.name }}<span v-if="r.reason" class="full-fail-reason">（失败：{{ r.reason }}）</span></td>
+                            <td :class="(r.total_return ?? 0) >= 0 ? 'chg-up' : 'chg-down'">{{ fmtPctSigned(r.total_return) }}</td>
+                            <td>{{ fmtPctSigned(r.annual_return) }}</td>
+                            <td class="chg-down">{{ r.max_drawdown != null ? (r.max_drawdown * 100).toFixed(1) + '%' : '—' }}</td>
+                            <td>{{ r.sharpe?.toFixed(2) ?? '—' }}</td>
+                            <td>{{ r.win_rate != null ? (r.win_rate * 100).toFixed(0) + '%' : '—' }}</td>
+                            <td>{{ r.trades ?? '—' }}</td>
+                          </tr>
+                        </tbody>
+                      </table>
+                      <div class="detail" style="padding: 8px 14px">
+                        共 {{ delistRows.total }} 只退市股 · 第 {{ delistRowsPage + 1 }} / {{ delistPages }} 页
+                        <button class="btn" :disabled="delistRowsPage <= 0" @click="delistRowsPage--; loadDelistRows()">上一页</button>
+                        <button class="btn" :disabled="delistRowsPage >= delistPages - 1" @click="delistRowsPage++; loadDelistRows()">下一页</button>
+                      </div>
+                    </div>
                     <div class="card detail-table-card">
                       <table class="runs-table learn-full-cmp">
                         <thead><tr>
@@ -2607,8 +2676,8 @@ body {
 .learn-empty .detail { margin-top: 8px; }
 
 .learn-cmp { width: 100%; border-collapse: collapse; font-size: 12px; }
-.learn-cmp th, .learn-full-cmp th { text-align: left; padding: 8px 10px; background: #f4f4f4; color: var(--fg-2); font-weight: 600; }
-.learn-cmp td, .learn-full-cmp td { padding: 7px 10px; border-bottom: 1px solid #ededed; font-variant-numeric: tabular-nums; }
+.learn-cmp th, .learn-full-cmp th, .learn-delist-cmp th { text-align: left; padding: 8px 10px; background: #f4f4f4; color: var(--fg-2); font-weight: 600; }
+.learn-cmp td, .learn-full-cmp td, .learn-delist-cmp td { padding: 7px 10px; border-bottom: 1px solid #ededed; font-variant-numeric: tabular-nums; }
 .learn-fail-row td { color: var(--dot-down); font-size: 12px; }
 .learn-fail-reason { word-break: break-all; }
 
