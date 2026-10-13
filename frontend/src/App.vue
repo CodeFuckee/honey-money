@@ -751,7 +751,7 @@ async function loadFullRun(withResults = true) {
     if (!r.ok) { fullRun.value = null; return }
     fullRun.value = await r.json()
     if (withResults && fullViewable.value) {
-      await Promise.all([loadFullRows(), loadFullCurves()])
+      await Promise.all([loadFullRows(), loadDelistRows(), loadFullCurves()])
     }
   } catch (e) { fullError.value = String(e) }
 }
