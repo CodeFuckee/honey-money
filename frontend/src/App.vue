@@ -709,10 +709,10 @@ const delistRowsSort = ref('total_return')
 const delistRowsDesc = ref(true)
 const delistRowsPage = ref(0)
 const delistChartEl = ref(null)
-let delistChart = null
+const delistChartBox = { chart: null }
 const fullCurves = ref([])            // Top-N 归一化净值曲线
 const fullChartEl = ref(null)
-let fullChart = null
+const fullChartBox = { chart: null }
 let fullPollTimer = null
 const fullStarting = ref(false)
 const fullError = ref('')
@@ -793,47 +793,42 @@ const delistPages = computed(() =>
   Math.max(1, Math.ceil((delistRows.value.total || 0) / FULL_PAGE_SIZE)))
 
 async function loadDelistTop() {
-  // 退市股收益 Top 20（后端现算，节流同 Top20）
+  // 退市股全部曲线（快照直读；无快照旧任务回退 Top 20 现算）
   try {
-    const r = await (await fetch(
-      `/api/backtest/full/runs/${fullRunId.value}/top?n=20&delisted=only`)).json()
-    const curves = r.curves || []
+    let curves = [], all = true
+    const rc = await (await fetch(
+      `/api/backtest/full/runs/${fullRunId.value}/curves?delisted=only`)).json()
+    curves = rc.curves || []
+    if (!curves.length) {
+      const r = await (await fetch(
+        `/api/backtest/full/runs/${fullRunId.value}/top?n=20&delisted=only`)).json()
+      curves = r.curves || []
+      all = false
+    }
     await nextTick()
-    if (!delistChartEl.value || !curves.length) return
-    if (delistChart) { delistChart.dispose(); delistChart = null }
-    delistChart = echarts.init(delistChartEl.value)
-    window.__delistChart = delistChart               // E2E 断言钩子
-    const dateSet = new Set()
-    curves.forEach(c => c.equity.forEach(row => dateSet.add(row[0])))
-    const dates = [...dateSet].sort()
-    const series = curves.map(c => {
-      const map = Object.fromEntries(c.equity.map(row => [row[0], row[1]]))
-      return {
-        name: `${c.code} ${c.name}`, type: 'line', showSymbol: false,
-        connectNulls: false, lineStyle: { width: 1.2 },
-        data: dates.map(d => map[d] ?? null),
-      }
-    })
-    delistChart.setOption({
-      animation: false,
-      tooltip: { trigger: 'axis' },
-      legend: { data: series.map(s => s.name), top: 0, type: 'scroll' },
-      grid: { left: 60, right: 20, top: 40, bottom: 46 },
-      xAxis: { type: 'category', data: dates, axisLabel: { fontSize: 10 } },
-      yAxis: { scale: true, splitLine: { lineStyle: { color: '#eee' } } },
-      dataZoom: [{ type: 'inside' }],
-      series,
-    })
+    drawCurves(delistChartEl, delistChartBox, '__delistChart', curves, all)
   } catch { /* 图表非关键路径 */ }
 }
 
-const _onDelistResize = () => delistChart && delistChart.resize()
+const _onDelistResize = () => delistChartBox.chart && delistChartBox.chart.resize()
+
+const fullCurvesAll = ref(true)   // 主图当前是否为全部股票模式
 
 async function loadFullCurves() {
   try {
-    const r = await (await fetch(
-      `/api/backtest/full/runs/${fullRunId.value}/top?n=20`)).json()
-    fullCurves.value = r.curves || []
+    // 首选全部股票曲线快照（/curves 直读不重算）；旧任务无快照回退 Top20
+    const rc = await (await fetch(
+      `/api/backtest/full/runs/${fullRunId.value}/curves`)).json()
+    let curves = rc.curves || []
+    let all = true
+    if (!curves.length) {
+      const r = await (await fetch(
+        `/api/backtest/full/runs/${fullRunId.value}/top?n=20`)).json()
+      curves = r.curves || []
+      all = false
+    }
+    fullCurves.value = curves
+    fullCurvesAll.value = all
     await nextTick()
     renderFullChart()
   } catch { fullCurves.value = [] }
@@ -930,12 +925,13 @@ function pickFullStock(code) {
   window.scrollTo({ top: 0, behavior: 'smooth' })
 }
 
-function renderFullChart() {
-  if (fullChart) { fullChart.dispose(); fullChart = null }
-  if (!fullChartEl.value || !fullCurves.value.length) return
-  fullChart = echarts.init(fullChartEl.value)
-  window.__fullChart = fullChart                 // E2E 断言钩子
-  const curves = fullCurves.value
+// 曲线通用绘制：全部股票模式（细线半透明、无图例无悬浮、渐进渲染，
+// 数千 series 压测可用）；精选模式（≤20 条）保留图例与悬浮
+function drawCurves(el, box, hook, curves, all) {
+  if (box.chart) { box.chart.dispose(); box.chart = null }
+  if (!el.value || !curves.length) return
+  box.chart = echarts.init(el.value)
+  window[hook] = box.chart                       // E2E 断言钩子
   const dateSet = new Set()
   curves.forEach(c => c.equity.forEach(row => dateSet.add(row[0])))
   const dates = [...dateSet].sort()
@@ -943,14 +939,19 @@ function renderFullChart() {
     const map = Object.fromEntries(c.equity.map(row => [row[0], row[1]]))
     return {
       name: `${c.code} ${c.name}`, type: 'line', showSymbol: false,
-      connectNulls: false, lineStyle: { width: 1.2 },
+      connectNulls: false, sampling: all ? 'lttb' : undefined,
+      progressive: all ? 2000 : undefined,
+      progressiveThreshold: all ? 3000 : undefined,
+      lineStyle: all ? { width: 0.7, opacity: 0.3, color: '#4a6fa5' }
+                     : { width: 1.2 },
       data: dates.map(d => map[d] ?? null),
     }
   })
-  fullChart.setOption({
+  box.chart.setOption({
     animation: false,
-    tooltip: { trigger: 'axis' },
-    legend: { data: series.map(s => s.name), top: 0, type: 'scroll' },
+    tooltip: all ? { show: false } : { trigger: 'axis' },
+    legend: all ? { show: false }
+                : { data: series.map(s => s.name), top: 0, type: 'scroll' },
     grid: { left: 60, right: 20, top: 40, bottom: 46 },
     xAxis: { type: 'category', data: dates, axisLabel: { fontSize: 10 } },
     yAxis: { scale: true, splitLine: { lineStyle: { color: '#eee' } } },
@@ -959,7 +960,12 @@ function renderFullChart() {
   })
 }
 
-const _onFullResize = () => fullChart && fullChart.resize()
+function renderFullChart() {
+  drawCurves(fullChartEl, fullChartBox, '__fullChart',
+             fullCurves.value, fullCurvesAll.value)
+}
+
+const _onFullResize = () => fullChartBox.chart && fullChartBox.chart.resize()
 onMounted(() => window.addEventListener('resize', _onFullResize))
 onUnmounted(() => { stopFullPoll() })
 

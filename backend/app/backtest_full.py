@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS backtest_full_row (
   code TEXT NOT NULL,
   name TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL,
+  equity_snapshot JSONB,
   total_return DOUBLE PRECISION,
   annual_return DOUBLE PRECISION,
   max_drawdown DOUBLE PRECISION,
@@ -133,17 +134,32 @@ def compute_stats(rows: list[dict]) -> dict | None:
     return overall
 
 
-def row_from_result(code: str, name: str, result: dict) -> dict:
+def row_from_result(code: str, name: str, result: dict,
+                    snapshot_points: int = 120) -> dict:
     """单股引擎结果 → backtest_full_row 行（message 空态映射为 failed+reason）。"""
     row = {"code": code, "name": name, "status": "ok", "total_return": None,
            "annual_return": None, "max_drawdown": None, "sharpe": None,
            "win_rate": None, "trades": None, "buyhold_return": None,
-           "reason": None}
+           "reason": None, "equity_snapshot": None}
     if result.get("message"):
         return {**row, "status": "failed", "reason": result["message"]}
     m = result.get("metrics") or {}
     equity = result.get("equity") or []
+    # 曲线快照：等距降采样并强制保留首尾点（全部股票折线图的数据源；
+    # 5000+ 只不可能查看时重算回测，必须在运行时落库）
+    snap = None
+    if equity:
+        n = len(equity)
+        if n <= snapshot_points:
+            picked = equity
+        else:
+            idx = list(dict.fromkeys(
+                round(i * (n - 1) / (snapshot_points - 1))
+                for i in range(snapshot_points)))
+            picked = [equity[i] for i in idx]
+        snap = [[p[0], round(float(p[1]), 6)] for p in picked]
     row.update({
+        "equity_snapshot": snap,
         "total_return": m.get("total_return"),
         "annual_return": m.get("annual_return"),
         "max_drawdown": m.get("max_drawdown"),
@@ -160,6 +176,9 @@ def row_from_result(code: str, name: str, result: dict) -> dict:
 
 def ensure_schema(conn) -> None:
     conn.cursor().execute(_DDL)
+    # 老库补列：曲线快照（全部股票折线图，2026-10-13）
+    conn.cursor().execute("ALTER TABLE backtest_full_row "
+                          "ADD COLUMN IF NOT EXISTS equity_snapshot JSONB")
 
 
 def mark_interrupted_on_startup() -> None:
@@ -248,11 +267,14 @@ def update_progress(run_id: int, done: int, failed: int) -> None:
 
 def insert_row(run_id: int, row: dict) -> None:
     with _connect() as conn:
+        import json as _json
+        snap = row.get("equity_snapshot")
         conn.cursor().execute(
             """INSERT INTO backtest_full_row
                (run_id, code, name, status, total_return, annual_return,
-                max_drawdown, sharpe, win_rate, trades, buyhold_return, reason)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                max_drawdown, sharpe, win_rate, trades, buyhold_return, reason,
+                equity_snapshot)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (run_id, code) DO UPDATE SET
                  name=EXCLUDED.name, status=EXCLUDED.status,
                  total_return=EXCLUDED.total_return,
@@ -261,11 +283,13 @@ def insert_row(run_id: int, row: dict) -> None:
                  sharpe=EXCLUDED.sharpe, win_rate=EXCLUDED.win_rate,
                  trades=EXCLUDED.trades,
                  buyhold_return=EXCLUDED.buyhold_return,
-                 reason=EXCLUDED.reason""",
+                 reason=EXCLUDED.reason,
+                 equity_snapshot=EXCLUDED.equity_snapshot""",
             (run_id, row["code"], row["name"], row["status"],
              row["total_return"], row["annual_return"], row["max_drawdown"],
              row["sharpe"], row["win_rate"], row["trades"],
-             row["buyhold_return"], row["reason"]))
+             row["buyhold_return"], row["reason"],
+             _json.dumps(snap) if snap is not None else None))
         conn.commit()
 
 
@@ -343,6 +367,27 @@ def ok_rows(run_id: int, delisted: str = "all") -> list[dict]:
             " WHERE r.run_id=%s" + delist_where, (run_id,)).fetchall()
     return [{"status": r[0], "total_return": r[1], "buyhold_return": r[2],
              "delisted": bool(r[3])} for r in rows]
+
+
+def get_curves(run_id: int, delisted: str = "all") -> list[dict]:
+    """全部股票曲线快照直读（折线图显示所有股票的数据源，不重算回测）。"""
+    delist_where = {"only": " AND COALESCE(b.delisted, FALSE) = TRUE",
+                    "exclude": " AND COALESCE(b.delisted, FALSE) = FALSE"
+                    }.get(delisted, "")
+    join = ("JOIN stock_basic b ON b.code = r.code"
+            if delisted != "all" else
+            "LEFT JOIN stock_basic b ON b.code = r.code")
+    with _connect() as conn:
+        rows = conn.cursor().execute(
+            f"""SELECT r.code, r.name, r.equity_snapshot
+                FROM backtest_full_row r {join}
+                WHERE r.run_id=%s AND r.equity_snapshot IS NOT NULL
+                      {delist_where}
+                ORDER BY r.code""", (run_id,)).fetchall()
+    import json as _json
+    return [{"code": r[0], "name": r[1],
+             "equity": _json.loads(r[2]) if isinstance(r[2], str) else r[2]}
+            for r in rows]
 
 
 def top_codes(run_id: int, n: int, delisted: str = "all") -> list[dict]:

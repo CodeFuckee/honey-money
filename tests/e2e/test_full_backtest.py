@@ -54,6 +54,14 @@ ROWS = {"total": 53, "rows": [
      "buyhold_return": None, "reason": "区间内无行情数据"}]}
 
 ROWS_1 = {"total": 1, "rows": [ROWS["rows"][0]]}
+ALL_CURVES = {"curves": [
+    {"code": "600519", "name": "贵州茅台", "total_return": 0.26,
+     "equity": [["2026-01-02", 1.0], ["2026-03-01", 1.26]]},
+    {"code": "000001", "name": "平安银行", "total_return": 0.05,
+     "equity": [["2026-01-02", 1.0], ["2026-03-01", 1.05]]},
+    {"code": "000003", "name": "PT金田Ａ", "total_return": -0.62,
+     "equity": [["2026-01-02", 1.0], ["2026-03-01", 0.38]]}]}
+
 DELIST_CURVES = {"curves": [
     {"code": "000004", "name": "国华退", "total_return": -0.9681,
      "equity": [["2026-01-02", 1.0], ["2026-06-01", 0.4]]}]}
@@ -109,6 +117,10 @@ def full_api(page):
             if "delisted=only" in url:
                 body = DELIST_ROWS
             fulfill_json(body)
+            return
+        if re.search(r"/api/backtest/full/runs/\d+/curves", url):
+            fulfill_json(DELIST_CURVES if "delisted=only" in url
+                         else ALL_CURVES)
             return
         if re.search(r"/api/backtest/full/runs/\d+/top", url):
             if "delisted=only" in url:
@@ -188,7 +200,7 @@ class TestFullBacktest:
         chart = page.evaluate(
             "() => { const c = window.__fullChart; if (!c) return {hook:false};"
             " return {hook: true, n: c.getOption().series.length}; }")
-        assert chart == {"hook": True, "n": 2}     # 失败股无曲线 → 2 条
+        assert chart == {"hook": True, "n": 3}     # 全部股票视图（含退市股曲线）
 
     def test_e2e_002_rows_sort_and_pagination_contract(self, servers, page,
                                                        full_api):

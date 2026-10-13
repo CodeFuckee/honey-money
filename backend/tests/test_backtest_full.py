@@ -593,3 +593,45 @@ class TestTopCodesDelisted:
         monkeypatch.setattr(bf, "_connect", lambda: conn)
         bf.top_codes(7, 20)
         assert "JOIN stock_basic" not in executed[0]
+
+
+class TestEquitySnapshotAndCurves:
+    """全部股票曲线：worker 落库降采样快照（5000+ 只不可能查看时重算回测），
+    /curves 端点直读快照下发。"""
+
+    def test_row_from_result_snapshots_equity_downsampled(self):
+        result = {
+            "metrics": {"total_return": 0.26},
+            "equity": [[f"2026-{m:02d}-{d:02d}", 1.0 + i * 0.001, 1.0]
+                       for i, (m, d) in enumerate(
+                           [(1, 2), (1, 3), (1, 6), (1, 7), (2, 2), (2, 3),
+                            (2, 4), (3, 1), (3, 2), (3, 3), (3, 4), (3, 5)])],
+        }
+        row = bf.row_from_result("600519", "贵州茅台", result,
+                                 snapshot_points=5)
+        snap = row["equity_snapshot"]
+        assert len(snap) == 5                          # 12 点降采样到 5 点
+        assert snap[0][1] == pytest.approx(1.0)        # 起点保留
+        assert snap[-1][1] == pytest.approx(1.011)     # 终点保留
+
+    def test_row_from_result_without_equity(self):
+        row = bf.row_from_result("301001", "次新",
+                                 {"message": "区间内无行情数据"},
+                                 snapshot_points=5)
+        assert row["equity_snapshot"] is None
+
+    def test_get_curves_reads_snapshots(self, monkeypatch):
+        executed = []
+
+        class Cur(TestRowsOkRowsIntegration.FakeCur):
+            def fetchall(self):
+                return [("000003", "PT金田Ａ", [[ "2020-01-02", 1.0]]),
+                        ("600519", "贵州茅台", [["2020-01-02", 1.0]])]
+
+        conn = TestRowsOkRowsIntegration.FakeConn(executed)
+        conn.cursor = lambda: Cur(executed)
+        monkeypatch.setattr(bf, "_connect", lambda: conn)
+        curves = bf.get_curves(7)
+        assert "equity_snapshot IS NOT NULL" in executed[0]
+        assert len(curves) == 2
+        assert curves[0]["code"] == "000003"

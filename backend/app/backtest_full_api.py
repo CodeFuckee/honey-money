@@ -91,6 +91,15 @@ def register_full_backtest_routes(app: FastAPI) -> None:
             delisted = "all"
         return bf.get_rows(run_id, sort, desc, page, size, delisted)
 
+    @app.get("/api/backtest/full/runs/{run_id}/curves")
+    def full_run_curves(run_id: int, delisted: str = Query(default="all")):
+        """全部股票曲线快照直读（折线图显示所有股票的数据源）。"""
+        if bf.get_run(run_id) is None:
+            raise HTTPException(404, "任务不存在")
+        if delisted not in bf.DELISTED_MODES:
+            delisted = "all"
+        return {"curves": bf.get_curves(run_id, delisted)}
+
     @app.get("/api/backtest/full/runs/{run_id}/top")
     def full_run_top(run_id: int, n: int = Query(default=20, ge=1, le=100),
                      delisted: str = Query(default="all")):

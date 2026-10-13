@@ -69,8 +69,10 @@ def create_app(*, scheduler: TaskScheduler | None = None,
         yield
         await scheduler.stop()
 
+    from fastapi.middleware.gzip import GZipMiddleware
     app = FastAPI(title="honey-money backend", version=config.SERVICE_VERSION,
                   lifespan=lifespan)
+    app.add_middleware(GZipMiddleware, minimum_size=1000)   # 全量曲线 ~10MB 压缩传输
     app.state.scheduler = scheduler
 
     @app.get("/healthz")
