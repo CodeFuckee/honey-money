@@ -345,13 +345,17 @@ def ok_rows(run_id: int, delisted: str = "all") -> list[dict]:
              "delisted": bool(r[3])} for r in rows]
 
 
-def top_codes(run_id: int, n: int) -> list[dict]:
-    """收益排行前 n 的 {code, name}（仅成功行）。"""
+def top_codes(run_id: int, n: int, delisted: str = "all") -> list[dict]:
+    """收益排行前 n 的 {code, name}（仅成功行），支持退市股分组口径。"""
+    join = ("JOIN stock_basic s ON s.code = r.code"
+            if delisted in ("only", "exclude") else "")
+    delist_where = {"only": " AND s.delisted = TRUE",
+                    "exclude": " AND s.delisted = FALSE"}.get(delisted, "")
     with _connect() as conn:
         rows = conn.cursor().execute(
-            "SELECT code, name FROM backtest_full_row"
-            " WHERE run_id=%s AND status='ok'"
-            " ORDER BY total_return DESC NULLS LAST, code ASC LIMIT %s",
+            f"""SELECT r.code, r.name FROM backtest_full_row r {join}
+                WHERE r.run_id=%s AND r.status='ok'{delist_where}
+                ORDER BY r.total_return DESC NULLS LAST, r.code ASC LIMIT %s""",
             (run_id, n)).fetchall()
     return [{"code": r[0], "name": r[1]} for r in rows]
 

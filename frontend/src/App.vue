@@ -708,6 +708,8 @@ const delistRows = ref({ total: 0, rows: [], stats: null })
 const delistRowsSort = ref('total_return')
 const delistRowsDesc = ref(true)
 const delistRowsPage = ref(0)
+const delistChartEl = ref(null)
+let delistChart = null
 const fullCurves = ref([])            // Top-N 归一化净值曲线
 const fullChartEl = ref(null)
 let fullChart = null
@@ -751,7 +753,8 @@ async function loadFullRun(withResults = true) {
     if (!r.ok) { fullRun.value = null; return }
     fullRun.value = await r.json()
     if (withResults && fullViewable.value) {
-      await Promise.all([loadFullRows(), loadDelistRows(), loadFullCurves()])
+      await Promise.all([loadFullRows(), loadDelistRows(), loadFullCurves(),
+                         loadDelistTop()])
     }
   } catch (e) { fullError.value = String(e) }
 }
@@ -789,6 +792,43 @@ function sortDelist(col) {
 const delistPages = computed(() =>
   Math.max(1, Math.ceil((delistRows.value.total || 0) / FULL_PAGE_SIZE)))
 
+async function loadDelistTop() {
+  // 退市股收益 Top 20（后端现算，节流同 Top20）
+  try {
+    const r = await (await fetch(
+      `/api/backtest/full/runs/${fullRunId.value}/top?n=20&delisted=only`)).json()
+    const curves = r.curves || []
+    await nextTick()
+    if (!delistChartEl.value || !curves.length) return
+    if (delistChart) { delistChart.dispose(); delistChart = null }
+    delistChart = echarts.init(delistChartEl.value)
+    window.__delistChart = delistChart               // E2E 断言钩子
+    const dateSet = new Set()
+    curves.forEach(c => c.equity.forEach(row => dateSet.add(row[0])))
+    const dates = [...dateSet].sort()
+    const series = curves.map(c => {
+      const map = Object.fromEntries(c.equity.map(row => [row[0], row[1]]))
+      return {
+        name: `${c.code} ${c.name}`, type: 'line', showSymbol: false,
+        connectNulls: false, lineStyle: { width: 1.2 },
+        data: dates.map(d => map[d] ?? null),
+      }
+    })
+    delistChart.setOption({
+      animation: false,
+      tooltip: { trigger: 'axis' },
+      legend: { data: series.map(s => s.name), top: 0, type: 'scroll' },
+      grid: { left: 60, right: 20, top: 40, bottom: 46 },
+      xAxis: { type: 'category', data: dates, axisLabel: { fontSize: 10 } },
+      yAxis: { scale: true, splitLine: { lineStyle: { color: '#eee' } } },
+      dataZoom: [{ type: 'inside' }],
+      series,
+    })
+  } catch { /* 图表非关键路径 */ }
+}
+
+const _onDelistResize = () => delistChart && delistChart.resize()
+
 async function loadFullCurves() {
   try {
     const r = await (await fetch(
@@ -825,6 +865,7 @@ async function startFullRun() {
     fullRows.value = { total: 0, rows: [] }
     delistRows.value = { total: 0, rows: [], stats: null }
     fullCurves.value = []
+    delistRows.value = { total: 0, rows: [], stats: null }
     delistRowsPage.value = 0
     lastTopDone = 0
     lastTopAt = 0
@@ -838,13 +879,14 @@ let lastTopDone = 0
 let lastTopAt = 0
 
 function maybeRefreshTop() {
-  // Top20 现算 20 只回测，节流：每新增 ≥25 只或每 30 秒重算一次
+  // Top20 / 退市 Top20 均为现算 20 只回测，节流：每新增 ≥25 只或每 30 秒重算
   const done = fullRun.value?.done ?? 0
   const now = Date.now()
   if (done > 0 && (done - lastTopDone >= 25 || now - lastTopAt >= 30000)) {
     lastTopDone = done
     lastTopAt = now
     loadFullCurves()
+    loadDelistTop()
   }
 }
 
@@ -855,12 +897,13 @@ function startFullPoll() {
     if (fullRunning.value) {
       if ((fullRun.value?.done ?? 0) > 0)
         await Promise.all([loadFullRows(), loadDelistRows()])  // 排行表实时增长
-      maybeRefreshTop()
+      maybeRefreshTop()                                        // 图表节流刷新
       return
     }
     stopFullPoll()
     if (fullViewable.value)
-      await Promise.all([loadFullRows(), loadDelistRows(), loadFullCurves()])
+      await Promise.all([loadFullRows(), loadDelistRows(), loadFullCurves(),
+                         loadDelistTop()])
     loadFullRuns()
   }, 2000)
 }
@@ -1096,7 +1139,10 @@ if (typeof window !== 'undefined') {
     batchN: batchResults.value.length,
   })
 }
-onMounted(() => window.addEventListener('resize', _onResize))
+onMounted(() => {
+  window.addEventListener('resize', _onResize)
+  window.addEventListener('resize', _onDelistResize)
+})
 
 watch(activeNav, (nav, prev) => {
   if (nav === 'stock' && stock.value) {
@@ -1907,8 +1953,12 @@ watch(
                       <div class="card lm"><div class="lm-k">退市股参与</div><div class="lm-v">{{ delistRows.stats.count ?? 0 }}</div></div>
                       <div class="card lm"><div class="lm-k">正收益占比</div><div class="lm-v">{{ delistRows.stats.positive_pct != null ? (delistRows.stats.positive_pct * 100).toFixed(1) + '%' : '—' }}</div></div>
                       <div class="card lm"><div class="lm-k">总收益中位数</div><div class="lm-v">{{ delistRows.stats.median_return != null ? fmtPctSigned(delistRows.stats.median_return) : '—' }}</div></div>
+                      <div class="card lm"><div class="lm-k">最好收益</div><div class="lm-v chg-up">{{ delistRows.stats.best_return != null ? fmtPctSigned(delistRows.stats.best_return) : '—' }}</div></div>
+                      <div class="card lm"><div class="lm-k">最差收益</div><div class="lm-v chg-down">{{ delistRows.stats.worst_return != null ? fmtPctSigned(delistRows.stats.worst_return) : '—' }}</div></div>
                       <div class="card lm"><div class="lm-k">跑赢买入持有</div><div class="lm-v">{{ delistRows.stats.beat_buyhold_pct != null ? ((delistRows.stats.beat_buyhold_pct) * 100).toFixed(1) + '%' : '—' }}</div></div>
                     </div>
+                    <div class="card chart-card"><div ref="delistChartEl" class="learn-chart"></div>
+                      <div class="detail" style="padding: 0 14px 10px">退市股收益 Top 20 归一化净值叠加（策略净值，起点=1）</div></div>
                     <div class="card detail-table-card" v-if="delistRows.rows.length">
                       <table class="runs-table learn-delist-cmp">
                         <thead><tr>
@@ -1959,7 +2009,7 @@ watch(
                           </tr>
                         </tbody>
                       </table>
-                      <div class="detail" style="padding: 8px 14px">
+                      <div class="detail full-pager" style="padding: 8px 14px">
                         共 {{ fullRows.total }} 行 · 第 {{ fullRowsPage + 1 }} / {{ fullPages }} 页
                         <button class="btn" :disabled="fullRowsPage <= 0" @click="fullRowsPage--; loadFullRows()">上一页</button>
                         <button class="btn" :disabled="fullRowsPage >= fullPages - 1" @click="fullRowsPage++; loadFullRows()">下一页</button>

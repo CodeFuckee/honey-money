@@ -22,7 +22,8 @@ RUN_DONE = {"id": 7, "strategy": "ma_cross", "range": "3y", "status": "done",
             "adjust": True, "exec_mode": "next_open", "commission": 2.5e-4,
             "sell_tax": 5e-4, "total": 3, "done": 3, "failed": 1, "skipped": 2,
             "stats": {"count": 2, "positive_pct": 0.5,
-                      "median_return": 0.15, "beat_buyhold_pct": 1.0},
+                      "median_return": 0.15, "beat_buyhold_pct": 1.0,
+                      "best_return": 0.26, "worst_return": -0.10},
             "error": None, "created_at": "2026-10-11T10:00:00",
             "finished_at": "2026-10-11T10:05:00"}
 RUN_RUNNING = {**RUN_DONE, "status": "running", "done": 1, "failed": 0,
@@ -31,7 +32,8 @@ RUN_CANCELED = {**RUN_DONE, "status": "canceled", "done": 2, "failed": 0,
                 "stats": None, "finished_at": "2026-10-11T10:02:00"}
 RUN_RUNNING_LIVE = {**RUN_DONE, "status": "running", "done": 2, "failed": 0,
                     "stats": {"count": 2, "positive_pct": 1.0,
-                              "median_return": 0.15, "beat_buyhold_pct": 1.0},
+                              "median_return": 0.15, "beat_buyhold_pct": 1.0,
+                              "best_return": 0.26, "worst_return": 0.05},
                     "finished_at": None}
 RUN_OLD = {**RUN_DONE, "id": 6, "strategy": "donchian", "failed": 0,
            "stats": {"count": 3, "positive_pct": 1.0,
@@ -52,6 +54,9 @@ ROWS = {"total": 53, "rows": [
      "buyhold_return": None, "reason": "区间内无行情数据"}]}
 
 ROWS_1 = {"total": 1, "rows": [ROWS["rows"][0]]}
+DELIST_CURVES = {"curves": [
+    {"code": "000004", "name": "国华退", "total_return": -0.9681,
+     "equity": [["2026-01-02", 1.0], ["2026-06-01", 0.4]]}]}
 DELIST_ROWS = {"total": 2, "rows": [
     {"code": "000003", "name": "PT金田Ａ", "status": "ok",
      "total_return": -0.6185, "annual_return": -0.09, "max_drawdown": 0.7,
@@ -62,7 +67,8 @@ DELIST_ROWS = {"total": 2, "rows": [
      "sharpe": -0.8, "win_rate": 0.1, "trades": 1,
      "buyhold_return": -0.9681, "reason": None}],
     "stats": {"count": 2, "positive_pct": 0.0,
-              "median_return": -0.79, "beat_buyhold_pct": 0.5}}
+              "median_return": -0.79, "beat_buyhold_pct": 0.5,
+              "best_return": -0.6185, "worst_return": -0.9681}}
 
 CURVES = {"curves": [
     {"code": "600519", "name": "贵州茅台", "total_return": 0.26,
@@ -105,7 +111,10 @@ def full_api(page):
             fulfill_json(body)
             return
         if re.search(r"/api/backtest/full/runs/\d+/top", url):
-            fulfill_json(holder["curves"])
+            if "delisted=only" in url:
+                fulfill_json(DELIST_CURVES)
+            else:
+                fulfill_json(holder["curves"])
             return
         if re.search(r"/api/backtest/full/runs/\d+/export", url):
             route.fulfill(status=200, content_type="text/csv; charset=utf-8",
@@ -189,12 +198,14 @@ class TestFullBacktest:
         open_learn(page, frontend_port)
         goto_full_mode(page)
         expect(page.locator(".learn-full-cmp tbody tr")).to_have_count(3)
-        page.locator(".full-sort", has_text="年化").click()    # 换列 → desc=true
-        page.locator(".full-sort", has_text="年化").click()    # 同列 → desc=false
-        page.get_by_role("button", name="下一页").click()
+        page.locator(".learn-full-cmp .full-sort", has_text="年化").click()  # 换列 → desc=true
+        page.locator(".learn-full-cmp .full-sort", has_text="年化").click()  # 同列 → desc=false
+        page.locator(".full-pager").get_by_role("button", name="下一页").click()
 
         def rows_urls():
-            return [c["url"] for c in calls if c["kind"] == "rows"]
+            # 仅主表请求（退市股总结表的轮询请求不参与契约断言）
+            return [c["url"] for c in calls
+                    if c["kind"] == "rows" and "delisted=" not in c["url"]]
 
         last = rows_urls()[-1]
         assert "sort=annual_return" in last
@@ -307,5 +318,14 @@ class TestFullBacktest:
                ).to_contain_text("2")
         expect(page.locator(".delist-metrics .lm", has_text="正收益占比")
                ).to_contain_text("0.0%")
+        expect(page.locator(".delist-metrics .lm", has_text="最好收益")
+               ).to_contain_text("-61.9%")
+        expect(page.locator(".delist-metrics .lm", has_text="最差收益")
+               ).to_contain_text("-96.8%")
         expect(page.locator(".learn-delist-cmp tbody tr", has_text="PT金田Ａ")
                ).to_contain_text("-61.9%")
+        # 退市股收益折线图（独立 ECharts 实例 + 钩子）
+        delist_chart = page.evaluate(
+            "() => { const c = window.__delistChart; if (!c) return {hook:false};"
+            " return {hook: true, n: c.getOption().series.length}; }")
+        assert delist_chart == {"hook": True, "n": 1}

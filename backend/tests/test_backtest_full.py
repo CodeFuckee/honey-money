@@ -556,3 +556,40 @@ class TestRowsOkRowsIntegration:
         ok_sql = executed[-1]
         assert "delisted, FALSE) = TRUE" not in ok_sql
         assert "delisted, FALSE) = FALSE" not in ok_sql
+
+
+class TestTopCodesDelisted:
+    """退市股收益折线图：top_codes 支持退市分组口径。"""
+
+    def _fake_conn(self, executed):
+        conn = TestRowsOkRowsIntegration.FakeConn(executed)
+        # top 查询 fetchall 返回两行样例
+        return conn
+
+    def test_top_codes_delisted_only_joins_filter(self, monkeypatch):
+        executed = []
+
+        class Cur(TestRowsOkRowsIntegration.FakeCur):
+            def fetchall(self):
+                return [("000003", "PT金田Ａ"), ("000004", "国华退")]
+
+        conn = TestRowsOkRowsIntegration.FakeConn(executed)
+        conn.cursor = lambda: Cur(executed)
+        monkeypatch.setattr(bf, "_connect", lambda: conn)
+        picks = bf.top_codes(7, 20, delisted="only")
+        sql = executed[0]
+        assert "JOIN stock_basic" in sql and "delisted" in sql
+        assert [p["code"] for p in picks] == ["000003", "000004"]
+
+    def test_top_codes_all_no_filter(self, monkeypatch):
+        executed = []
+
+        class Cur(TestRowsOkRowsIntegration.FakeCur):
+            def fetchall(self):
+                return []
+
+        conn = TestRowsOkRowsIntegration.FakeConn(executed)
+        conn.cursor = lambda: Cur(executed)
+        monkeypatch.setattr(bf, "_connect", lambda: conn)
+        bf.top_codes(7, 20)
+        assert "JOIN stock_basic" not in executed[0]

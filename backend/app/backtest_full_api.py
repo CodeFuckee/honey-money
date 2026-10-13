@@ -92,12 +92,16 @@ def register_full_backtest_routes(app: FastAPI) -> None:
         return bf.get_rows(run_id, sort, desc, page, size, delisted)
 
     @app.get("/api/backtest/full/runs/{run_id}/top")
-    def full_run_top(run_id: int, n: int = Query(default=20, ge=1, le=100)):
-        """Top-N 归一化净值曲线：按明细排行现算（明细表不存曲线，控体积）。"""
+    def full_run_top(run_id: int, n: int = Query(default=20, ge=1, le=100),
+                     delisted: str = Query(default="all")):
+        """Top-N 归一化净值曲线：按明细排行现算（明细表不存曲线，控体积）。
+        delisted=only 供退市股收益折线图（独立分组口径）。"""
         run = bf.get_run(run_id)
         if run is None:
             raise HTTPException(404, "任务不存在")
-        picks = bf.top_codes(run_id, n)
+        if delisted not in bf.DELISTED_MODES:
+            delisted = "all"
+        picks = bf.top_codes(run_id, n, delisted)
         start = _range_start(run["range"])
         try:
             bars = load_history(config.DATABASE_URL,
