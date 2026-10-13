@@ -1894,25 +1894,14 @@ watch(
                       <div class="card lm"><div class="lm-k">最差收益</div><div class="lm-v chg-down">{{ fullRun.stats?.worst_return != null ? fmtPctSigned(fullRun.stats.worst_return) : '—' }}</div></div>
                       <div class="card lm"><div class="lm-k">跑赢买入持有</div><div class="lm-v">{{ fullRun.stats?.beat_buyhold_pct != null ? ((fullRun.stats.beat_buyhold_pct) * 100).toFixed(1) + '%' : '—' }}</div></div>
                     </div>
-                    <!-- 退市股单独总结：修幸存者偏差的对照组 -->
-                    <div v-if="fullRun.stats?.delisted" class="card delisted-note">
-                      <b>退市股单独总结（{{ fullRun.stats.delisted.count }} 只）：</b>
-                      中位收益 {{ fmtPctSigned(fullRun.stats.delisted.median_return) }} ·
-                      最好 {{ fmtPctSigned(fullRun.stats.delisted.best_return) }} ·
-                      最差 {{ fmtPctSigned(fullRun.stats.delisted.worst_return) }} ·
-                      正收益占比 {{ ((fullRun.stats.delisted.positive_pct ?? 0) * 100).toFixed(1) }}%<template v-if="fullRun.stats.delisted_failed > 0"> · 另有 {{ fullRun.stats.delisted_failed }} 只回测失败</template>。
-                      退市股通常大幅跑输在市股——这正是全市场回测必须包含退市股、以消除幸存者偏差的意义。
-                    </div>
-                    <div v-else-if="fullRun.stats" class="card delisted-note muted">
-                      本次回测样本中无退市股（或退市股全部失败未产出收益）。
-                    </div>
                     <div class="card chart-card"><div ref="fullChartEl" class="learn-chart"></div>
                       <div class="detail" style="padding: 0 14px 10px">收益 Top 20 归一化净值叠加（策略净值，起点=1）</div></div>
 
                     <!-- 退市股票总结：独立分组，样式与全市场回测结果一致 -->
+                    <template v-if="delistRows.rows.length || delistRows.total > 0">
                     <div class="result-head delist-head" style="margin-top: 20px">
                       <span class="card-title">退市股票总结</span>
-                      <span class="card-hint">已摘牌股票独立统计 · 修幸存者偏差口径</span>
+                      <span class="card-hint">已摘牌股票独立统计 · 修幸存者偏差口径<template v-if="fullRun.stats?.delisted_failed > 0"> · 另有 {{ fullRun.stats.delisted_failed }} 只回测失败</template></span>
                     </div>
                     <div class="learn-metrics delist-metrics" v-if="delistRows.stats">
                       <div class="card lm"><div class="lm-k">退市股参与</div><div class="lm-v">{{ delistRows.stats.count ?? 0 }}</div></div>
@@ -1946,6 +1935,10 @@ watch(
                         <button class="btn" :disabled="delistRowsPage >= delistPages - 1" @click="delistRowsPage++; loadDelistRows()">下一页</button>
                       </div>
                     </div>
+                    <div v-if="!delistRows.rows.length" class="card delisted-note muted">
+                      本次回测样本中无退市股（或退市股全部失败未产出收益）。
+                    </div>
+                    </template>
                     <div class="card detail-table-card">
                       <table class="runs-table learn-full-cmp">
                         <thead><tr>
