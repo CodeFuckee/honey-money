@@ -95,12 +95,31 @@ async def amain(args) -> int:
         direct = httpx.AsyncClient(timeout=30.0)
         client = DelistedClient(rate=rate, http=direct)
     else:
+        from .. import em_cookie
+        cookie = em_cookie.load_cookie()
+        if not cookie:
+            print("[error] 东财源需要浏览器 Cookie（裸请求会触发风控封 IP）。\n"
+                  "获取方法：\n"
+                  "  1. 本机浏览器打开 https://quote.eastmoney.com/center/\n"
+                  "  2. F12 → 网络(Network) → 刷新页面 → 任选 push2.eastmoney.com 请求\n"
+                  "  3. 请求头里复制完整的 Cookie 值（很长的一串）\n"
+                  "  4. 在网页端「数据源 → 东财 Cookie」粘贴保存，或写入 "
+                  "EM_COOKIE_PATH 文件（默认 ./data/em_cookie.txt）", file=sys.stderr)
+            sys.exit(2)
+        verdict = em_cookie.verify_cookie(cookie)
+        if not verdict["valid"]:
+            print(f"[error] 东财 Cookie 验证失败：{verdict['reason']}"
+                  f"（{verdict.get('checked_at')}）。\n"
+                  "请重新获取 Cookie（浏览器 F12 → 网络 → 刷新 → 复制新值），"
+                  "旧 Cookie 可能已过期。", file=sys.stderr)
+            sys.exit(2)
+        print(f"[cookie] 东财 Cookie 验证通过（{verdict.get('checked_at')}）")
         direct = httpx.AsyncClient(timeout=15.0)
         pool = httpx.AsyncClient(base_url=config.PROXY_POOL_URL, timeout=5.0)
         broker = ProxyBroker(http=pool)
         client = EastmoneyClient(rate=rate, proxy_broker=broker, http=direct,
                                  max_proxy_retries=args.proxy_retries,
-                                 proxy_mode=args.proxy_mode)
+                                 proxy_mode=args.proxy_mode, cookie=cookie)
     try:
         stocks = await client.fetch_stock_list()
         if args.only:

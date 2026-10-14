@@ -19,6 +19,7 @@ from fastapi import FastAPI
 
 from . import config
 from . import backtest_full
+from . import em_cookie
 from .backtest_api import register_backtest_routes
 from .backtest_full_api import register_full_backtest_routes
 from .browse import fetch_stock_bars, fetch_stock_basic, fetch_stock_list
@@ -124,6 +125,31 @@ def create_app(*, scheduler: TaskScheduler | None = None,
         return fetch_stock_bars(config.DATABASE_URL, code, limit=limit,
                                 offset=offset, source=source.strip().lower(),
                                 adjust=adjust.strip().lower())
+
+    @app.get("/api/cookies/em")
+    def em_cookie_status():
+        """东财 Cookie 状态：是否已存 + 实时验证结果（前端提醒与表单用）。"""
+        cookie = em_cookie.load_cookie()
+        result = em_cookie.verify_cookie(cookie) if cookie else {
+            "valid": False, "reason": "尚未设置 Cookie", "checked_at": None}
+        masked = (cookie[:12] + "…" + cookie[-6:]) if len(cookie) > 20 else ""
+        return {"status": "up", "configured": bool(cookie), "masked": masked,
+                **result}
+
+    @app.put("/api/cookies/em")
+    def em_cookie_save(body: dict):
+        """保存并立即验证前端粘贴的 Cookie。无效也保存（便于换 Cookie 后重验）。"""
+        cookie = (body or {}).get("cookie", "")
+        if not cookie.strip():
+            return {"ok": False, "reason": "cookie 为空"}
+        path = em_cookie.save_cookie(cookie)
+        result = em_cookie.verify_cookie(cookie)
+        return {"ok": True, "path": path, **result}
+
+    @app.delete("/api/cookies/em")
+    def em_cookie_delete():
+        em_cookie.clear_cookie()
+        return {"ok": True}
 
     @app.get("/api/crawl/stats")
     def crawl_stats():

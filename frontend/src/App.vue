@@ -206,6 +206,43 @@ async function loadBrowse() {
   }
 }
 function browseSearch() { browsePage.value = 0; loadBrowse() }
+
+// ===== 东财 Cookie：状态 / 粘贴保存 / 验证 =====
+const emCookie = ref({ configured: false, valid: false, masked: '', reason: '' })
+const emCookieInput = ref('')
+const emCookieSaving = ref(false)
+const emCookieMsg = ref(null)   // {ok, text}
+const showCookieHelp = ref(false)
+
+async function loadEmCookie() {
+  try {
+    const r = await fetch('/api/cookies/em')
+    emCookie.value = await r.json()
+  } catch (e) { /* 静默：卡片显示未知状态 */ }
+}
+async function saveEmCookie() {
+  if (!emCookieInput.value.trim()) return
+  emCookieSaving.value = true
+  emCookieMsg.value = null
+  try {
+    const r = await fetch('/api/cookies/em', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cookie: emCookieInput.value }),
+    })
+    const d = await r.json()
+    emCookieMsg.value = d.valid
+      ? { ok: true, text: 'Cookie 已保存并验证通过，可以启动东财爬虫了' }
+      : { ok: false, text: 'Cookie 已保存但验证失败：' + (d.reason || '未知原因') }
+    emCookieInput.value = ''
+    await loadEmCookie()
+  } catch (e) {
+    emCookieMsg.value = { ok: false, text: '保存请求失败：' + e }
+  } finally {
+    emCookieSaving.value = false
+  }
+}
+watch(activeNav, (nav) => { if (nav === 'data' || nav.startsWith('src-')) loadEmCookie() })
 function onPage(e) {
   browsePage.value = e.page; loadBrowse()
 }
@@ -1246,7 +1283,10 @@ watch(
             </svg>{{ n.label }}</button>
           <div class="group">数据源</div>
           <button v-for="s in SRC_ITEMS" :key="s.id" class="src-item"
-            :class="{ active: activeNav === s.id }" @click="setNav(s.id)">{{ s.label }}</button>
+            :class="{ active: activeNav === s.id }" @click="setNav(s.id)">
+            {{ s.label }}<span v-if="s.field === 'eastmoney'" class="src-dot"
+              :class="emCookie.valid ? 'ok' : 'bad'" :title="emCookie.valid ? 'Cookie 有效' : '东财 Cookie 未配置/无效'"></span>
+          </button>
           <div class="sidebar-foot">v0.1.0 · 工程骨架</div>
         </aside>
 
@@ -1389,6 +1429,32 @@ watch(
 
           <!-- ===== 数据浏览（占位；数据源子页为按来源筛选变体） ===== -->
           <template v-else-if="activeNav === 'data' || srcPage">
+            <!-- 东财 Cookie 卡：仅东财子页显示 -->
+            <div v-if="srcPage && srcPage.field === 'eastmoney'" class="card cookie-card"
+              :class="emCookie.valid ? 'ok' : 'warn'">
+              <div class="ck-head">
+                <b>东财爬虫 Cookie</b>
+                <span class="ck-state" :class="emCookie.valid ? 'ok' : 'bad'">
+                  {{ emCookie.valid ? '✓ 有效' : (emCookie.configured ? '✗ 已失效' : '✗ 未配置') }}
+                </span>
+              </div>
+              <div v-if="emCookie.configured && emCookie.masked" class="ck-masked">已存：{{ emCookie.masked }}</div>
+              <div v-if="!emCookie.valid" class="ck-help">
+                <p><b>为什么需要 Cookie：</b>东财对无 Cookie 的裸请求会触发风控封 IP（上次封禁 5 天的教训）。</p>
+                <p><b>获取步骤：</b>① 浏览器打开 <code>quote.eastmoney.com/center/</code> →
+                  ② 按 F12 打开开发者工具 → 网络(Network) → 刷新页面 →
+                  ③ 找到任一 <code>push2.eastmoney.com</code> 请求 →
+                  ④ 在请求头里复制完整的 <code>Cookie:</code> 值（很长的一串）→
+                  ⑤ 粘贴到下面保存。</p>
+              </div>
+              <div class="ck-form">
+                <InputText v-model="emCookieInput" placeholder="粘贴完整 Cookie 值…"
+                  class="ck-input" :disabled="emCookieSaving" />
+                <Button label="保存并验证" size="small" @click="saveEmCookie"
+                  :loading="emCookieSaving" :disabled="!emCookieInput.trim()" />
+              </div>
+              <div v-if="emCookieMsg" class="ck-msg" :class="emCookieMsg.ok ? 'ok' : 'bad'">{{ emCookieMsg.text }}</div>
+            </div>
             <div class="toolbar">
               <div>
                 <h2 class="h1">{{ srcPage ? `数据浏览 · ${srcPage.label}` : '数据浏览' }}</h2>
@@ -2753,4 +2819,27 @@ body {
   color: #393939;
 }
 .delisted-note.muted { background: #f4f4f4; border-color: #e0e0e0; color: #525252; }
+
+/* 东财 Cookie 卡 */
+.cookie-card { margin-bottom: 20px; padding: 16px 20px; }
+.cookie-card.warn { border-left: 4px solid #f1c21b; background: #fff8e6; }
+.cookie-card.ok { border-left: 4px solid #198038; }
+.ck-head { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; font-size: 14px; }
+.ck-state.ok { color: #198038; font-weight: 600; }
+.ck-state.bad { color: #da1e28; font-weight: 600; }
+.ck-masked { font-size: 12px; color: #525252; margin-bottom: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.ck-help { font-size: 13px; line-height: 1.7; color: #393939; margin: 6px 0 10px; }
+.ck-help p { margin: 4px 0; }
+.ck-help code { background: #f4f4f4; padding: 1px 6px; border-radius: 2px;
+  font-size: 12px; }
+.ck-form { display: flex; gap: 10px; align-items: center; }
+.ck-input { flex: 1; min-width: 0; font-size: 12px; }
+.ck-msg { margin-top: 10px; font-size: 13px; }
+.ck-msg.ok { color: #198038; }
+.ck-msg.bad { color: #da1e28; }
+.src-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  margin-left: auto; }
+.src-dot.ok { background: #198038; }
+.src-dot.bad { background: #f1c21b; }
 </style>

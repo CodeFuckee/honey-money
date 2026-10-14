@@ -70,7 +70,8 @@ class DailyBars:
 class EastmoneyClient:
     def __init__(self, *, rate: RateLimiter, proxy_broker: ProxyBroker,
                  http: httpx.AsyncClient, max_proxy_retries: int = 2,
-                 timeout: float = 15.0, proxy_mode: str = "pool"):
+                 timeout: float = 15.0, proxy_mode: str = "pool",
+                 cookie: str = ""):
         """proxy_mode: pool=走代理池（空池/不可用自动回退直连）；
         direct=全部直连——实测东财对免费代理的机房 IP 段全部断连，
         家宽/办公网直连 + 低 QPS 才是有效路径（见 docs/ashare-daily-data-sources.md）。"""
@@ -80,6 +81,7 @@ class EastmoneyClient:
         self._max_proxy_retries = max_proxy_retries
         self._timeout = timeout
         self._proxy_mode = proxy_mode
+        self._cookie = cookie
         self._proxy_clients: dict[str, httpx.AsyncClient] = {}
 
     async def _client_for(self, proxy: str | None) -> httpx.AsyncClient:
@@ -106,8 +108,12 @@ class EastmoneyClient:
             proxy = (await self._broker.acquire()
                      if self._proxy_mode == "pool" else None)
             try:
+                headers = {"User-Agent": UA}
+                if self._cookie:
+                    headers["Cookie"] = self._cookie
+                    headers["Referer"] = "https://quote.eastmoney.com/"
                 resp = await (await self._client_for(proxy)).get(
-                    url, params=params, headers={"User-Agent": UA},
+                    url, params=params, headers=headers,
                 )
             except (httpx.ProxyError, httpx.ConnectError) as exc:
                 await self._broker.report_failure(proxy)
