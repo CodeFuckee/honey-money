@@ -732,6 +732,7 @@ const fullFilterSt = ref(true)        // 剔除名称含 ST/退
 const fullMinBars = ref(60)           // 区间内最少 K 线数（挡次新/长期停牌）
 const fullAdjust = ref(true)          // 后复权口径（关闭提速但跨除权失真）
 const fullIncludeDelisted = ref(true) // 含退市股（修幸存者偏差的本体）
+const fullReuse = ref(true)           // 同参历史结果复用（成功股免算，失败股重跑）
 const fullRuns = ref([])              // 历史 run 列表
 const fullRunId = ref(null)           // 当前查看/运行中的 run
 const fullRun = ref(null)             // 该 run 详情（进度/统计）
@@ -957,6 +958,7 @@ async function startFullRun() {
         commission: (learnCommission.value || 0) / 10000,
         sell_tax: (learnSellTax.value || 0) / 10000,
         adjust: fullAdjust.value,
+        reuse: fullReuse.value,
         filters: { exclude_st: fullFilterSt.value,
                    min_bars: fullMinBars.value || 0,
                    include_delisted: fullIncludeDelisted.value },
@@ -1949,6 +1951,8 @@ watch(
                               v-model.number="fullMinBars" /></label>
                           <label class="learn-check"><input type="checkbox" v-model="fullAdjust" />后复权口径</label>
                           <label class="learn-check"><input type="checkbox" v-model="fullIncludeDelisted" />含退市股</label>
+                          <label class="learn-check" title="同参数已有完成结果时，成功股直接复用（以源任务时点数据为准），仅重算其失败股与新进股票">
+                            <input type="checkbox" v-model="fullReuse" />复用历史结果</label>
                         </span>
                       </label>
                     </div>
@@ -1970,7 +1974,7 @@ watch(
                     <div v-if="fullError" class="error-banner"><span>{{ fullError }}</span></div>
                     <div v-if="fullRun" class="detail" data-testid="full-status">
                       <template v-if="fullRunning">
-                        全量回测中：已完成 {{ fullRun.done }} / {{ fullRun.total }} 只（失败 {{ fullRun.failed }}，过滤跳过 {{ fullRun.skipped }}）… 可随时取消
+                        全量回测中：已完成 {{ fullRun.done }} / {{ fullRun.total }} 只（失败 {{ fullRun.failed }}，过滤跳过 {{ fullRun.skipped }}<template v-if="fullRun.reused_count > 0">，已复用 {{ fullRun.reused_count }} 只</template>）… 可随时取消
                       </template>
                       <template v-else-if="fullRun.status === 'interrupted'">
                         上次任务因后端重启中断（已完成 {{ fullRun.done }}/{{ fullRun.total }}），可重新发起
@@ -1979,7 +1983,7 @@ watch(
                         全量回测失败：{{ fullRun.error }}
                       </template>
                       <template v-else-if="fullViewable">
-                        任务 #{{ fullRun.id }}（{{ fullRun.status === 'canceled' ? '已取消' : '已完成' }}）：参与 {{ fullRun.total }} 只 · 过滤跳过 {{ fullRun.skipped }} · 失败 {{ fullRun.failed }}
+                        任务 #{{ fullRun.id }}（{{ fullRun.status === 'canceled' ? '已取消' : '已完成' }}）：参与 {{ fullRun.total }} 只 · 过滤跳过 {{ fullRun.skipped }} · 失败 {{ fullRun.failed }}<template v-if="fullRun.reused_count > 0"> · 已复用 run #{{ fullRun.reused_from }} 的 {{ fullRun.reused_count }} 只结果</template>
                       </template>
                     </div>
                   </template>

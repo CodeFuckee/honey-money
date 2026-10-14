@@ -25,16 +25,20 @@ RUN_DONE = {"id": 7, "strategy": "ma_cross", "range": "3y", "status": "done",
                       "median_return": 0.15, "beat_buyhold_pct": 1.0,
                       "best_return": 0.26, "worst_return": -0.10},
             "error": None, "created_at": "2026-10-11T10:00:00",
-            "finished_at": "2026-10-11T10:05:00"}
+            "finished_at": "2026-10-11T10:05:00",
+            "reused_from": 6, "reused_count": 2}
 RUN_RUNNING = {**RUN_DONE, "status": "running", "done": 1, "failed": 0,
-               "stats": None, "finished_at": None}
+               "stats": None, "finished_at": None,
+               "reused_from": None, "reused_count": 0}
 RUN_CANCELED = {**RUN_DONE, "status": "canceled", "done": 2, "failed": 0,
-                "stats": None, "finished_at": "2026-10-11T10:02:00"}
+                "stats": None, "finished_at": "2026-10-11T10:02:00",
+                "reused_from": None, "reused_count": 0}
 RUN_RUNNING_LIVE = {**RUN_DONE, "status": "running", "done": 2, "failed": 0,
                     "stats": {"count": 2, "positive_pct": 1.0,
                               "median_return": 0.15, "beat_buyhold_pct": 1.0,
                               "best_return": 0.26, "worst_return": 0.05},
-                    "finished_at": None}
+                    "finished_at": None,
+                    "reused_from": None, "reused_count": 0}
 RUN_OLD = {**RUN_DONE, "id": 6, "strategy": "donchian", "failed": 0,
            "stats": {"count": 3, "positive_pct": 1.0,
                      "median_return": 0.30, "beat_buyhold_pct": 0.66}}
@@ -363,3 +367,34 @@ class TestFullBacktest:
         # 最低必须是收益率 -99.5%，而非净值 0.005（旧实现标成 "+0%"）
         assert "最低(-99.5%) 000003 PT金田Ａ" in names
         assert "近中位(+5.0%) 000001 平安银行" in names
+
+    def test_e2e_011_reuse_flag_and_hint(self, servers, page, full_api):
+        """P1 同参结果复用：开关默认开且随请求体提交（可关）；详情状态行
+        显示复用来源（run #N 的 M 只）。"""
+        calls, _ = full_api
+        _, frontend_port = servers
+        open_learn(page, frontend_port)
+        goto_full_mode(page)
+        # 状态行（viewable 完成态）：复用来源提示
+        expect(page.locator("[data-testid=full-status]")
+               ).to_contain_text("已复用 run #6 的 2 只结果")
+        # 开关默认勾选；取消勾选发起 → 请求体 reuse=false
+        controls = page.locator(".learn-full-controls")
+        reuse_cb = controls.locator(".learn-check",
+                                    has_text="复用历史结果").locator("input")
+        expect(reuse_cb).to_be_checked()
+        reuse_cb.uncheck()
+        page.get_by_role("button", name="发起全量").click()
+        expect(page.locator("[data-testid=full-status]")
+               ).to_contain_text("已完成", timeout=10000)
+
+        def create_bodies():
+            return [json.loads(c["body"]) for c in calls if c["kind"] == "create"]
+
+        assert create_bodies()[-1]["reuse"] is False
+        # 重新勾选再发起 → reuse=true
+        reuse_cb.check()
+        page.get_by_role("button", name="发起全量").click()
+        expect(page.locator("[data-testid=full-status]")
+               ).to_contain_text("已完成", timeout=10000)
+        assert create_bodies()[-1]["reuse"] is True

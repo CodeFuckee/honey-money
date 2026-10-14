@@ -34,6 +34,7 @@ class FullBacktestIn(BaseModel):
     sell_tax: float = Field(default=5e-4, ge=0, le=0.01)
     adjust: bool = True
     filters: dict = Field(default_factory=dict)
+    reuse: bool = True          # 同参已完成 run 的成功行直接复用（失败股重跑）
 
     @field_validator("params")
     @classmethod
@@ -52,7 +53,7 @@ def register_full_backtest_routes(app: FastAPI) -> None:
             "strategy": body.strategy, "range": body.range,
             "params": body.params, "exec_mode": body.exec_mode,
             "commission": body.commission, "sell_tax": body.sell_tax,
-            "adjust": body.adjust,
+            "adjust": body.adjust, "reuse": body.reuse,
             "filters": {**bf.DEFAULT_FILTERS, **body.filters},
         }
         run_id = bf.create_run(spec)

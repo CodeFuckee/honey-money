@@ -10,6 +10,7 @@
 
 import asyncio
 import datetime as dt
+import hashlib
 import json
 
 import psycopg
@@ -47,6 +48,10 @@ CREATE TABLE IF NOT EXISTS backtest_full_run (
   failed INT NOT NULL DEFAULT 0,
   stats JSONB,
   error TEXT,
+  spec_hash TEXT,
+  reuse_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  reused_from INT,
+  reused_count INT NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   finished_at TIMESTAMPTZ
 );
@@ -64,6 +69,7 @@ CREATE TABLE IF NOT EXISTS backtest_full_row (
   trades INT,
   buyhold_return DOUBLE PRECISION,
   reason TEXT,
+  source_run_id INT,
   PRIMARY KEY (run_id, code)
 );
 CREATE INDEX IF NOT EXISTS idx_bf_row_run ON backtest_full_row(run_id);
@@ -75,6 +81,18 @@ def _connect():
 
 
 # ------------------------------------------------------------ 纯函数 ----
+
+def spec_hash(spec: dict) -> str:
+    """同参任务的复用指纹：执行语义字段规范化后取 sha256 前 16 位。
+
+    只含影响结果的字段（reuse 开关是执行策略，不影响指纹）。
+    """
+    payload = {k: spec.get(k) for k in
+               ("strategy", "range", "params", "exec_mode", "commission",
+                "sell_tax", "adjust", "filters")}
+    canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False,
+                           default=str)
+    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
 def filter_universe(stocks: list[dict], bars_counts: dict, *,
                     exclude_st: bool = True, min_bars: int = 60,
@@ -179,6 +197,45 @@ def ensure_schema(conn) -> None:
     # 老库补列：曲线快照（全部股票折线图，2026-10-13）
     conn.cursor().execute("ALTER TABLE backtest_full_row "
                           "ADD COLUMN IF NOT EXISTS equity_snapshot JSONB")
+    # 老库补列：同参结果复用（2026-10-14）——run 存指纹与复用来源，行存溯源
+    conn.cursor().execute("ALTER TABLE backtest_full_run "
+                          "ADD COLUMN IF NOT EXISTS spec_hash TEXT")
+    conn.cursor().execute("ALTER TABLE backtest_full_run "
+                          "ADD COLUMN IF NOT EXISTS reuse_enabled "
+                          "BOOLEAN NOT NULL DEFAULT TRUE")
+    conn.cursor().execute("ALTER TABLE backtest_full_run "
+                          "ADD COLUMN IF NOT EXISTS reused_from INT")
+    conn.cursor().execute("ALTER TABLE backtest_full_run "
+                          "ADD COLUMN IF NOT EXISTS reused_count "
+                          "INT NOT NULL DEFAULT 0")
+    conn.cursor().execute("ALTER TABLE backtest_full_row "
+                          "ADD COLUMN IF NOT EXISTS source_run_id INT")
+    # 指纹索引必须在补列之后建（老库 _DDL 阶段 spec_hash 尚不存在，
+    # 整批 DDL 会失败——曾致 ensure_schema 整体跳过）
+    conn.cursor().execute("CREATE INDEX IF NOT EXISTS idx_bf_run_spec "
+                          "ON backtest_full_run(spec_hash, status)")
+    _backfill_spec_hashes(conn)
+
+
+def _backfill_spec_hashes(conn) -> None:
+    """老 run 指纹回填（幂等）：历史 run 无 spec_hash 时由落库参数现算，
+    使其可被后续同参任务复用；新 run 由 create_run 写入，不进这里。"""
+    rows = conn.cursor().execute(
+        "SELECT id, strategy, range_key, params, exec_mode, commission,"
+        " sell_tax, adjust, filters FROM backtest_full_run"
+        " WHERE spec_hash IS NULL").fetchall()
+    for (rid, strategy, range_key, params, exec_mode, commission,
+         sell_tax, adjust, filters) in rows:
+        spec = {"strategy": strategy, "range": range_key,
+                "params": params if isinstance(params, dict)
+                          else json.loads(params or "{}"),
+                "exec_mode": exec_mode, "commission": commission,
+                "sell_tax": sell_tax, "adjust": adjust,
+                "filters": filters if isinstance(filters, dict)
+                           else json.loads(filters or "{}")}
+        conn.cursor().execute(
+            "UPDATE backtest_full_run SET spec_hash=%s WHERE id=%s",
+            (spec_hash(spec), rid))
 
 
 def mark_interrupted_on_startup() -> None:
@@ -198,16 +255,76 @@ def has_running_run() -> bool:
     return row is not None
 
 
+# ------------------------------------------------------- 结果复用 ----
+
+def find_reusable_run(spec_hash_: str, exclude_run_id: int) -> dict | None:
+    """最近一个同指纹且完整完成的 run（复用来源候选；排除自身）。"""
+    with _connect() as conn:
+        row = conn.cursor().execute(
+            "SELECT id, created_at FROM backtest_full_run"
+            " WHERE spec_hash=%s AND status='done' AND id<>%s"
+            " ORDER BY id DESC LIMIT 1",
+            (spec_hash_, exclude_run_id)).fetchone()
+    return {"id": row[0], "created_at": row[1]} if row else None
+
+
+def reusable_ok_codes(src_run_id: int) -> list[str]:
+    """源 run 中可复用的成功股清单（失败股不在内——复用时逐股重跑）。"""
+    with _connect() as conn:
+        rows = conn.cursor().execute(
+            "SELECT code FROM backtest_full_row"
+            " WHERE run_id=%s AND status='ok'", (src_run_id,)).fetchall()
+    return [r[0] for r in rows]
+
+
+def copy_ok_rows(src_run_id: int, dst_run_id: int, codes: list[str]) -> int:
+    """源 run 成功行整批复制进新 run（含曲线快照；纯服务端 SQL 不经应用层）。
+
+    仅复制 codes 清单内的行——universe 随 stock_basic/行情演变，复用必须以
+    **当前**过滤结果为准（新上市股不复制、已跌出过滤的股不残留）；
+    名称取 stock_basic 现值（改名/摘牌标记跟随最新）。返回复制行数。
+    """
+    if not codes:
+        return 0
+    with _connect() as conn:
+        cur = conn.cursor().execute(
+            """INSERT INTO backtest_full_row
+               (run_id, code, name, status, equity_snapshot, total_return,
+                annual_return, max_drawdown, sharpe, win_rate, trades,
+                buyhold_return, reason, source_run_id)
+               SELECT %s, r.code, COALESCE(b.name, r.name), r.status,
+                      r.equity_snapshot, r.total_return, r.annual_return,
+                      r.max_drawdown, r.sharpe, r.win_rate, r.trades,
+                      r.buyhold_return, r.reason, %s
+               FROM backtest_full_row r
+               LEFT JOIN stock_basic b ON b.code = r.code
+               WHERE r.run_id=%s AND r.status='ok' AND r.code = ANY(%s)
+               ON CONFLICT (run_id, code) DO NOTHING""",
+            (dst_run_id, src_run_id, src_run_id, codes))
+        n = cur.rowcount
+        conn.commit()
+    return n if n and n > 0 else 0
+
+
+def mark_reuse(run_id: int, src_run_id: int, count: int) -> None:
+    with _connect() as conn:
+        conn.cursor().execute(
+            "UPDATE backtest_full_run SET reused_from=%s, reused_count=%s"
+            " WHERE id=%s", (src_run_id, count, run_id))
+        conn.commit()
+
+
 def create_run(spec: dict) -> int:
     with _connect() as conn:
         cur = conn.cursor().execute(
             """INSERT INTO backtest_full_run
                (strategy, range_key, params, exec_mode, commission, sell_tax,
-                adjust, filters, status)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'running') RETURNING id""",
+                adjust, filters, status, spec_hash, reuse_enabled)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'running',%s,%s) RETURNING id""",
             (spec["strategy"], spec["range"], json.dumps(spec["params"]),
              spec["exec_mode"], spec["commission"], spec["sell_tax"],
-             spec["adjust"], json.dumps(spec["filters"])))
+             spec["adjust"], json.dumps(spec["filters"]),
+             spec_hash(spec), bool(spec.get("reuse", True))))
         run_id = cur.fetchone()[0]
         conn.commit()
     return run_id
@@ -218,14 +335,15 @@ def get_run(run_id: int) -> dict | None:
         cur = conn.cursor().execute(
             "SELECT id, strategy, range_key, params, exec_mode, commission,"
             " sell_tax, adjust, filters, status, total, skipped, done, failed,"
-            " stats, error, created_at, finished_at"
+            " stats, error, created_at, finished_at, reused_from, reused_count"
             " FROM backtest_full_run WHERE id=%s", (run_id,))
         row = cur.fetchone()
     if row is None:
         return None
     keys = ("id", "strategy", "range", "params", "exec_mode", "commission",
             "sell_tax", "adjust", "filters", "status", "total", "skipped",
-            "done", "failed", "stats", "error", "created_at", "finished_at")
+            "done", "failed", "stats", "error", "created_at", "finished_at",
+            "reused_from", "reused_count")
     d = dict(zip(keys, row))
     for k in ("params", "filters", "stats"):
         d[k] = json.loads(d[k]) if isinstance(d[k], str) else d[k]
@@ -236,10 +354,12 @@ def list_runs() -> list[dict]:
     with _connect() as conn:
         rows = conn.cursor().execute(
             "SELECT id, strategy, range_key, status, total, skipped, done,"
-            " failed, stats, error, created_at, finished_at"
+            " failed, stats, error, created_at, finished_at,"
+            " reused_from, reused_count"
             " FROM backtest_full_run ORDER BY id DESC LIMIT 100").fetchall()
     keys = ("id", "strategy", "range", "status", "total", "skipped", "done",
-            "failed", "stats", "error", "created_at", "finished_at")
+            "failed", "stats", "error", "created_at", "finished_at",
+            "reused_from", "reused_count")
     out = []
     for r in rows:
         d = dict(zip(keys, r))
@@ -534,16 +654,33 @@ def _load_bars_chunk(codes: list[str], spec: dict) -> dict:
 
 
 async def execute_run(run_id: int, spec: dict) -> None:
-    """后台任务主体：过滤 → 分批加载 → 逐股回测落库 → 统计收尾。
+    """后台任务主体：过滤 → （可选复用）→ 分批加载 → 逐股回测落库 → 统计收尾。
 
+    复用：同指纹且已完成的 run，其成功行整批 SQL 复制（含曲线快照），
+    仅重算其失败股 + 新进 universe 的股票——重复运算量从全市场缩到增量。
     逐股 await asyncio.sleep(0) 让出事件循环；异常兜底置 failed 终态。
     """
     try:
         universe, skipped = await asyncio.to_thread(_load_universe, run_id, spec)
         done = failed = 0
-        ok_rows_acc: list[dict] = []
-        for i in range(0, len(universe), CHUNK):
-            chunk = universe[i:i + CHUNK]
+        pending = universe
+        if spec.get("reuse", True):
+            src = await asyncio.to_thread(
+                find_reusable_run, spec_hash(spec), run_id)
+            if src:
+                ok_codes = set(await asyncio.to_thread(
+                    reusable_ok_codes, src["id"]))
+                targets = [s["code"] for s in universe if s["code"] in ok_codes]
+                copied = await asyncio.to_thread(
+                    copy_ok_rows, src["id"], run_id, targets)
+                if copied:
+                    done = copied
+                    await asyncio.to_thread(mark_reuse, run_id, src["id"], copied)
+                    target_set = set(targets)
+                    pending = [s for s in universe
+                               if s["code"] not in target_set]
+        for i in range(0, len(pending), CHUNK):
+            chunk = pending[i:i + CHUNK]
             pack = await asyncio.to_thread(
                 _load_bars_chunk, [s["code"] for s in chunk], spec)
             for s in chunk:
@@ -564,15 +701,15 @@ async def execute_run(run_id: int, spec: dict) -> None:
                 done += 1
                 if row["status"] == "failed":
                     failed += 1
-                else:
-                    ok_rows_acc.append(row)
                 await asyncio.to_thread(update_progress, run_id, done, failed)
                 await asyncio.sleep(0)
             await asyncio.sleep(0)
         if _canceled(run_id):
             finish_run(run_id, "canceled")
             return
-        finish_run(run_id, "done", stats=compute_stats(ok_rows_acc))
+        # 统计终值直接聚合落库行（含复制的行；ok_rows 与分组统计同参）
+        stats = compute_stats(await asyncio.to_thread(ok_rows, run_id))
+        finish_run(run_id, "done", stats=stats)
     except Exception as exc:                    # 清单/批量加载等整体性失败
         finish_run(run_id, "failed",
                    error=f"{type(exc).__name__}: {str(exc)[:200]}")

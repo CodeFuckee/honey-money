@@ -186,6 +186,15 @@ class TestFullBacktestApi:
                                    "include_delisted": True}
         assert spec["adjust"] is True
 
+    def test_reuse_flag_passed_to_worker_spec(self, client):
+        """复用开关透传 worker spec（默认开；显式关→False）。"""
+        client.post("/api/backtest/full", json={
+            "strategy": "ma_cross", "range": "1y", "reuse": False})
+        assert client.app.state._full_started[-1][1]["reuse"] is False
+        client.post("/api/backtest/full", json={
+            "strategy": "ma_cross", "range": "1y"})
+        assert client.app.state._full_started[-1][1]["reuse"] is True
+
     def test_runs_list_and_detail(self, client):
         runs = client.get("/api/backtest/full/runs").json()["runs"]
         assert runs[0]["id"] == 7 and runs[0]["status"] == "running"
@@ -439,6 +448,12 @@ class TestExecuteRun:
                             lambda rid, status, stats=None, error=None:
                             rec["final"].append((status, stats, error)))
         monkeypatch.setattr(bf, "get_run", lambda rid: dict(RUN))
+        # 复用路径默认关闭（无历史候选源）；统计终值聚合 fake 落库行
+        monkeypatch.setattr(bf, "find_reusable_run", lambda h, rid: None)
+        monkeypatch.setattr(bf, "ok_rows", lambda rid: [
+            {"status": r["status"], "total_return": r["total_return"],
+             "buyhold_return": r["buyhold_return"], "delisted": False}
+            for r in rec["rows"] if r["status"] == "ok"])
         flags = {"n": 0}
 
         def cancel_check(rid):
@@ -499,6 +514,138 @@ class TestExecuteRun:
         asyncio.run(bf.execute_run(7, {"strategy": "ma_cross", "range": "3y"}))
         status, stats, error = rec["final"][0]
         assert status == "failed" and "PG 不可达" in error
+
+
+class TestSpecHash:
+    """复用指纹：键序无关、语义字段敏感、reuse 开关不参与。"""
+
+    BASE = {"strategy": "buy_hold", "range": "3y", "params": {},
+            "exec_mode": "next_open", "commission": 2.5e-4,
+            "sell_tax": 5e-4, "adjust": True,
+            "filters": {"exclude_st": True, "min_bars": 60}}
+
+    def test_key_order_irrelevant(self):
+        flipped = {k: self.BASE[k] for k in reversed(list(self.BASE))}
+        assert bf.spec_hash(self.BASE) == bf.spec_hash(flipped)
+
+    def test_semantic_fields_sensitive_reuse_flag_not(self):
+        h = bf.spec_hash(self.BASE)
+        assert bf.spec_hash({**self.BASE, "range": "1y"}) != h
+        assert bf.spec_hash({**self.BASE, "commission": 3e-4}) != h
+        assert bf.spec_hash({**self.BASE, "filters": {"min_bars": 0}}) != h
+        assert bf.spec_hash({**self.BASE, "reuse": False}) == h
+
+
+class TestExecuteRunReuse:
+    """worker 复用编排：成功股免算、失败股重跑、新进股票补算、统计含复制行。"""
+
+    UNIVERSE = [{"code": "600519", "name": "贵州茅台"},    # 源里 ok → 复制
+                {"code": "000001", "name": "平安银行"},    # 源里失败 → 重跑
+                {"code": "600000", "name": "浦发银行"}]    # 源里没有 → 新算
+
+    def _reuse_env(self, monkeypatch):
+        rec = TestExecuteRun()._worker_env(monkeypatch, self.UNIVERSE)
+        monkeypatch.setattr(bf, "find_reusable_run",
+                            lambda h, rid: {"id": 5, "created_at": None})
+        rec["copies"] = []
+        monkeypatch.setattr(bf, "reusable_ok_codes", lambda rid: ["600519"])
+        monkeypatch.setattr(bf, "copy_ok_rows",
+                            lambda s, d, codes: rec["copies"].append(
+                                (s, d, list(codes))) or len(codes))
+        rec["marks"] = []
+        monkeypatch.setattr(bf, "mark_reuse",
+                            lambda rid, s, n: rec["marks"].append((rid, s, n)))
+        # 统计终值 = 落库行（复制行 + 新算行）
+        monkeypatch.setattr(bf, "ok_rows", lambda rid: [
+            {"status": "ok", "total_return": 0.1,
+             "buyhold_return": 0.05, "delisted": False},   # 复制的 600519
+            *[{"status": r["status"], "total_return": r["total_return"],
+               "buyhold_return": r["buyhold_return"], "delisted": False}
+              for r in rec["rows"] if r["status"] == "ok"]])
+        return rec
+
+    def test_ok_reused_failed_rerun_new_computed(self, monkeypatch):
+        rec = self._reuse_env(monkeypatch)
+        asyncio.run(bf.execute_run(7, {"strategy": "ma_cross", "range": "3y"}))
+        assert rec["copies"] == [(5, 7, ["600519"])]
+        assert rec["marks"] == [(7, 5, 1)]
+        # 引擎只算失败股 + 新股（复用股不重算）
+        assert rec["engine_calls"] == ["000001", "600000"]
+        assert rec["progress"][-1] == (3, 0)          # done = 1 复制 + 2 新算
+        status, stats, _ = rec["final"][0]
+        assert status == "done" and stats["count"] == 3
+
+    def test_reuse_off_recomputes_everything(self, monkeypatch):
+        rec = self._reuse_env(monkeypatch)
+        called = []
+        monkeypatch.setattr(bf, "find_reusable_run",
+                            lambda h, rid: called.append(rid))
+        asyncio.run(bf.execute_run(
+            7, {"strategy": "ma_cross", "range": "3y", "reuse": False}))
+        assert called == []                           # 关开关不查复用源
+        assert rec["copies"] == [] and rec["marks"] == []
+        assert len(rec["rows"]) == 3
+
+    def test_no_candidate_source_full_run(self, monkeypatch):
+        rec = TestExecuteRun()._worker_env(monkeypatch, self.UNIVERSE)
+        asyncio.run(bf.execute_run(7, {"strategy": "ma_cross", "range": "3y"}))
+        assert len(rec["rows"]) == 3
+        assert rec["progress"][-1] == (3, 0)
+        status, _, _ = rec["final"][0]
+        assert status == "done"
+
+
+class TestCopyOkRowsSql:
+    """复制 SQL：服务端整批、带溯源 source_run_id、限 codes 清单、
+    名称跟 stock_basic 现值；空清单不打库。"""
+
+    class FakeCur:
+        def __init__(self, executed, rowcount=0):
+            self.executed = executed
+            self.rowcount = rowcount
+
+        def execute(self, q, p=None):
+            self.executed.append((q, p))
+            return self
+
+    class FakeConn:
+        def __init__(self, executed, rowcount):
+            self.executed = executed
+            self.rowcount = rowcount
+
+        def cursor(self):
+            return TestCopyOkRowsSql.FakeCur(self.executed, self.rowcount)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def commit(self):
+            pass
+
+    def test_sql_shape_and_params(self, monkeypatch):
+        executed = []
+        monkeypatch.setattr(bf, "_connect",
+                            lambda: self.FakeConn(executed, 42))
+        n = bf.copy_ok_rows(5, 7, ["600519", "000001"])
+        assert n == 42
+        q, p = executed[0]
+        assert "INSERT INTO backtest_full_row" in q
+        assert "source_run_id" in q
+        assert "ANY(%s)" in q
+        assert "COALESCE(b.name, r.name)" in q
+        assert "r.status='ok'" in q
+        # 参数序：目标 run、溯源 run（列与 WHERE）、codes 清单
+        assert p == (7, 5, 5, ["600519", "000001"])
+
+    def test_empty_codes_no_query(self, monkeypatch):
+        executed = []
+        monkeypatch.setattr(bf, "_connect",
+                            lambda: self.FakeConn(executed, 0))
+        assert bf.copy_ok_rows(5, 7, []) == 0
+        assert executed == []
 
 
 class TestRowsOkRowsIntegration:
@@ -635,3 +782,38 @@ class TestEquitySnapshotAndCurves:
         assert "equity_snapshot IS NOT NULL" in executed[0]
         assert len(curves) == 2
         assert curves[0]["code"] == "000003"
+
+
+class TestBackfillSpecHashes:
+    """老 run 指纹回填：由落库参数现算 spec_hash（幂等，只处理 NULL 行）。"""
+
+    class FakeCur:
+        def __init__(self, store):
+            self.store = store
+
+        def execute(self, q, p=None):
+            self.store.append((q, p))
+            return self
+
+        def fetchall(self):
+            return [(7, "buy_hold", "3y", '{}', "next_open", 2.5e-4, 5e-4,
+                     True, '{"exclude_st": true, "min_bars": 60}')]
+
+    class FakeConn:
+        def __init__(self, store):
+            self.store = store
+
+        def cursor(self):
+            return TestBackfillSpecHashes.FakeCur(self.store)
+
+    def test_recomputes_hash_from_stored_params(self):
+        store = []
+        bf._backfill_spec_hashes(self.FakeConn(store))
+        updates = [(q, p) for q, p in store if q.startswith("UPDATE")]
+        assert len(updates) == 1
+        expect = bf.spec_hash({
+            "strategy": "buy_hold", "range": "3y", "params": {},
+            "exec_mode": "next_open", "commission": 2.5e-4,
+            "sell_tax": 5e-4, "adjust": True,
+            "filters": {"exclude_st": True, "min_bars": 60}})
+        assert updates[0][1] == (expect, 7)
