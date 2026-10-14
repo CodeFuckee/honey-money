@@ -1433,9 +1433,17 @@ watch(
             <div v-if="srcPage && srcPage.field === 'eastmoney'" class="card cookie-card"
               :class="emCookie.valid ? 'ok' : 'warn'">
               <div class="ck-head">
+                <svg v-if="emCookie.valid" class="ck-icon" viewBox="0 0 16 16" aria-hidden="true">
+                  <circle cx="8" cy="8" r="7" fill="#198038"/>
+                  <path d="M4.8 8.2l2.2 2.2 4.2-4.6" stroke="#fff" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                <svg v-else class="ck-icon" viewBox="0 0 16 16" aria-hidden="true">
+                  <circle cx="8" cy="8" r="7" fill="#da1e28"/>
+                  <path d="M5.2 5.2l5.6 5.6M10.8 5.2l-5.6 5.6" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/>
+                </svg>
                 <b>东财爬虫 Cookie</b>
                 <span class="ck-state" :class="emCookie.valid ? 'ok' : 'bad'">
-                  {{ emCookie.valid ? '✓ 有效' : (emCookie.configured ? '✗ 已失效' : '✗ 未配置') }}
+                  {{ emCookie.valid ? '有效' : (emCookie.configured ? '已失效' : '未配置') }}
                 </span>
               </div>
               <div v-if="emCookie.configured && emCookie.masked" class="ck-masked">已存：{{ emCookie.masked }}</div>
@@ -2820,19 +2828,22 @@ body {
 }
 .delisted-note.muted { background: #f4f4f4; border-color: #e0e0e0; color: #525252; }
 
-/* 东财 Cookie 卡 */
-.cookie-card { margin-bottom: 20px; padding: 16px 20px; }
-.cookie-card.warn { border-left: 4px solid #f1c21b; background: #fff8e6; }
-.cookie-card.ok { border-left: 4px solid #198038; }
-.ck-head { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; font-size: 14px; }
+/* 东财 Cookie 卡（Carbon 内联通知规范：白底 + 左 4px 状态条 + 方角 + 状态图标） */
+.cookie-card { margin-bottom: 20px; padding: 14px 20px; background: #ffffff; border-radius: 0; }
+.cookie-card.warn { border: 1px solid #e0e0e0; border-left: 4px solid #da1e28; }
+.cookie-card.ok { border: 1px solid #e0e0e0; border-left: 4px solid #198038; }
+.ck-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; font-size: 14px; }
+.ck-icon { width: 16px; height: 16px; flex: none; }
 .ck-state.ok { color: #198038; font-weight: 600; }
 .ck-state.bad { color: #da1e28; font-weight: 600; }
 .ck-masked { font-size: 12px; color: #525252; margin-bottom: 6px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .ck-help { font-size: 13px; line-height: 1.7; color: #393939; margin: 6px 0 10px; }
 .ck-help p { margin: 4px 0; }
-.ck-help code { background: #f4f4f4; padding: 1px 6px; border-radius: 2px;
+.ck-help code { background: #f4f4f4; padding: 1px 6px; border-radius: 0;
   font-size: 12px; }
+.cookie-card .p-inputtext { border-radius: 0; }
+.cookie-card .p-button { border-radius: 0; }
 .ck-form { display: flex; gap: 10px; align-items: center; }
 .ck-input { flex: 1; min-width: 0; font-size: 12px; }
 .ck-msg { margin-top: 10px; font-size: 13px; }
