@@ -850,25 +850,84 @@ async function loadDelistTop() {
 const _onDelistResize = () => delistChartBox.chart && delistChartBox.chart.resize()
 
 const fullCurvesAll = ref(true)   // 主图当前是否为全部股票模式
+const fullView = ref('all')        // 图表视图: all | top20 | representative
+const FULL_VIEWS = [
+  { id: 'all', label: '全部' },
+  { id: 'top20', label: 'Top 20' },
+  { id: 'representative', label: '四代表股' },
+]
+
+// 四代表股挑选：收益率最高 / 最低 / 最接近中位数 / 最接近平均数（按最终收益）
+function pickRepresentative(curves) {
+  const withRet = curves.map(c => {
+    const eq = c.equity || []
+    return { ...c, _ret: eq.length ? eq[eq.length - 1][1] : null }
+  }).filter(c => c._ret != null)
+  if (!withRet.length) return []
+  const rets = withRet.map(c => c._ret)
+  const max = Math.max(...rets), min = Math.min(...rets)
+  const mean = rets.reduce((a, b) => a + b, 0) / rets.length
+  const sortedRets = [...rets].sort((a, b) => a - b)
+  const mid = sortedRets.length % 2
+    ? sortedRets[(sortedRets.length - 1) / 2]
+    : (sortedRets[sortedRets.length / 2 - 1] + sortedRets[sortedRets.length / 2]) / 2
+  const pick = (target, exclude) => withRet
+    .filter(c => !exclude.has(c.code))
+    .reduce((best, c) =>
+      Math.abs(c._ret - target) < Math.abs(best._ret - target) ? c : best)
+  const best = withRet.reduce((a, b) => (b._ret > a._ret ? b : a))
+  const worst = withRet.reduce((a, b) => (b._ret < a._ret ? b : a))
+  const used = new Set([best.code, worst.code])
+  const nearMedian = pick(mid, used); used.add(nearMedian.code)
+  const nearMean = pick(mean, used)
+  const label = (c, tag) => ({ ...c, name: `${tag}(${c._ret >= 0 ? '+' : ''}${(c._ret * 100).toFixed(0)}%) ${c.code} ${c.name}` })
+  return [
+    label(best, '最高'), label(worst, '最低'),
+    label(nearMedian, '近中位'), label(nearMean, '近均值'),
+  ]
+}
 
 async function loadFullCurves() {
   try {
-    // 首选全部股票曲线快照（/curves 直读不重算）；旧任务无快照回退 Top20
-    const rc = await (await fetch(
-      `/api/backtest/full/runs/${fullRunId.value}/curves`)).json()
-    let curves = rc.curves || []
-    let all = true
-    if (!curves.length) {
+    const runId = fullRunId.value
+    if (fullView.value === 'top20') {
       const r = await (await fetch(
-        `/api/backtest/full/runs/${fullRunId.value}/top?n=20`)).json()
-      curves = r.curves || []
-      all = false
+        `/api/backtest/full/runs/${runId}/top?n=20`)).json()
+      fullCurves.value = r.curves || []
+      fullCurvesAll.value = false
+    } else if (fullView.value === 'representative') {
+      // 代表股基于全部曲线（有快照）或 Top20 兜底
+      let curves = []
+      try {
+        const rc = await (await fetch(
+          `/api/backtest/full/runs/${runId}/curves`)).json()
+        curves = rc.curves || []
+      } catch { curves = [] }
+      if (!curves.length) {
+        const r = await (await fetch(
+          `/api/backtest/full/runs/${runId}/top?n=20`)).json()
+        curves = r.curves || []
+      }
+      fullCurves.value = pickRepresentative(curves)
+      fullCurvesAll.value = false
+    } else {
+      const [rc, rd] = await Promise.all([
+        fetch(`/api/backtest/full/runs/${runId}/curves`).then(r => r.json()),
+        fetch(`/api/backtest/full/runs/${runId}/curves?delisted=only`)
+          .then(r => r.json()).catch(() => ({ curves: [] })),
+      ])
+      fullCurves.value = rc.curves || []
+      fullDelistedCodes.value = new Set((rd.curves || []).map(c => c.code))
+      fullCurvesAll.value = true
     }
-    fullCurves.value = curves
-    fullCurvesAll.value = all
     await nextTick()
     renderFullChart()
   } catch { fullCurves.value = [] }
+}
+
+function setFullView(v) {
+  fullView.value = v
+  loadFullCurves()
 }
 
 async function startFullRun() {
@@ -964,6 +1023,8 @@ function pickFullStock(code) {
 
 // 曲线通用绘制：全部股票模式（细线半透明、无图例无悬浮、渐进渲染，
 // 数千 series 压测可用）；精选模式（≤20 条）保留图例与悬浮
+const fullDelistedCodes = ref(new Set())  // 全部视图下退市股代码集合（高亮标注）
+
 function drawCurves(el, box, hook, curves, all) {
   if (box.chart) { box.chart.dispose(); box.chart = null }
   if (!el.value || !curves.length) return
@@ -974,13 +1035,17 @@ function drawCurves(el, box, hook, curves, all) {
   const dates = [...dateSet].sort()
   const series = curves.map(c => {
     const map = Object.fromEntries(c.equity.map(row => [row[0], row[1]]))
+    // 全部视图：退市股红线加粗高亮（幸存者偏差可视化主角）；在市股细灰蓝
+    const isDelisted = all && fullDelistedCodes.value.has(c.code)
     return {
-      name: `${c.code} ${c.name}`, type: 'line', showSymbol: false,
+      name: `${c.code} ${c.name}${isDelisted ? '［退市］' : ''}`,
+      type: 'line', showSymbol: false,
       connectNulls: false, sampling: all ? 'lttb' : undefined,
       progressive: all ? 2000 : undefined,
       progressiveThreshold: all ? 3000 : undefined,
-      lineStyle: all ? { width: 0.7, opacity: 0.3, color: '#4a6fa5' }
-                     : { width: 1.2 },
+      lineStyle: isDelisted ? { width: 1.4, opacity: 0.85, color: '#da1e28' }
+        : all ? { width: 0.7, opacity: 0.3, color: '#4a6fa5' }
+              : { width: 1.2 },
       data: dates.map(d => map[d] ?? null),
     }
   })
@@ -2020,6 +2085,13 @@ watch(
                       <div class="card lm"><div class="lm-k">最差收益</div><div class="lm-v chg-down">{{ fullRun.stats?.worst_return != null ? fmtPctSigned(fullRun.stats.worst_return) : '—' }}</div></div>
                       <div class="card lm"><div class="lm-k">跑赢买入持有</div><div class="lm-v">{{ fullRun.stats?.beat_buyhold_pct != null ? ((fullRun.stats.beat_buyhold_pct) * 100).toFixed(1) + '%' : '—' }}</div></div>
                     </div>
+                    <div class="chart-toolbar">
+                      <span class="ct-label">视图：</span>
+                      <button v-for="v in FULL_VIEWS" :key="v.id" class="ct-btn"
+                        :class="{ on: fullView === v.id }" @click="setFullView(v.id)">{{ v.label }}</button>
+                      <span v-if="fullView === 'all' && fullDelistedCodes.size"
+                        class="ct-hint">红线 = 退市股（{{ fullDelistedCodes.size }} 只）</span>
+                    </div>
                     <div class="card chart-card"><div ref="fullChartEl" class="learn-chart"></div>
                       <div class="detail" style="padding: 0 14px 10px">收益 Top 20 归一化净值叠加（策略净值，起点=1）</div></div>
 
@@ -2853,4 +2925,15 @@ body {
   margin-left: auto; }
 .src-dot.ok { background: #198038; }
 .src-dot.bad { background: #f1c21b; }
+
+/* 图表视图切换（Carbon） */
+.chart-toolbar { display: flex; align-items: center; gap: 8px; margin: 10px 0 6px; }
+.ct-label { font-size: 12px; color: #525252; }
+.ct-btn {
+  border: 1px solid #8d8d8d; background: #fff; color: #161616;
+  font: inherit; font-size: 12px; padding: 4px 14px; cursor: pointer;
+}
+.ct-btn.on { background: #0f62fe; border-color: #0f62fe; color: #fff; font-weight: 600; }
+.ct-btn:hover:not(.on) { background: #e8e8e8; }
+.ct-hint { font-size: 12px; color: #da1e28; margin-left: 8px; }
 </style>
