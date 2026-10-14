@@ -7,6 +7,7 @@ Cookie 由用户从浏览器复制（登录或匿名访问东财均可获得）�
 """
 
 import os
+import re
 import time
 
 import httpx
@@ -33,13 +34,22 @@ def load_cookie(path: str | None = None) -> str:
         return ""
 
 
+def sanitize_cookie(cookie: str) -> str:
+    """清洗用户粘贴的 Cookie：去引号包裹、去换行（浏览器复制常带折行）、
+    去分号后多余空格——HTTP 头不允许值含换行/前导空格（LocalProtocolError）。"""
+    c = cookie.strip().strip('"').strip("'").strip()
+    c = re.sub(r"[\r\n\t]+", " ", c)          # 换行/制表 → 空格
+    c = re.sub(r";\s+", "; ", c)               # 分号后统一单空格
+    c = re.sub(r"^;\s*", "", c)                # 去首部分号残渣
+    return c.strip()
+
+
 def save_cookie(cookie: str, path: str | None = None) -> str:
-    """存 Cookie（去首尾空白与引号包裹），返回落盘路径。"""
+    """存 Cookie（清洗后落盘），返回落盘路径。"""
     path = path or EM_COOKIE_PATH
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    clean = cookie.strip().strip('"').strip("'")
     with open(path, "w", encoding="utf-8") as f:
-        f.write(clean)
+        f.write(sanitize_cookie(cookie))
     return path
 
 
@@ -60,6 +70,7 @@ def verify_cookie(cookie: str, timeout: float = 10.0) -> dict:
     - 连接层拒绝（RemoteDisconnected 等）→ IP 风控仍在（与 Cookie 无关也要告知）
     """
     checked_at = time.strftime("%Y-%m-%d %H:%M:%S")
+    cookie = sanitize_cookie(cookie)
     if not cookie:
         return {"valid": False, "http_status": None,
                 "reason": "cookie 为空", "checked_at": checked_at}

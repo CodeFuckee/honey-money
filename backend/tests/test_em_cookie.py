@@ -56,3 +56,18 @@ class TestVerify:
             def json(self): return {"rc": 3, "data": None}
         monkeypatch.setattr(httpx, "get", lambda *a, **kw: R())
         assert em_cookie.verify_cookie("a=1")["valid"] is False
+
+
+class TestSanitize:
+    """用户粘贴的 Cookie 常带换行/前导空格——HTTP 头非法值必须清洗
+    （实测：粘贴值首字符为空格 → httpx LocalProtocolError 拒发）。"""
+
+    def test_leading_space_and_newlines(self):
+        dirty = " qgqp_b_id=abc;\n st_nvi=xyz;\n  HAList=a-sh "
+        clean = em_cookie.sanitize_cookie(dirty)
+        assert clean == "qgqp_b_id=abc; st_nvi=xyz; HAList=a-sh"
+        assert "\n" not in clean and not clean.startswith(" ")
+
+    def test_quoted_multiline(self):
+        clean = em_cookie.sanitize_cookie('"a=1;\nb=2"')
+        assert clean == "a=1; b=2"
