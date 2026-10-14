@@ -119,10 +119,25 @@ def build_crawl_executor(dsn: str, proxy_pool_url: str):
                 if n:
                     print(f"[migrate] {n} 行 source delisted → sina")
         else:
+            from . import em_cookie
+            cookie = em_cookie.load_cookie()
+            if not cookie:
+                raise RuntimeError(
+                    "东财源需要浏览器 Cookie：请在网页端「数据源 → 东方财富」"
+                    "的 Cookie 卡粘贴保存后重试")
+            verdict = em_cookie.verify_cookie(cookie)
+            if not verdict["valid"]:
+                raise RuntimeError(
+                    f"东财 Cookie 验证失败：{verdict['reason']}"
+                    "——请更换新 Cookie 后重试")
+            print(f"[cookie] 东财 Cookie 验证通过（{verdict.get('checked_at')}）")
+            # 家宽/办公网直连 + drip 节奏是东财唯一存活路径（免费代理全断，
+            # pool 模式实测 ProxyError 循环——与 CLI/爬虫历史结论一致）
             direct = httpx_async_client(timeout=15.0)
             pool = httpx_async_client(base_url=proxy_pool_url, timeout=5.0)
             client = EastmoneyClient(rate=rate, proxy_broker=ProxyBroker(http=pool),
-                                     http=direct, proxy_mode="pool")
+                                     http=direct, proxy_mode="direct",
+                                     cookie=cookie)
         try:
             stocks = await client.fetch_stock_list()
             with psycopg.connect(dsn) as conn:
