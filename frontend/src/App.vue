@@ -790,6 +790,9 @@ async function loadFullRun(withResults = true) {
     if (!r.ok) { fullRun.value = null; return }
     fullRun.value = await r.json()
     if (withResults && fullViewable.value) {
+      // 先等详情渲染（v-if="fullRun" 图表容器才挂载），再拉曲线并绘制——
+      // 并行时序下 loadFullCurves 先回来时 el 为 null 直接 return，图永不画
+      await nextTick()
       await Promise.all([loadFullRows(), loadDelistRows(), loadFullCurves(),
                          loadDelistTop()])
     }
@@ -887,12 +890,16 @@ function pickRepresentative(curves) {
   ]
 }
 
+const _curvesReqSeq = { v: 0 }   // 竞态守卫：慢请求返回时若已过期则丢弃
+
 async function loadFullCurves() {
+  const seq = ++_curvesReqSeq.v
   try {
     const runId = fullRunId.value
     if (fullView.value === 'top20') {
       const r = await (await fetch(
         `/api/backtest/full/runs/${runId}/top?n=20`)).json()
+      if (seq !== _curvesReqSeq.v) return   // 过期响应丢弃
       fullCurves.value = r.curves || []
       fullCurvesAll.value = false
     } else if (fullView.value === 'representative') {
@@ -908,6 +915,7 @@ async function loadFullCurves() {
           `/api/backtest/full/runs/${runId}/top?n=20`)).json()
         curves = r.curves || []
       }
+      if (seq !== _curvesReqSeq.v) return
       fullCurves.value = pickRepresentative(curves)
       fullCurvesAll.value = false
     } else {
@@ -916,10 +924,12 @@ async function loadFullCurves() {
         fetch(`/api/backtest/full/runs/${runId}/curves?delisted=only`)
           .then(r => r.json()).catch(() => ({ curves: [] })),
       ])
+      if (seq !== _curvesReqSeq.v) return
       fullCurves.value = rc.curves || []
       fullDelistedCodes.value = new Set((rd.curves || []).map(c => c.code))
       fullCurvesAll.value = true
     }
+    if (seq !== _curvesReqSeq.v) return
     await nextTick()
     renderFullChart()
   } catch { fullCurves.value = [] }
@@ -1062,7 +1072,12 @@ function drawCurves(el, box, hook, curves, all) {
   })
 }
 
-function renderFullChart() {
+function renderFullChart(attempt = 0) {
+  // setTimeout 而非 rAF：headless/后台标签页 rAF 不触发（曾致自动化环境图永不渲染）
+  if (!fullChartEl.value && attempt < 50) {
+    // 大响应加载期间详情区渲染慢，重试窗口 15s（50×300ms）
+    return void setTimeout(() => renderFullChart(attempt + 1), 300)
+  }
   drawCurves(fullChartEl, fullChartBox, '__fullChart',
              fullCurves.value, fullCurvesAll.value)
 }
