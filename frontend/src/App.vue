@@ -864,7 +864,9 @@ const FULL_VIEWS = [
 function pickRepresentative(curves) {
   const withRet = curves.map(c => {
     const eq = c.equity || []
-    return { ...c, _ret: eq.length ? eq[eq.length - 1][1] : null }
+    // 曲线末点是净值（起步 1.0），收益率 = 净值 - 1
+    // （曾误把净值当收益率：左江退净值 0.0047 被标成 "+0%"，实际 -99.5%）
+    return { ...c, _ret: eq.length ? eq[eq.length - 1][1] - 1 : null }
   }).filter(c => c._ret != null)
   if (!withRet.length) return []
   const rets = withRet.map(c => c._ret)
@@ -874,20 +876,23 @@ function pickRepresentative(curves) {
   const mid = sortedRets.length % 2
     ? sortedRets[(sortedRets.length - 1) / 2]
     : (sortedRets[sortedRets.length / 2 - 1] + sortedRets[sortedRets.length / 2]) / 2
-  const pick = (target, exclude) => withRet
-    .filter(c => !exclude.has(c.code))
-    .reduce((best, c) =>
+  const pick = (target, exclude) => {
+    const pool = withRet.filter(c => !exclude.has(c.code))
+    return pool.length ? pool.reduce((best, c) =>
       Math.abs(c._ret - target) < Math.abs(best._ret - target) ? c : best)
+      : null
+  }
   const best = withRet.reduce((a, b) => (b._ret > a._ret ? b : a))
   const worst = withRet.reduce((a, b) => (b._ret < a._ret ? b : a))
   const used = new Set([best.code, worst.code])
-  const nearMedian = pick(mid, used); used.add(nearMedian.code)
+  const nearMedian = pick(mid, used); if (nearMedian) used.add(nearMedian.code)
   const nearMean = pick(mean, used)
-  const label = (c, tag) => ({ ...c, name: `${tag}(${c._ret >= 0 ? '+' : ''}${(c._ret * 100).toFixed(0)}%) ${c.code} ${c.name}` })
+  const label = (c, tag) => ({ ...c, name: `${tag}(${c._ret >= 0 ? '+' : ''}${(c._ret * 100).toFixed(1)}%) ${c.code} ${c.name}` })
   return [
     label(best, '最高'), label(worst, '最低'),
-    label(nearMedian, '近中位'), label(nearMean, '近均值'),
-  ]
+    nearMedian && label(nearMedian, '近中位'),
+    nearMean && label(nearMean, '近均值'),
+  ].filter(Boolean)
 }
 
 const _curvesReqSeq = { v: 0 }   // 竞态守卫：慢请求返回时若已过期则丢弃
@@ -1047,8 +1052,11 @@ function drawCurves(el, box, hook, curves, all) {
     const map = Object.fromEntries(c.equity.map(row => [row[0], row[1]]))
     // 全部视图：退市股红线加粗高亮（幸存者偏差可视化主角）；在市股细灰蓝
     const isDelisted = all && fullDelistedCodes.value.has(c.code)
+    // 代表股曲线的 name 已是「标签(收益率) 代码 名称」，不再叠加代码前缀
+    const name = c.name.includes(c.code)
+      ? c.name : `${c.code} ${c.name}${isDelisted ? '［退市］' : ''}`
     return {
-      name: `${c.code} ${c.name}${isDelisted ? '［退市］' : ''}`,
+      name,
       type: 'line', showSymbol: false,
       connectNulls: false, sampling: all ? 'lttb' : undefined,
       progressive: all ? 2000 : undefined,
@@ -1061,12 +1069,18 @@ function drawCurves(el, box, hook, curves, all) {
   })
   box.chart.setOption({
     animation: false,
-    tooltip: all ? { show: false } : { trigger: 'axis' },
+    tooltip: all ? { show: false }
+                 : { trigger: 'axis',
+                     valueFormatter: v => v == null ? '—'
+                       : ((v - 1) * 100).toFixed(1) + '%' },
     legend: all ? { show: false }
                 : { data: series.map(s => s.name), top: 0, type: 'scroll' },
     grid: { left: 60, right: 20, top: 40, bottom: 46 },
     xAxis: { type: 'category', data: dates, axisLabel: { fontSize: 10 } },
-    yAxis: { scale: true, splitLine: { lineStyle: { color: '#eee' } } },
+    // Y 轴收益率口径（净值-1），与统计卡/代表股标签一致
+    yAxis: { scale: true,
+             axisLabel: { formatter: v => ((v - 1) * 100).toFixed(0) + '%' },
+             splitLine: { lineStyle: { color: '#eee' } } },
     dataZoom: [{ type: 'inside' }],
     series,
   })
@@ -2108,7 +2122,7 @@ watch(
                         class="ct-hint">红线 = 退市股（{{ fullDelistedCodes.size }} 只）</span>
                     </div>
                     <div class="card chart-card"><div ref="fullChartEl" class="learn-chart"></div>
-                      <div class="detail" style="padding: 0 14px 10px">收益 Top 20 归一化净值叠加（策略净值，起点=1）</div></div>
+                      <div class="detail" style="padding: 0 14px 10px">全市场累计收益率曲线（起点 = 0%）</div></div>
 
                     <!-- 退市股票总结：独立分组，样式与全市场回测结果一致 -->
                     <template v-if="delistRows.rows.length || delistRows.total > 0">
@@ -2125,7 +2139,7 @@ watch(
                       <div class="card lm"><div class="lm-k">跑赢买入持有</div><div class="lm-v">{{ delistRows.stats.beat_buyhold_pct != null ? ((delistRows.stats.beat_buyhold_pct) * 100).toFixed(1) + '%' : '—' }}</div></div>
                     </div>
                     <div class="card chart-card"><div ref="delistChartEl" class="learn-chart"></div>
-                      <div class="detail" style="padding: 0 14px 10px">退市股收益 Top 20 归一化净值叠加（策略净值，起点=1）</div></div>
+                      <div class="detail" style="padding: 0 14px 10px">退市股累计收益率曲线（起点 = 0%）</div></div>
                     <div class="card detail-table-card" v-if="delistRows.rows.length">
                       <table class="runs-table learn-delist-cmp">
                         <thead><tr>

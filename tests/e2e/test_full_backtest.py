@@ -60,7 +60,7 @@ ALL_CURVES = {"curves": [
     {"code": "000001", "name": "平安银行", "total_return": 0.05,
      "equity": [["2026-01-02", 1.0], ["2026-03-01", 1.05]]},
     {"code": "000003", "name": "PT金田Ａ", "total_return": -0.62,
-     "equity": [["2026-01-02", 1.0], ["2026-03-01", 0.38]]}]}
+     "equity": [["2026-01-02", 1.0], ["2026-03-01", 0.005]]}]}
 
 DELIST_CURVES = {"curves": [
     {"code": "000004", "name": "国华退", "total_return": -0.9681,
@@ -341,3 +341,25 @@ class TestFullBacktest:
             "() => { const c = window.__delistChart; if (!c) return {hook:false};"
             " return {hook: true, n: c.getOption().series.length}; }")
         assert delist_chart == {"hook": True, "n": 1}
+
+    def test_e2e_010_representative_labels_return_basis(self, servers, page,
+                                                        full_api):
+        """P1 四代表股标签按「净值末点 - 1」的收益率口径——回归：曾把净值
+        直接当收益率（净值 0.005 被标成 "+0%"，与统计卡最差 -99.5% 矛盾）；
+        选中态按钮与三视图切换正常。"""
+        _, frontend_port = servers
+        open_learn(page, frontend_port)
+        goto_full_mode(page)
+        page.locator(".ct-btn", has_text="四代表股").click()
+        expect(page.locator(".ct-btn", has_text="四代表股")
+               ).to_have_class(re.compile("on"))
+        page.wait_for_function(
+            "() => { const c = window.__fullChart;"
+            " return c && c.getOption().series.some("
+            "s => String(s.name).startsWith('最低(')); }", timeout=10000)
+        names = page.evaluate(
+            "() => window.__fullChart.getOption().series.map(s => s.name)")
+        assert "最高(+26.0%) 600519 贵州茅台" in names
+        # 最低必须是收益率 -99.5%，而非净值 0.005（旧实现标成 "+0%"）
+        assert "最低(-99.5%) 000003 PT金田Ａ" in names
+        assert "近中位(+5.0%) 000001 平安银行" in names
