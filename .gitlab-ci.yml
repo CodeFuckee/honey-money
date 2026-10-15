@@ -75,24 +75,23 @@ deploy-nas:
     - $DC -p honey-money ps
     # 部署健康门：compose 返回 ≠ 后端可服务——uvicorn 要先跑完 lifespan
     # （schema 初始化/调度器启动）才接客，期间 nginx 502、前端整页「数据
-    # 不可用」（2026-10-14 实测约 1 分钟窗口）。轮询 healthz 到 200 才算
-    # 部署成功；超时判失败，让流水线显式红出来。
-    # 探测要点（首跑误判教训 2026-10-15）：curl 必须带 --noproxy '*'——
-    # runner 环境若带 proxy 变量，打 127.0.0.1 会被代理劫持致恒 000；
-    # 并以宿主 LAN IP 兜底双目标（等价真实用户访问路径）。
+    # 不可用」（2026-10-14 实测约 1 分钟窗口）。轮询 healthz 通过才算部署
+    # 成功；超时判失败，让流水线显式红出来。
+    # 探测通道（两次误判教训 2026-10-15）：本 runner 的 "shell" 实为容器化
+    # 环境（hostname -I = 172.19.0.2 网桥地址），job 内 curl 打 127.0.0.1/
+    # 宿主 LAN IP 均恒 000——**只走 docker exec 在 frontend 容器内自探**
+    # （nginx→backend 反代链路，不依赖任何宿主网络拓扑）。
     - |
-      . ./.env 2>/dev/null || true
-      port="${FRONTEND_PORT:-28080}"
-      host_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
       ok=""
       for i in $(seq 1 20); do
-        for target in "127.0.0.1" "$host_ip"; do
-          [ -z "$target" ] && continue
-          code=$(curl -s -m 3 --noproxy '*' -o /dev/null -w "%{http_code}" \
-            "http://${target}:${port}/healthz" || true)
-          echo "healthz[$i/20] ${target}:${port} -> HTTP ${code:-none}"
-          if [ "$code" = "200" ]; then ok=1; break 2; fi
-        done
+        cid=$($DC -p honey-money ps -q frontend | head -1)
+        if [ -n "$cid" ] && docker exec "$cid" wget -q -O /dev/null \
+            http://127.0.0.1:80/healthz; then
+          echo "healthz[$i/20]: 200（frontend 容器内自探通过）"
+          ok=1
+          break
+        fi
+        echo "healthz[$i/20]: 未就绪"
         sleep 3
       done
       if [ -n "$ok" ]; then echo "部署健康门通过"; exit 0; fi
