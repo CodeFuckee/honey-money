@@ -77,16 +77,25 @@ deploy-nas:
     # （schema 初始化/调度器启动）才接客，期间 nginx 502、前端整页「数据
     # 不可用」（2026-10-14 实测约 1 分钟窗口）。轮询 healthz 到 200 才算
     # 部署成功；超时判失败，让流水线显式红出来。
+    # 探测要点（首跑误判教训 2026-10-15）：curl 必须带 --noproxy '*'——
+    # runner 环境若带 proxy 变量，打 127.0.0.1 会被代理劫持致恒 000；
+    # 并以宿主 LAN IP 兜底双目标（等价真实用户访问路径）。
     - |
       . ./.env 2>/dev/null || true
       port="${FRONTEND_PORT:-28080}"
+      host_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+      ok=""
       for i in $(seq 1 20); do
-        code=$(curl -s -m 3 -o /dev/null -w "%{http_code}" \
-          "http://127.0.0.1:${port}/healthz" || true)
-        echo "healthz[$i/20]: HTTP $code"
-        [ "$code" = "200" ] && exit 0 || true
+        for target in "127.0.0.1" "$host_ip"; do
+          [ -z "$target" ] && continue
+          code=$(curl -s -m 3 --noproxy '*' -o /dev/null -w "%{http_code}" \
+            "http://${target}:${port}/healthz" || true)
+          echo "healthz[$i/20] ${target}:${port} -> HTTP ${code:-none}"
+          if [ "$code" = "200" ]; then ok=1; break 2; fi
+        done
         sleep 3
       done
+      if [ -n "$ok" ]; then echo "部署健康门通过"; exit 0; fi
       echo "部署后 60s healthz 未就绪，判部署失败"; exit 1
     # 注：不做 docker image prune——群晖 daemon 上实测会挂起不返回（流水线 3080 卡 30min），
     # 镜像清理留给 NAS 定期任务（Container Manager 或计划任务手动清理）
