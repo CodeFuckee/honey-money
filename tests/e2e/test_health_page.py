@@ -233,3 +233,32 @@ def test_error_banner_icon_sizing(servers, page):
         f"警告图标被撑大: {box}"
     bh = page.locator(".error-banner").evaluate("el => el.getBoundingClientRect().height")
     assert bh <= 80, f"错误横幅高度异常: {bh}"
+
+
+def test_dashboard_auto_retry_recovers(servers, page):
+    """部署窗口自愈：healthz 先 502（nginx 拿不到重启中的 upstream）后 200，
+    页面按 2/5s 退避自动重试恢复后端卡——曾经失败即死、停在「不可用」
+    直到手动刷新（2026-10-14 部署窗口仪表盘全卡数据不可用的根因之一）。"""
+    _, frontend_port = servers
+    calls = {"n": 0}
+
+    def flaky_healthz(route):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            route.fulfill(status=502, content_type="text/html",
+                          body="<html><body>502 Bad Gateway</body></html>")
+            return
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(
+            {"status": "ok", "service": "honey-money-backend",
+             "version": "test"}))
+
+    page.route("**/healthz", flaky_healthz)
+    page.goto(f"http://127.0.0.1:{frontend_port}/")
+
+    # 首次 502：后端卡不可用
+    expect(page.locator(".card", has_text="后端 API")
+           .locator(".state")).to_have_text("不可用", timeout=10000)
+    # 自动退避重试（2s→5s）：第 3 次探测 200 → 卡片自愈为运行中
+    expect(page.locator(".card", has_text="后端 API")
+           .locator(".state")).to_have_text("运行中", timeout=15000)
+    assert calls["n"] >= 3, f"应有多次自动重试，实际探测 {calls['n']} 次"

@@ -139,23 +139,49 @@ const SRC_ITEMS = [
   { id: 'src-ef', label: '东方财富', field: 'eastmoney', tagCls: 'src-ef' },
 ]
 
-function refresh() {
+// 仪表盘自愈：部署/重启窗口里 nginx 会短暂 502（compose 返回 ≠ 后端
+// lifespan 完成），失败按 2/5/10/30s 退避重试（约 2 分钟自愈窗口），
+// 全部成功即停；手动「重新检测」/聚焦回页面都会重置退避重取
+const DASH_RETRY_DELAYS = [2000, 5000, 10000, 30000]
+const dashRetryIdx = ref(0)
+let dashRetryTimer = null
+
+function refresh(fromRetry = false) {
+  if (!fromRetry) {
+    dashRetryIdx.value = 0
+    clearTimeout(dashRetryTimer)
+  }
   // 三路探测各自独立结算，谁先回来谁先上屏——/api/infra 要探 PG/代理池、
   // /api/crawl/stats 走大表统计，慢的一路不再拖着整页骨架空转
   pendingBackend.value = pendingInfra.value = pendingCrawl.value = true
-  fetch('/healthz').then(r => r.json())
-    .then(hz => { backend.value = hz })
-    .catch(e => { backend.value = { status: 'down', detail: String(e) } })
-    .finally(() => { pendingBackend.value = false })
-  fetch('/api/infra').then(r => r.json())
-    .then(inf => { infra.value = inf })
-    .catch(() => { infra.value = null })          // null → PG/代理池按未连接显示
-    .finally(() => { pendingInfra.value = false })
-  fetch('/api/crawl/stats').then(r => r.json())
-    .then(cr => { crawl.value = cr })
-    .catch(() => { crawl.value = null })          // null → 爬虫卡按数据不可用显示
-    .finally(() => { pendingCrawl.value = false })
+  const probe = (url, pendingRef, onOk) => fetch(url).then(r => {
+    if (!r.ok) throw new Error(`HTTP ${r.status}`)   // nginx 502 返回 HTML，非 JSON
+    return r.json()
+  }).then(v => { pendingRef.value = false; onOk(v); return true },
+          () => { pendingRef.value = false; onOk(null); return false })
+  Promise.all([
+    probe('/healthz', pendingBackend, v => {
+      backend.value = v || { status: 'down', detail: '探测失败' }
+    }),
+    probe('/api/infra', pendingInfra, v => { infra.value = v }),   // null → PG/代理池按未连接显示
+    probe('/api/crawl/stats', pendingCrawl, v => { crawl.value = v }), // null → 爬虫卡按数据不可用显示
+  ]).then(ok => {
+    if (ok.every(Boolean) || dashRetryIdx.value >= DASH_RETRY_DELAYS.length)
+      return
+    const delay = DASH_RETRY_DELAYS[dashRetryIdx.value]
+    dashRetryIdx.value += 1
+    dashRetryTimer = setTimeout(() => refresh(true), delay)
+  })
 }
+
+function _onDashVisible() {
+  if (!document.hidden && activeNav.value === 'dash') refresh()
+}
+onMounted(() => document.addEventListener('visibilitychange', _onDashVisible))
+onUnmounted(() => {
+  document.removeEventListener('visibilitychange', _onDashVisible)
+  clearTimeout(dashRetryTimer)
+})
 
 const fmt = n => (n ?? 0).toLocaleString('zh-CN')
 const backendDown = computed(() => backend.value.status === 'down')
@@ -1415,7 +1441,7 @@ watch(
                 <circle cx="8" cy="8" r="7" fill="#da1e28"/>
                 <path d="M5.2 5.2l5.6 5.6M10.8 5.2l-5.6 5.6" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/>
               </svg>
-              <span><b class="eb-title">后端 API 不可用：</b>Connection refused · 请检查 backend 容器 / uvicorn 进程 / docker compose ps</span>
+              <span><b class="eb-title">后端 API 不可用：</b>可能正在部署/重启，页面会自动重试恢复 · 持续不可用请检查 backend 容器 / uvicorn 进程 / docker compose ps</span>
             </div>
 
             <!-- 三张状态卡：各自独立结算，谁先回来谁先上屏 -->

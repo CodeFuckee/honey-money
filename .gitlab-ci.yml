@@ -73,6 +73,21 @@ deploy-nas:
     # --remove-orphans：清除已从编排移除但仍在运行的旧服务容器（如内置 postgres）
     - $DC -p honey-money up -d --build --remove-orphans
     - $DC -p honey-money ps
+    # 部署健康门：compose 返回 ≠ 后端可服务——uvicorn 要先跑完 lifespan
+    # （schema 初始化/调度器启动）才接客，期间 nginx 502、前端整页「数据
+    # 不可用」（2026-10-14 实测约 1 分钟窗口）。轮询 healthz 到 200 才算
+    # 部署成功；超时判失败，让流水线显式红出来。
+    - |
+      . ./.env 2>/dev/null || true
+      port="${FRONTEND_PORT:-28080}"
+      for i in $(seq 1 20); do
+        code=$(curl -s -m 3 -o /dev/null -w "%{http_code}" \
+          "http://127.0.0.1:${port}/healthz" || true)
+        echo "healthz[$i/20]: HTTP $code"
+        [ "$code" = "200" ] && exit 0 || true
+        sleep 3
+      done
+      echo "部署后 60s healthz 未就绪，判部署失败"; exit 1
     # 注：不做 docker image prune——群晖 daemon 上实测会挂起不返回（流水线 3080 卡 30min），
     # 镜像清理留给 NAS 定期任务（Container Manager 或计划任务手动清理）
   environment:
