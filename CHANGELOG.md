@@ -6,6 +6,14 @@
 ## [Unreleased]
 
 ### Fixed
+- **买入持有全量回测三只科创板恒失败**（688089/688143/688173，用户三次
+  重跑均复现）：2024-11-06 三只 open=0（新浪源脏数据，全库仅此 3 行），
+  vectorbt 撮合对非正价格抛 `order.price must be finite and greater than 0`；
+  1y 窗口不覆盖该日故 0 失败。三层修复：① 生产库 3 行 open 置 NULL；
+  ② `load_history` 加 `sanitize_prices`——OHLC ≤0 置 NaN 走引擎既有缺失
+  容忍路径（不做 ffill：曾试把交易日不齐的真缺失填成假价格，被既有测试
+  拦下）；③ `upsert_daily_bars` 入库清洗 ≤0/非法价置 NULL（防新增脏数据）。
+  后端测试 +7（清洗纯函数/入库清洗/引擎联动含未清洗仍炸的防回归锚点）。
 - **仪表盘「数据不可用」卡死与部署窗口盲区**（2026-10-14 部署后实测）：
   `deploy-nas` 只等 `compose up` 返回，uvicorn 跑完 lifespan 前约 1 分钟里
   nginx 502，仪表盘三路探测拿到 502 后失败即死、停在「不可用」直到手动

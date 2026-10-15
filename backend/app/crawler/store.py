@@ -74,6 +74,18 @@ WHERE i.indrelid = to_regclass('daily_bar') AND i.indisprimary
 
 _PK_EXPECTED = "code,trade_date,source"
 
+
+def _clean_price(v):
+    """OHLC 无效价清洗：必须 > 0 才入库，否则置 NULL。
+
+    0 价是源脏数据（新浪曾吐 2024-11-06 三只科创板 open=0），vectorbt
+    撮合对非正价格直接抛 ValueError——入库时拦住，不再让脏数据进库。
+    """
+    try:
+        return float(v) if v is not None and float(v) > 0 else None
+    except (TypeError, ValueError):
+        return None
+
 _UPSERT_BAR = """
 INSERT INTO daily_bar
   (code, trade_date, open, close, high, low, volume, amount,
@@ -155,7 +167,8 @@ class Store:
             return 0
         with conn.cursor() as cur:
             cur.executemany(_UPSERT_BAR, [
-                (code, row[0], row[1], row[2], row[3], row[4],
+                (code, row[0], _clean_price(row[1]), _clean_price(row[2]),
+                 _clean_price(row[3]), _clean_price(row[4]),
                  row[5], row[6], row[7], row[8], row[9], row[10],
                  row[11], source)
                 for row in rows

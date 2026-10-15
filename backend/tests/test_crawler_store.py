@@ -164,3 +164,35 @@ class TestCrawlRun:
         sql = fake_conn.cursor_obj.executed[-1]
         assert "UPDATE crawl_run" in sql
         assert "finished_at" in sql
+
+
+class TestUpsertDailyBarsPriceClean:
+    """OHLC 入库清洗：<=0/非数值价置 NULL（0 开盘价曾入库存活三年，
+    每次覆盖它的全量回测都因 vectorbt 拒非正价而整只失败）。"""
+
+    def test_zero_open_stored_as_null(self, fake_conn):
+        row = (dt.date(2024, 11, 6), 0.0, 20.92, 21.0, 20.5, 1e6, 2e8,
+               2.5, 1.2, 0.3, 1.1, None)
+        store_mod.Store().upsert_daily_bars(fake_conn, "688089", [row],
+                                            source="sina")
+        sql, params = fake_conn.cursor_obj.executemany_calls[0]
+        assert "INSERT INTO daily_bar" in sql
+        # (code, date, open→NULL, close, high, low, volume, ..., source)
+        assert params[0][2] is None
+        assert params[0][3] == 20.92
+
+    def test_valid_prices_pass_through(self, fake_conn):
+        row = (dt.date(2026, 1, 2), 10.0, 10.5, 10.8, 9.9, 1e6, 2e8,
+               2.5, 1.2, 0.3, 1.1, None)
+        store_mod.Store().upsert_daily_bars(fake_conn, "600519", [row],
+                                            source="sina")
+        _, params = fake_conn.cursor_obj.executemany_calls[0]
+        assert params[0][2:6] == (10.0, 10.5, 10.8, 9.9)
+
+    def test_null_and_non_numeric_prices(self, fake_conn):
+        row = (dt.date(2026, 1, 2), None, "abc", -1.0, 0, 1e6, 2e8,
+               2.5, 1.2, 0.3, 1.1, None)
+        store_mod.Store().upsert_daily_bars(fake_conn, "000001", [row],
+                                            source="sina")
+        _, params = fake_conn.cursor_obj.executemany_calls[0]
+        assert params[0][2:6] == (None, None, None, None)
