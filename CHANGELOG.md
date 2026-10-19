@@ -6,6 +6,18 @@
 ## [Unreleased]
 
 ### Added
+- **MCP server：agent 调用全市场回测（第一期·双均线交叉）**：新增
+  `backend/app/mcp_server.py`——独立 stdio MCP server（官方 mcp SDK v1，
+  FastMCP），经 httpx 调现有 `/api/backtest/full/*` REST，主应用零改动。
+  5 个工具对应后台任务全闭环：提交 `run_full_backtest`（ma_cross 等 5 个
+  单股策略 + fast/slow 等参数 + 过滤器 + 同参复用开关）→ 轮询
+  `get_backtest_run` → 取明细 `get_backtest_rows`，另有历史列表与取消。
+  错误一律转含状态码与下一步指引的可读文本（409 冲突指向取消后重提）。
+  目标后端 `HONEY_MONEY_BACKEND_URL` 可配（缺省 127.0.0.1:8000）。
+  mcp 锁 `>=1.2,<2`（2.x FastMCP 改名暂不跟进）。测试 +13（工具层离线
+  单测：body 形状/409 与网络错误转文本/白名单与钳制；真实子进程 stdio
+  协议冒烟：握手+tools/list）；真机全链路冒烟通过（提交→轮询→协作式
+  取消到终态→rows 取数）。
 - **数据浏览页退市可视化与过滤**：股票列表新增「退市」列（`stock_basic.delisted`
   字段透出，退市股显示红色「已退市」标记、在市股「—」占位，老接口无该键也兼容）；
   搜索框旁新增退市状态下拉（全部/仅在市/仅退市），`/api/stocks` 新增 `delisted`

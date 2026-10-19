@@ -48,6 +48,32 @@ docker-compose.yml  五服务编排（frontend/backend/postgres/redis/proxy_pool
 docs/               调研文档（A 股日线数据源实测等）
 ```
 
+## MCP server（agent 接入全市场回测）
+
+`backend/app/mcp_server.py`：独立 stdio MCP server（官方 mcp SDK），让
+ZCode / Claude Desktop 等 agent 直接调用本应用做全市场回测（第一期主打
+双均线交叉 `ma_cross`，params `fast`/`slow`）。5 个工具对应后台任务全闭环：
+`run_full_backtest`（提交，立即返回 run_id）→ `get_backtest_run`（轮询进度/
+统计）→ `get_backtest_rows`（逐股明细排行，分页排序）+ `list_backtest_runs`
+（历史）+ `cancel_backtest_run`（取消）。错误一律转含状态码与下一步指引的
+可读文本，agent 可自愈。
+
+接入（agent 的 MCP 配置文件加一段，目标后端可用
+`HONEY_MONEY_BACKEND_URL` 覆盖，缺省 `http://127.0.0.1:8000`）：
+
+```json
+{ "mcpServers": { "honey-money": {
+    "command": "<仓库>/.venv/bin/python",
+    "args": ["-m", "app.mcp_server"],
+    "cwd": "<仓库>/backend",
+    "env": { "HONEY_MONEY_BACKEND_URL": "http://127.0.0.1:8000" } } } }
+```
+
+典型 agent 用法：`run_full_backtest(strategy="ma_cross",
+params={"fast":5,"slow":20}, range="3y")` → 轮询 `get_backtest_run` 至
+`status=done` → `get_backtest_rows` 取收益排行分析。全市场回测是
+分钟~小时级后台任务，工具按"提交/轮询/取数"拆分以规避 MCP 单次调用超时。
+
 ## 本地开发
 
 ```bash
