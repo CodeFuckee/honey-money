@@ -210,6 +210,36 @@ class TestRunSingleBacktest:
         out = ms.run_backtest("momentum", ["600519"])
         assert "2 只" in out
 
+    def test_multi_codes_loops_per_code(self, monkeypatch):
+        """多只 + 单标的策略：逐只调用（对齐前端批量语义——后端多代码
+        + 单标的存在信号/列数不齐的既有边界，前端从不踩），结果聚合。"""
+        fake = FakeApi(result={"status": "up", "metrics": {"total_return": 0.3},
+                               "equity": [[1, 1.0]], "drawdown": [],
+                               "trades": [], "gap_dates": []})
+        monkeypatch.setattr(ms, "_api", fake)
+        out = ms.run_backtest("ma_cross", ["600519", "000001"])
+        assert len(fake.calls) == 2                          # 逐只两次
+        assert fake.calls[0][2]["codes"] == ["600519"]
+        assert fake.calls[1][2]["codes"] == ["000001"]
+        assert "600519" in out and "000001" in out
+
+    def test_multi_codes_partial_failure_aggregated(self, monkeypatch):
+        """批量中单只失败（如区间无数据/内部错）：记入失败清单，不整体崩。"""
+        fake = FakeApi(exc=_status_error(500, "Internal Server Error"))
+        monkeypatch.setattr(ms, "_api", fake)
+        out = ms.run_backtest("ma_cross", ["600519", "000001"])
+        assert "600519" in out and "000001" in out           # 两只都在结果里
+        assert "失败" in out
+
+    def test_momentum_multi_codes_single_call(self, monkeypatch):
+        """momentum 多只：一次调用全量 codes（轮动是横截面组合形态）。"""
+        fake = FakeApi(result={"status": "up", "metrics": {},
+                               "equity": [], "drawdown": [], "trades": []})
+        monkeypatch.setattr(ms, "_api", fake)
+        ms.run_backtest("momentum", ["600519", "000001", "600036"])
+        assert len(fake.calls) == 1
+        assert fake.calls[0][2]["codes"] == ["600519", "000001", "600036"]
+
 
 class TestListStocks:
     def test_list_stocks_passes_params(self, monkeypatch):

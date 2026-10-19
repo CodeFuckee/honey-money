@@ -239,11 +239,60 @@ def run_backtest(strategy: str, codes: list[str], range: str = "3y",
     cleaned = [c.strip().upper() for c in (codes or []) if c and c.strip()]
     if not cleaned:
         return "codes 不能为空：请传入至少一个股票代码，如 [\"600519\"]"
-    body = {"strategy": strategy, "codes": cleaned, "range": range,
-            "params": params or {}, "exec_mode": exec_mode,
-            "commission": commission, "sell_tax": sell_tax}
+    base = {"strategy": strategy, "range": range, "params": params or {},
+            "exec_mode": exec_mode, "commission": commission,
+            "sell_tax": sell_tax}
+
+    def _one(code: str) -> dict:
+        """单标的策略逐只回测（对齐前端批量语义：后端「多代码+单标的」
+        存在信号单列 vs close 全列对齐的既有边界，前端从不踩、不在引擎外触发）。"""
+        try:
+            result = _api("POST", "/api/backtest",
+                          json_body={**base, "codes": [code]})
+        except httpx.HTTPError as exc:
+            return {"code": code, "failed": _err_text(exc)}
+        if result.get("status") == "down":
+            return {"code": code,
+                    "failed": f"数据库不可达（{result.get('detail')}）"}
+        if result.get("status") != "up":
+            return {"code": code,
+                    "failed": result.get("message") or _dumps(result)}
+        return {"code": code, "metrics": result.get("metrics") or {},
+                "trades": result.get("trades") or [],
+                "gap_dates": result.get("gap_dates") or [],
+                "equity": _downsample(result.get("equity")),
+                "drawdown": _downsample(result.get("drawdown")),
+                "adjust_applied": result.get("adjust_applied")}
+
+    if strategy == "momentum":                       # 横截面组合：一次调用
+        return _format_batch_one(cleaned, base)
+    if len(cleaned) == 1:                            # 单只：完整格式（含曲线/逐笔）
+        return _format_batch_one(cleaned, base)
+
+    per = [_one(c) for c in cleaned]
+    ok = [r for r in per if "failed" not in r]
+    failed = [r for r in per if "failed" in r]
+    lines = [f"批量回测完成：{strategy} {len(ok)}/{len(per)} 只成功"]
+    for r in ok:
+        m = r["metrics"]
+        lines.append(
+            f"  {r['code']}: 总收益 {(m.get('total_return') or 0) * 100:.2f}%"
+            f" · 年化 {(m.get('annual_return') or 0) * 100:.2f}%"
+            f" · 最大回撤 {(m.get('max_drawdown') or 0) * 100:.2f}%"
+            f" · 夏普 {m.get('sharpe')}"
+            f" · 交易 {len(r.get('trades') or [])} 笔"
+            + ("" if r.get("adjust_applied") else "（不复权口径）"))
+    for r in failed:
+        lines.append(f"  {r['code']}: 失败——{r['failed']}")
+    lines.append("（批量模式每股仅摘要指标；单只调用本工具可另取降采样曲线与逐笔交易）")
+    return "\n".join(lines)
+
+
+def _format_batch_one(codes: list[str], base: dict) -> str:
+    """momentum（多标的组合）一次调用并按单次格式输出。"""
     try:
-        result = _api("POST", "/api/backtest", json_body=body)
+        result = _api("POST", "/api/backtest",
+                      json_body={**base, "codes": codes})
     except httpx.HTTPError as exc:
         return _err_text(exc)
     if result.get("status") == "down":
@@ -257,7 +306,8 @@ def run_backtest(strategy: str, codes: list[str], range: str = "3y",
                "equity": _downsample(result.get("equity")),
                "drawdown": _downsample(result.get("drawdown")),
                "adjust_applied": result.get("adjust_applied")}
-    summary = (f"回测完成：{strategy} {'/'.join(cleaned)} range={range} · "
+    summary = (f"回测完成：{base['strategy']} {'/'.join(codes)} "
+               f"range={base['range']} · "
                f"总收益 {(metrics.get('total_return') or 0) * 100:.2f}% · "
                f"年化 {(metrics.get('annual_return') or 0) * 100:.2f}% · "
                f"最大回撤 {(metrics.get('max_drawdown') or 0) * 100:.2f}% · "
