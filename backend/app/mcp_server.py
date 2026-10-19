@@ -23,8 +23,16 @@ import os
 
 import httpx
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
-mcp = FastMCP("honey-money")
+# host 必须非 localhost 系（0.0.0.0 对所有接口），否则 FastMCP 构造时自动启用
+# DNS rebinding 保护（Host 白名单仅 localhost）——远程 agent 用 IP/域名直连会
+# 被 421 Invalid Host header 拒绝。显式关闭该保护：本服务无鉴权、仅内网
+# （与 backend 同安全级别），工具全为回测/查询类操作，rebinding 最坏后果是
+# 触发一次回测任务；对外公网暴露请走带鉴权的反向代理。
+mcp = FastMCP("honey-money", host="0.0.0.0",
+              transport_security=TransportSecuritySettings(
+                  enable_dns_rebinding_protection=False))
 
 BASE_URL = os.environ.get(
     "HONEY_MONEY_BACKEND_URL", "http://127.0.0.1:8000").rstrip("/")

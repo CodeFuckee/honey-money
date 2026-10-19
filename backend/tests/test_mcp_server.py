@@ -261,16 +261,26 @@ class TestHttpTransportSmoke:
         with socket.socket() as s:
             s.bind(("127.0.0.1", 0))
             port = s.getsockname()[1]
+        # 优先用非回环本机 IP 连接（等价远程 agent 场景）：曾因 FastMCP 对
+        # localhost 构造自动启用 DNS rebinding 保护，IP 直连被 421 拒绝
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.connect(("10.255.255.255", 1))
+            host = probe.getsockname()[0] or "127.0.0.1"
+        except OSError:
+            host = "127.0.0.1"
+        finally:
+            probe.close()
         backend_dir = Path(__file__).resolve().parents[1]
         proc = subprocess.Popen(
             [sys.executable, "-m", "app.mcp_server",
-             "--http", "--host", "127.0.0.1", "--port", str(port)],
+             "--http", "--host", "0.0.0.0", "--port", str(port)],
             cwd=backend_dir, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True)
 
         async def main():
             async with streamablehttp_client(
-                    f"http://127.0.0.1:{port}/mcp") as (r, w, _):
+                    f"http://{host}:{port}/mcp") as (r, w, _):
                 async with ClientSession(r, w) as session:
                     await session.initialize()
                     tools = await session.list_tools()
