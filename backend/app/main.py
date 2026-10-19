@@ -95,14 +95,17 @@ def create_app(*, scheduler: TaskScheduler | None = None,
         }
 
     @app.get("/api/stocks")
-    def stocks(q: str = "", limit: int = 50, offset: int = 0, source: str = ""):
+    def stocks(q: str = "", limit: int = 50, offset: int = 0, source: str = "",
+               delisted: str = ""):
         """数据浏览：股票列表（最新价/涨跌幅/K线数/区间/来源），q 模糊搜索。
 
-        source 非空时仅返回该数据源（sina/eastmoney）下有K线的股票。
+        source 非空时仅返回该数据源（sina/eastmoney）下有K线的股票；
+        delisted="false"/"true" 仅在市/仅退市，其余值不过滤。
         始终 200；PG 不可达在 status=down 表达（同 /api/infra 降级约定）。
         """
         return fetch_stock_list(config.DATABASE_URL, q=q, limit=limit,
-                                offset=offset, source=source.strip().lower())
+                                offset=offset, source=source.strip().lower(),
+                                delisted=delisted)
 
     @app.get("/api/stocks/basic")
     def stocks_basic():

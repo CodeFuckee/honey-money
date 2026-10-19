@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import DataTable from 'primevue/datatable'
 import Column from 'primevue/column'
 import InputText from 'primevue/inputtext'
+import Select from 'primevue/select'
 import Button from 'primevue/button'
 import Paginator from 'primevue/paginator'
 import AutoComplete from 'primevue/autocomplete'
@@ -214,6 +215,13 @@ const browseQuery = ref('')
 const browsePage = ref(0)                 // 0 起
 const BROWSE_PAGE_SIZE = 50
 const browseLoading = ref(false)
+// 退市过滤：'' 全部 / 'false' 仅在市 / 'true' 仅退市（值直接对应 stock_basic.delisted）
+const browseDelisted = ref('')
+const DELISTED_FILTERS = [
+  { label: '退市：全部', value: '' },
+  { label: '退市：仅在市', value: 'false' },
+  { label: '退市：仅退市', value: 'true' },
+]
 const browseTotalPages = computed(() =>
   Math.max(1, Math.ceil((browse.value.total || 0) / BROWSE_PAGE_SIZE)))
 
@@ -223,7 +231,8 @@ async function loadBrowse() {
     const q = encodeURIComponent(browseQuery.value.trim())
     const off = browsePage.value * BROWSE_PAGE_SIZE
     const src = srcPage.value ? `&source=${srcPage.value.field}` : ''
-    const r = await fetch(`/api/stocks?q=${q}&limit=${BROWSE_PAGE_SIZE}&offset=${off}${src}`)
+    const dl = browseDelisted.value ? `&delisted=${browseDelisted.value}` : ''
+    const r = await fetch(`/api/stocks?q=${q}&limit=${BROWSE_PAGE_SIZE}&offset=${off}${src}${dl}`)
     browse.value = await r.json()
   } catch (e) {
     browse.value = { status: 'down', total: 0, stocks: [] }
@@ -1600,6 +1609,10 @@ watch(
               <InputText v-model="browseQuery" placeholder="搜索代码 / 名称，如 600519 或 贵州茅台"
                 class="browse-input" @keydown.enter="browseSearch" />
               <Button label="搜索" size="small" severity="secondary" outlined @click="browseSearch" />
+              <Select v-model="browseDelisted" :options="DELISTED_FILTERS"
+                optionLabel="label" optionValue="value" size="small"
+                class="delisted-select" aria-label="按退市状态过滤"
+                @change="browseSearch" />
             </div>
             <div class="browse-pv">
               <DataTable :value="browse.stocks || []" lazy paginator :rows="50"
@@ -1617,6 +1630,12 @@ watch(
                   <template #body="{ data }"><span class="mono">{{ data.code }}</span></template>
                 </Column>
                 <Column field="name" header="名称" />
+                <Column field="delisted" header="退市" style="width: 80px">
+                  <template #body="{ data }">
+                    <span v-if="data.delisted" class="delisted-tag">已退市</span>
+                    <span v-else>—</span>
+                  </template>
+                </Column>
                 <Column field="close" header="最新价" style="width: 100px" bodyClass="num-col">
                   <template #body="{ data }">{{ data.close ?? '—' }}</template>
                 </Column>
@@ -2730,6 +2749,9 @@ body {
   font: inherit; font-size: 13px; color: var(--fg);
 }
 .browse-input::placeholder { color: var(--fg-3); }
+/* 退市过滤下拉：与搜索框同行，Carbon 方角 */
+.delisted-select { min-width: 130px; border-radius: 0; }
+.delisted-select .p-select-label { border-radius: 0; font-size: 13px; }
 .browse-btn { padding: 5px 14px; font-size: 12px; }
 .browse-table {
   margin-top: 20px; background: var(--card-bg); backdrop-filter: var(--card-blur);
@@ -2758,6 +2780,11 @@ body {
 .browse-row .down { color: var(--dot-up); font-weight: 600; }   /* 绿跌 */
 .browse-row .src { font-size: 11px; color: var(--fg-3); }
 .browse-empty { padding: 28px 16px; font-size: 13px; color: var(--fg-3); text-align: center; }
+/* 退市标记（数据浏览列表，Carbon 内联通知色系：#FFF1F1 底 + #A2191F 字） */
+.delisted-tag {
+  display: inline-block; font-size: 11px; line-height: 1; padding: 4px 8px;
+  background: #fff1f1; color: #a2191f; border: 1px solid #da1e28;
+}
 .browse-pager {
   display: flex; align-items: center; justify-content: center; gap: 18px;
   margin-top: 16px; font-size: 12px; color: var(--fg-2);

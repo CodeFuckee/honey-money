@@ -182,6 +182,169 @@ class TestBarsEndpointSource:
         assert captured["source"] == ""
 
 
+class QueueConn:
+    """按 execute 调用序弹出预置结果的假连接（fetch_stock_list 三段式：
+    清单分页 fetchall → 当页聚合 fetchall → count fetchone）。"""
+
+    def __init__(self, fetchall_queue=(), fetchone_queue=()):
+        self.fetchall_queue = list(fetchall_queue)
+        self.fetchone_queue = list(fetchone_queue)
+        self.executed = []
+
+    def cursor(self):
+        conn = self
+
+        class _Cur:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def execute(self, query, params=None):
+                conn.executed.append((query, params))
+
+            def fetchall(self):
+                return conn.fetchall_queue.pop(0)
+
+            def fetchone(self):
+                return conn.fetchone_queue.pop(0)
+
+        return _Cur()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class TestStockListDelisted:
+    """数据页列表透出退市标记：stock_basic.delisted → stocks[].delisted。"""
+
+    def _fetch(self, monkeypatch, list_rows, page_ids=None, **kw):
+        import app.browse as browse_mod
+        page_ids = page_ids if page_ids is not None else [
+            (r[0], r[1]) for r in list_rows]
+        conn = QueueConn(
+            fetchall_queue=[page_ids, list_rows],
+            fetchone_queue=[(len(list_rows),)])
+        monkeypatch.setattr(browse_mod.psycopg, "connect",
+                            lambda *a, **k: conn)
+        return browse_mod.fetch_stock_list("postgresql://fake", **kw), conn
+
+    def test_list_sql_selects_delisted(self, monkeypatch):
+        """SELECT 必须带 b.delisted（漏列则前端恒显示在市——回归锚点）。"""
+        body, conn = self._fetch(monkeypatch, [
+            ("600519", "贵州茅台", False, 1500.0, 1.2, dt.date(2026, 10, 9),
+             250, dt.date(2001, 8, 27), "sina")])
+        list_sql = conn.executed[1][0]
+        assert "b.delisted" in list_sql
+        assert conn.executed[1][1] == (["600519"],)
+
+    def test_delisted_flag_propagates(self, monkeypatch):
+        """True/False 两行：各自 stocks[].delisted 正确，顺序保持 code 序。"""
+        body, _ = self._fetch(monkeypatch, [
+            ("400001", "退市示例", True, None, None, None,
+             5000, dt.date(1995, 1, 3), "sina"),
+            ("600519", "贵州茅台", False, 1500.0, 1.2, dt.date(2026, 10, 9),
+             250, dt.date(2001, 8, 27), "sina"),
+        ])
+        assert body["status"] == "up"
+        by_code = {s["code"]: s for s in body["stocks"]}
+        assert [s["code"] for s in body["stocks"]] == ["400001", "600519"]
+        assert by_code["400001"]["delisted"] is True
+        assert by_code["600519"]["delisted"] is False
+
+    def test_delisted_row_with_null_summary(self, monkeypatch):
+        """退市股行情摘要常为空（close/pct_chg/最新交易日 NULL）：不炸、四舍五入跳过。"""
+        body, _ = self._fetch(monkeypatch, [
+            ("400001", "退市示例", True, None, None, None,
+             5000, dt.date(1995, 1, 3), "sina")])
+        s = body["stocks"][0]
+        assert s["delisted"] is True
+        assert s["close"] is None and s["pct_chg"] is None
+        assert s["last_date"] is None
+        assert s["first_date"] == "1995-01-03"
+
+
+class TestStockListDelistedFilter:
+    """数据页退市过滤：delisted="" 全部 / "false" 仅在市 / "true" 仅退市。"""
+
+    ROW = ("600519", "贵州茅台", False, 1500.0, 1.2, dt.date(2026, 10, 9),
+           250, dt.date(2001, 8, 27), "sina")
+
+    def _fetch(self, monkeypatch, **kw):
+        conn = QueueConn(
+            fetchall_queue=[[("600519", "贵州茅台")], [self.ROW]],
+            fetchone_queue=[(1,)])
+        import app.browse as browse_mod
+        monkeypatch.setattr(browse_mod.psycopg, "connect",
+                            lambda *a, **k: conn)
+        body = browse_mod.fetch_stock_list("postgresql://fake", **kw)
+        ids_sql, count_sql = conn.executed[0][0], conn.executed[2][0]
+        return body, ids_sql, count_sql
+
+    def test_empty_filter_has_no_clause(self, monkeypatch):
+        """缺省（空）：不过滤，SQL 无退市谓词（兼容旧行为）。"""
+        _, ids_sql, count_sql = self._fetch(monkeypatch, delisted="")
+        assert "stock_basic.delisted =" not in ids_sql
+        assert "stock_basic.delisted =" not in count_sql
+
+    def test_live_filter_appends_false(self, monkeypatch):
+        """delisted="false"：清单与 count 两段 SQL 都加退市谓词。
+
+        谓词必须用全表名 stock_basic.delisted——这两段模板的表无别名，
+        曾写 b.delisted 报 42P01 被 _safe 吞成 down（单测断言 SQL 文本
+        不执行、属假阳性盲区，由 NAS 实机冒烟暴露）。"""
+        _, ids_sql, count_sql = self._fetch(monkeypatch, delisted="false")
+        assert "stock_basic.delisted = FALSE" in ids_sql
+        assert "stock_basic.delisted = FALSE" in count_sql
+        assert "b.delisted" not in ids_sql and "b.delisted" not in count_sql
+
+    def test_delisted_filter_appends_true(self, monkeypatch):
+        """delisted="true"：两段 SQL 都加退市谓词。"""
+        _, ids_sql, count_sql = self._fetch(monkeypatch, delisted="true")
+        assert "stock_basic.delisted = TRUE" in ids_sql
+        assert "stock_basic.delisted = TRUE" in count_sql
+
+    def test_garbage_value_treated_as_all(self, monkeypatch):
+        """非法值（"yes"/"1"/None 等）：按不过滤处理，不抛错。"""
+        for bad in ("yes", "1", "TRUE ", None, "live"):
+            _, ids_sql, count_sql = self._fetch(monkeypatch, delisted=bad)
+            assert "stock_basic.delisted =" not in ids_sql, bad
+            assert "stock_basic.delisted =" not in count_sql, bad
+
+    def test_endpoint_passes_delisted(self, client, monkeypatch):
+        """API 端点把 delisted query 参数透传给查询层。"""
+        import app.main as main_mod
+        captured = {}
+
+        def fake_list(dsn, **kw):
+            captured.update(kw)
+            return {"status": "up", "total": 0, "limit": 50,
+                    "offset": 0, "stocks": []}
+
+        monkeypatch.setattr(main_mod, "fetch_stock_list", fake_list)
+        resp = client.get("/api/stocks", params={"delisted": "true"})
+        assert resp.status_code == 200
+        assert captured["delisted"] == "true"
+
+    def test_endpoint_delisted_default_empty(self, client, monkeypatch):
+        """不传 delisted：端点透传空串（不过滤，兼容旧行为）。"""
+        import app.main as main_mod
+        captured = {}
+
+        def fake_list(dsn, **kw):
+            captured.update(kw)
+            return {"status": "up", "total": 0, "limit": 50,
+                    "offset": 0, "stocks": []}
+
+        monkeypatch.setattr(main_mod, "fetch_stock_list", fake_list)
+        client.get("/api/stocks")
+        assert captured["delisted"] == ""
+
+
 class TestStocksBasic:
     """教学页代码下拉的数据源：全清单 code+name（轻量，一次性拉取）。"""
 

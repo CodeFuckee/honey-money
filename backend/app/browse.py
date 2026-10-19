@@ -18,12 +18,13 @@ _LIST_IDS_SQL = """
 SELECT code, name FROM stock_basic
 WHERE (%s = '' OR code ILIKE %s OR name ILIKE %s)
   AND {src_clause}
+  AND {delist_clause}
 ORDER BY code
 LIMIT %s OFFSET %s
 """
 
 _LIST_SQL = """
-SELECT b.code, b.name,
+SELECT b.code, b.name, b.delisted,
        p.close, p.pct_chg, p.trade_date,
        COALESCE(s.bars, 0) AS bars,
        COALESCE(s.first_date, p.trade_date) AS first_date,
@@ -50,6 +51,7 @@ _COUNT_SQL = """
 SELECT count(*) FROM stock_basic
 WHERE (%s = '' OR code ILIKE %s OR name ILIKE %s)
   AND {src_clause}
+  AND {delist_clause}
 """
 
 _BARS_SQL = """
@@ -74,18 +76,27 @@ def _safe(fn, default):
 
 
 def fetch_stock_list(dsn: str, *, q: str = "", limit: int = 50, offset: int = 0,
-                     source: str = "") -> dict:
+                     source: str = "", delisted: str = "") -> dict:
     """股票列表 + 每股行情摘要（最新价/涨跌幅/K线数/区间/来源），code/name 模糊搜索。
 
-    source 非空时仅返回该来源下有K线的股票（数据源 Tab 过滤）。
+    source 非空时仅返回该来源下有K线的股票（数据源 Tab 过滤）；
+    delisted="false"/"true" 仅在市/仅退市（数据页退市过滤），其余值不过滤。
     """
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
     like = f"%{q}%"
+    # 退市过滤：严格匹配 "true"/"false" 内联布尔谓词；其余值（含空串）按全部处理。
+    # 这两段 SQL 的 stock_basic 无别名 → 谓词必须用全表名（用 b. 会 42P01 被 _safe 吞成 down）
+    delist_clause = (f"stock_basic.delisted = {delisted.upper()}"
+                     if delisted in ("true", "false") else "true")
     sql_ids = (_LIST_IDS_SQL.replace("{src_clause}", _SRC_FILTER.format(src=source))
-               if source else _LIST_IDS_SQL.replace("{src_clause}", "true"))
+                 .replace("{delist_clause}", delist_clause)
+               if source else _LIST_IDS_SQL.replace("{src_clause}", "true")
+                 .replace("{delist_clause}", delist_clause))
     count_sql = (_COUNT_SQL.replace("{src_clause}", _SRC_FILTER.format(src=source))
-                 if source else _COUNT_SQL.replace("{src_clause}", "true"))
+                   .replace("{delist_clause}", delist_clause)
+                 if source else _COUNT_SQL.replace("{src_clause}", "true")
+                   .replace("{delist_clause}", delist_clause))
 
     def run():
         with psycopg.connect(dsn, connect_timeout=3) as conn:
@@ -96,8 +107,8 @@ def fetch_stock_list(dsn: str, *, q: str = "", limit: int = 50, offset: int = 0,
                 stocks = []
                 if codes:
                     cur.execute(_LIST_SQL, (codes,))
-                    cols = ["code", "name", "close", "pct_chg", "last_date",
-                            "bars", "first_date", "sources"]
+                    cols = ["code", "name", "delisted", "close", "pct_chg",
+                            "last_date", "bars", "first_date", "sources"]
                     by_code = {r[0]: dict(zip(cols, r)) for r in cur.fetchall()}
                     stocks = [by_code[c] for c in codes]   # 保持 code 序
                 cur.execute(count_sql, (q, like, like))
