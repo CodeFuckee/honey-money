@@ -6,6 +6,15 @@
 ## [Unreleased]
 
 ### Added
+- **MCP server 二期：HTTP 远程接入 + 单股回测 + 行情查询**：① `--http`
+  切 streamable HTTP 传输（compose 新增 `mcp` 服务，宿主
+  `${MCP_PORT:-28081}`，agent 经 `http://<NAS>:28081/mcp` 直连，无鉴权
+  仅限内网）；② 新工具 `run_backtest`（指定代码同步回测，秒级，含
+  momentum 轮动 ≥2 只；equity/drawdown 自动降采样 ≤120 点控上下文）；
+  ③ `list_stocks`（搜索含退市过滤）、`get_stock_bars`（日K 前复权/来源
+  可选）。工具总数 8。测试 +10（新工具单测 + 真实子进程 HTTP 传输冒烟，
+  官方 streamable HTTP client 真连），全量 359；真机链路冒烟通过
+  （HTTP 真调单股回测 -4.69%/8 笔、日K、搜索）。
 - **MCP server：agent 调用全市场回测（第一期·双均线交叉）**：新增
   `backend/app/mcp_server.py`——独立 stdio MCP server（官方 mcp SDK v1，
   FastMCP），经 httpx 调现有 `/api/backtest/full/*` REST，主应用零改动。

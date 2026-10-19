@@ -10,6 +10,7 @@ import json
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import httpx
@@ -152,6 +153,149 @@ class TestCancel:
         assert "9" in out
 
 
+class TestRunSingleBacktest:
+    """二期：同步单股/批量回测工具（POST /api/backtest，秒级）。"""
+
+    def test_body_shape_and_result_summary(self, monkeypatch):
+        """body 形状正确；大体积曲线降采样后文本仍含 metrics 与 trades。"""
+        equity = [[f"2026-01-{d:02d}", float(d)] for d in range(1, 10)]
+        fake = FakeApi(result={"status": "up", "codes": ["600519"],
+                               "metrics": {"total_return": 0.5},
+                               "equity": equity, "drawdown": equity,
+                               "trades": [{"pnl": 1.0}], "gap_dates": []})
+        monkeypatch.setattr(ms, "_api", fake)
+        out = ms.run_backtest("ma_cross", ["600519"],
+                              params={"fast": 5, "slow": 20}, range="1y")
+        method, path, body, _ = fake.calls[0]
+        assert (method, path) == ("POST", "/api/backtest")
+        assert body["codes"] == ["600519"]
+        assert body["strategy"] == "ma_cross" and body["range"] == "1y"
+        assert "total_return" in out and "equity" in out
+
+    def test_equity_downsampled_to_cap(self, monkeypatch):
+        """3y 曲线 ~750 点：降采样到 ≤120 点（控 agent 上下文体积）。"""
+        equity = [[str(i), float(i)] for i in range(750)]
+        fake = FakeApi(result={"status": "up", "metrics": {}, "equity": equity,
+                               "drawdown": equity, "trades": [], "gap_dates": []})
+        monkeypatch.setattr(ms, "_api", fake)
+        out = ms.run_backtest("buy_hold", ["600519"])
+        payload = json.loads(out[out.index("\n{") + 1:])
+        assert len(payload["equity"]) <= 120
+        assert payload["equity"][0] == equity[0]      # 首点保留
+        assert payload["equity"][-1] == equity[-1]    # 尾点保留
+
+    def test_down_status_passthrough(self, monkeypatch):
+        """PG 不可达降级（status=down）：文本可读不抛异常。"""
+        fake = FakeApi(result={"status": "down", "detail": "pg boom"})
+        monkeypatch.setattr(ms, "_api", fake)
+        out = ms.run_backtest("buy_hold", ["600519"])
+        assert "数据库不可达" in out and "pg boom" in out
+
+    def test_invalid_strategy_rejected_before_request(self, monkeypatch):
+        fake = FakeApi()
+        monkeypatch.setattr(ms, "_api", fake)
+        out = ms.run_backtest("nope", ["600519"])
+        assert fake.calls == [] and "ma_cross" in out
+
+    def test_empty_codes_rejected(self, monkeypatch):
+        fake = FakeApi()
+        monkeypatch.setattr(ms, "_api", fake)
+        out = ms.run_backtest("ma_cross", [])
+        assert fake.calls == [] and "600519" in out or "代码" in out
+
+    def test_momentum_needs_two_codes_hint(self, monkeypatch):
+        """momentum 单只：后端 400 → 文本含"至少 2 只"指引。"""
+        fake = FakeApi(exc=_status_error(400, "动量轮动需要至少 2 只标的"))
+        monkeypatch.setattr(ms, "_api", fake)
+        out = ms.run_backtest("momentum", ["600519"])
+        assert "2 只" in out
+
+
+class TestListStocks:
+    def test_list_stocks_passes_params(self, monkeypatch):
+        fake = FakeApi(result={"status": "up", "total": 2, "stocks": [
+            {"code": "000003", "name": "PT金田Ａ", "delisted": True}]})
+        monkeypatch.setattr(ms, "_api", fake)
+        out = ms.list_stocks(q="退", page=1, size=30, delisted="true")
+        _, path, _, params = fake.calls[0]
+        assert path == "/api/stocks"
+        assert params == {"q": "退", "limit": 30, "offset": 30,
+                          "source": "", "delisted": "true"}
+        assert "000003" in out
+
+    def test_list_stocks_clamps_size(self, monkeypatch):
+        fake = FakeApi(result={"status": "up", "total": 0, "stocks": []})
+        monkeypatch.setattr(ms, "_api", fake)
+        ms.list_stocks(size=9999, page=-3)
+        _, _, _, params = fake.calls[0]
+        assert params["limit"] == 100                  # 钳到上限
+        assert params["offset"] == 0                   # 负页码钳 0
+
+
+class TestGetStockBars:
+    def test_bars_params_and_clamp(self, monkeypatch):
+        fake = FakeApi(result={"status": "up", "count": 2, "bars": [
+            {"date": "2026-10-09", "close": 9.18}]})
+        monkeypatch.setattr(ms, "_api", fake)
+        out = ms.get_stock_bars("600519", limit=9999, source="sina",
+                                adjust="qfq")
+        _, path, _, params = fake.calls[0]
+        assert path == "/api/stocks/600519/bars"
+        assert params == {"limit": 1000, "offset": 0,        # 钳到上限
+                          "source": "sina", "adjust": "qfq"}
+        assert "9.18" in out
+
+
+class TestHttpTransportSmoke:
+    """streamable HTTP 传输冒烟：子进程 --http 起服务，官方 client 真连。"""
+
+    pytest.importorskip("mcp", reason="mcp SDK 未安装")
+
+    def test_http_tools_list(self, tmp_path):
+        import socket
+
+        import anyio
+        from mcp import ClientSession
+        from mcp.client.streamable_http import streamablehttp_client
+
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        backend_dir = Path(__file__).resolve().parents[1]
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "app.mcp_server",
+             "--http", "--host", "127.0.0.1", "--port", str(port)],
+            cwd=backend_dir, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True)
+
+        async def main():
+            async with streamablehttp_client(
+                    f"http://127.0.0.1:{port}/mcp") as (r, w, _):
+                async with ClientSession(r, w) as session:
+                    await session.initialize()
+                    tools = await session.list_tools()
+                    return {t.name for t in tools.tools}
+
+        try:
+            deadline = time.time() + 15
+            last = None
+            while time.time() < deadline:            # 服务就绪轮询
+                try:
+                    names = anyio.run(main)
+                    break
+                except Exception as exc:             # 连接被拒 → 服务未就绪
+                    last = exc
+                    time.sleep(0.5)
+            else:
+                raise AssertionError(f"HTTP server 未就绪: {last}")
+            assert {"run_full_backtest", "get_backtest_run",
+                    "list_backtest_runs", "get_backtest_rows",
+                    "cancel_backtest_run", "run_backtest", "list_stocks",
+                    "get_stock_bars"} <= names
+        finally:
+            proc.kill()
+
+
 class TestStdioProtocol:
     """stdio 协议冒烟：真实子进程握手 + tools/list（mcp 未装则跳过）。"""
 
@@ -184,9 +328,10 @@ class TestStdioProtocol:
             send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
             tools = recv()["result"]["tools"]
             names = {t["name"] for t in tools}
-            assert names == {"run_full_backtest", "get_backtest_run",
-                             "list_backtest_runs", "get_backtest_rows",
-                             "cancel_backtest_run"}
+            assert {"run_full_backtest", "get_backtest_run",
+                    "list_backtest_runs", "get_backtest_rows",
+                    "cancel_backtest_run", "run_backtest", "list_stocks",
+                    "get_stock_bars"} <= names
             schema = next(t for t in tools if t["name"] == "run_full_backtest")
             assert "strategy" in schema["inputSchema"]["properties"]
         finally:

@@ -1,22 +1,23 @@
-"""honey-money MCP server：让 agent 调用本应用做全市场回测（stdio）。
+"""honey-money MCP server：让 agent 调用本应用做回测与行情查询（stdio/HTTP）。
 
-形态：独立 stdio server（官方 mcp SDK FastMCP），工具层经 httpx 调现有
-FastAPI REST（/api/backtest/full/*）——主应用零改动，二期支持远程 agent
-只需换传输层，工具层原样复用。
+形态：独立 MCP server（官方 mcp SDK FastMCP），工具层经 httpx 调现有
+FastAPI REST——主应用零改动。缺省 stdio 传输（agent 侧子进程）；
+`--http --port N` 切 streamable HTTP（compose 里的 mcp 服务，远程 agent
+经 http://<NAS>:<port>/mcp 直连）。
 
-工具设计对应异步任务全闭环：提交（run_full_backtest）→ 轮询
-（get_backtest_run）→ 取数（get_backtest_rows）+ 历史（list_backtest_runs）
-+ 取消（cancel_backtest_run）。全市场回测是分钟~小时级后台任务，MCP 单次
-调用会超时，绝不做"提交并阻塞到完成"的组合工具。
+回测工具对应两类任务形态：
+- 全市场（分钟~小时级后台任务）：提交/轮询/取数拆分，规避 MCP 单次调用超时；
+- 单股/批量（秒级同步）：run_backtest 一个工具拿结果，大体积曲线降采样控上下文。
 
 错误约定：工具不抛异常——HTTP 错误/网络不可达一律转成含状态码与下一步
 指引的可读文本返回，agent 据此自愈（重试/换参/先取消再提交）。
 
-启动：cd backend && python -m app.mcp_server（agent 侧 stdio 配置的
-command+args）；目标后端用 HONEY_MONEY_BACKEND_URL 覆盖
-（缺省 http://127.0.0.1:8000）。
+启动：cd backend && python -m app.mcp_server [--http --host H --port P]
+（agent 侧 stdio 配置的 command+args）；目标后端用 HONEY_MONEY_BACKEND_URL
+覆盖（缺省 http://127.0.0.1:8000）。
 """
 
+import argparse
 import json
 import os
 
@@ -62,6 +63,15 @@ def _err_text(exc: Exception) -> str:
 
 def _dumps(obj) -> str:
     return json.dumps(obj, ensure_ascii=False, indent=1, default=str)
+
+
+def _downsample(points, cap: int = 120) -> list:
+    """曲线降采样到 ≤cap 点（等距取整点索引，首尾必保留）——控 agent 上下文。"""
+    points = points or []
+    if len(points) <= cap:
+        return points
+    step = (len(points) - 1) / (cap - 1)
+    return [points[round(i * step)] for i in range(cap)]
 
 
 @mcp.tool()
@@ -191,5 +201,137 @@ def cancel_backtest_run(run_id: int) -> str:
     return f"已请求取消 run_id={run_id}，用 get_backtest_run 确认终态"
 
 
+SINGLE_STRATEGIES = ("buy_hold", "ma_cross", "donchian", "bollinger",
+                     "grid", "momentum")
+SINGLE_STRATEGY_HINT = "、".join(SINGLE_STRATEGIES)
+
+
+@mcp.tool()
+def run_backtest(strategy: str, codes: list[str], range: str = "3y",
+                 params: dict | None = None, exec_mode: str = "next_open",
+                 commission: float = 2.5e-4, sell_tax: float = 5e-4) -> str:
+    """对指定股票（1~多只）做同步回测，秒级直接返回结果（无需轮询）。
+
+    与 run_full_backtest 的区别：本工具只测你指定的代码、同步返回；
+    momentum（动量轮动）在此可用，但需要 ≥2 只标的。
+
+    Args:
+        strategy: """ + SINGLE_STRATEGY_HINT + """
+        codes: 股票代码列表，如 ["600519"] 或 ["600519", "000001"]
+        range: 回看区间，"1y"/"3y"/"5y"/"all"
+        params: 策略参数（ma_cross: fast/slow；momentum: window/top_k）
+        exec_mode: "next_open"（信号次日开盘成交）或 "close"（当日收盘）
+        commission: 买入佣金率（默认 2.5e-4）
+        sell_tax: 卖出成本率（默认 5e-4）
+    """
+    if strategy not in SINGLE_STRATEGIES:
+        return f"未知策略: {strategy}。可选：{SINGLE_STRATEGY_HINT}"
+    if range not in RANGES:
+        return f"非法区间: {range}。可选：{'、'.join(RANGES)}"
+    cleaned = [c.strip().upper() for c in (codes or []) if c and c.strip()]
+    if not cleaned:
+        return "codes 不能为空：请传入至少一个股票代码，如 [\"600519\"]"
+    body = {"strategy": strategy, "codes": cleaned, "range": range,
+            "params": params or {}, "exec_mode": exec_mode,
+            "commission": commission, "sell_tax": sell_tax}
+    try:
+        result = _api("POST", "/api/backtest", json_body=body)
+    except httpx.HTTPError as exc:
+        return _err_text(exc)
+    if result.get("status") == "down":
+        return f"回测失败：数据库不可达（{result.get('detail')}）"
+    if result.get("status") != "up":
+        return "回测失败：" + _dumps(result)
+    metrics = result.get("metrics") or {}
+    payload = {"metrics": metrics,
+               "trades": result.get("trades") or [],
+               "gap_dates": result.get("gap_dates") or [],
+               "equity": _downsample(result.get("equity")),
+               "drawdown": _downsample(result.get("drawdown")),
+               "adjust_applied": result.get("adjust_applied")}
+    summary = (f"回测完成：{strategy} {'/'.join(cleaned)} range={range} · "
+               f"总收益 {(metrics.get('total_return') or 0) * 100:.2f}% · "
+               f"年化 {(metrics.get('annual_return') or 0) * 100:.2f}% · "
+               f"最大回撤 {(metrics.get('max_drawdown') or 0) * 100:.2f}% · "
+               f"夏普 {metrics.get('sharpe')} · 交易 {len(payload['trades'])} 笔"
+               + ("" if payload.get("adjust_applied")
+                  else "（复权因子缺失，降级不复权口径）"))
+    return summary + "\n\n原始数据（equity/drawdown 已降采样 ≤120 点）：\n" + \
+        _dumps(payload)
+
+
+@mcp.tool()
+def list_stocks(q: str = "", page: int = 0, size: int = 50,
+                source: str = "", delisted: str = "") -> str:
+    """搜索已入库股票列表（代码/名称模糊匹配），含最新价与退市标记。
+
+    Args:
+        q: 关键词（代码或名称片段，如 "600519" 或 "茅台"）
+        page: 页码（0 起）
+        size: 每页条数（≤100）
+        source: 按数据源过滤（"sina"/"eastmoney"，空=全部）
+        delisted: 退市过滤，"true"=仅退市、"false"=仅在市、空=全部
+    """
+    size = max(1, min(int(size), 100))
+    page = max(0, int(page))
+    if source not in ("sina", "eastmoney"):
+        source = ""
+    if delisted not in ("true", "false"):
+        delisted = ""
+    try:
+        data = _api("GET", "/api/stocks",
+                    params={"q": q, "limit": size, "offset": page * size,
+                            "source": source, "delisted": delisted})
+    except httpx.HTTPError as exc:
+        return _err_text(exc)
+    head = (f"共 {data.get('total')} 只（第 {page + 1} 页，每页 {size}）"
+            if data.get("status") == "up" else
+            f"查询失败：{data.get('detail') or data.get('status')}")
+    return head + "\n" + _dumps(data.get("stocks") or [])
+
+
+@mcp.tool()
+def get_stock_bars(code: str, limit: int = 60, offset: int = 0,
+                   source: str = "", adjust: str = "") -> str:
+    """取单股日K线（倒序：最新在前）。
+
+    Args:
+        code: 6 位股票代码，如 "600519"
+        limit: 根数（≤1000；默认 60 根≈近一季度）
+        offset: 偏移（往前翻历史）
+        source: 数据源 "sina"/"eastmoney"，空=不过滤（同日两源各一行时勿留空）
+        adjust: "qfq"=前复权（最新价=真实价），空=不复权
+    """
+    limit = max(1, min(int(limit), 1000))
+    offset = max(0, int(offset))
+    if source not in ("sina", "eastmoney"):
+        source = ""
+    if adjust != "qfq":
+        adjust = ""
+    try:
+        data = _api("GET", f"/api/stocks/{code}/bars",
+                    params={"limit": limit, "offset": offset,
+                            "source": source, "adjust": adjust})
+    except httpx.HTTPError as exc:
+        return _err_text(exc)
+    if data.get("status") != "up":
+        return f"查询失败：{data.get('detail') or data.get('status')}"
+    head = f"{code} 共返回 {data.get('count')} 根日K" + \
+        ("" if data.get("adjust_applied", True)
+         else "（复权因子缺失，降级不复权）")
+    return head + "\n" + _dumps(data.get("bars") or [])
+
+
 if __name__ == "__main__":
-    mcp.run()          # stdio（默认传输）
+    parser = argparse.ArgumentParser(description="honey-money MCP server")
+    parser.add_argument("--http", action="store_true",
+                        help="streamable HTTP 传输（缺省 stdio）")
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8081)
+    args = parser.parse_args()
+    if args.http:
+        mcp.settings.host = args.host
+        mcp.settings.port = args.port
+        mcp.run(transport="streamable-http")
+    else:
+        mcp.run()          # stdio（默认传输）

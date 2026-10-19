@@ -48,31 +48,45 @@ docker-compose.yml  五服务编排（frontend/backend/postgres/redis/proxy_pool
 docs/               调研文档（A 股日线数据源实测等）
 ```
 
-## MCP server（agent 接入全市场回测）
+## MCP server（agent 接入回测与行情）
 
-`backend/app/mcp_server.py`：独立 stdio MCP server（官方 mcp SDK），让
-ZCode / Claude Desktop 等 agent 直接调用本应用做全市场回测（第一期主打
-双均线交叉 `ma_cross`，params `fast`/`slow`）。5 个工具对应后台任务全闭环：
-`run_full_backtest`（提交，立即返回 run_id）→ `get_backtest_run`（轮询进度/
-统计）→ `get_backtest_rows`（逐股明细排行，分页排序）+ `list_backtest_runs`
-（历史）+ `cancel_backtest_run`（取消）。错误一律转含状态码与下一步指引的
-可读文本，agent 可自愈。
+`backend/app/mcp_server.py`：独立 MCP server（官方 mcp SDK），让
+ZCode / Claude Desktop 等 agent 直接调用本应用。8 个工具：
 
-接入（agent 的 MCP 配置文件加一段，目标后端可用
-`HONEY_MONEY_BACKEND_URL` 覆盖，缺省 `http://127.0.0.1:8000`）：
+- **全市场回测**（后台任务，分钟~小时级）：`run_full_backtest`（提交，
+  第一期主打双均线交叉 `ma_cross`，params `fast`/`slow`）→
+  `get_backtest_run`（轮询）→ `get_backtest_rows`（明细排行）+
+  `list_backtest_runs` / `cancel_backtest_run`；
+- **单股/批量回测**（同步秒级）：`run_backtest`（含 momentum 轮动，≥2 只）；
+- **行情查询**：`list_stocks`（搜索，含退市过滤）、`get_stock_bars`
+  （日K，前复权/来源可选）。
+
+大体积曲线自动降采样 ≤120 点；错误一律转含状态码与下一步指引的可读文本。
+
+接入方式二选一：
+
+① **stdio（本机 agent，子进程方式）**——agent 的 MCP 配置加
+（目标后端可用 `HONEY_MONEY_BACKEND_URL` 覆盖，缺省 `http://127.0.0.1:8000`）：
 
 ```json
 { "mcpServers": { "honey-money": {
     "command": "<仓库>/.venv/bin/python",
     "args": ["-m", "app.mcp_server"],
-    "cwd": "<仓库>/backend",
-    "env": { "HONEY_MONEY_BACKEND_URL": "http://127.0.0.1:8000" } } } }
+    "cwd": "<仓库>/backend" } } }
 ```
 
-典型 agent 用法：`run_full_backtest(strategy="ma_cross",
+② **streamable HTTP（远程 agent 直连 NAS）**——compose 里的 `mcp` 服务
+（宿主端口 `${MCP_PORT:-28081}`），agent 配置直接填 URL：
+
+```json
+{ "mcpServers": { "honey-money": { "url": "http://<NAS内网IP>:28081/mcp" } } }
+```
+
+典型用法：全市场用 `run_full_backtest(strategy="ma_cross",
 params={"fast":5,"slow":20}, range="3y")` → 轮询 `get_backtest_run` 至
-`status=done` → `get_backtest_rows` 取收益排行分析。全市场回测是
-分钟~小时级后台任务，工具按"提交/轮询/取数"拆分以规避 MCP 单次调用超时。
+`status=done` → `get_backtest_rows` 取排行；指定股票直接
+`run_backtest(strategy, codes)` 同步拿结果。HTTP 传输无鉴权，仅限内网
+（与 backend 同安全级别），勿对公网映射 28081。
 
 ## 本地开发
 
