@@ -96,6 +96,7 @@ def run_full_backtest(strategy: str, range: str = "3y",
     （fast 上穿 slow 金叉买入、下穿死叉卖出；窗口单位=交易日）。
     momentum（动量轮动）为组合级：按月末动量取全市场前 top_k 等权持有，
     结果为单组合行 _PORTFOLIO（排行表无逐股明细，组合净值在 curves）；
+    params 可加 "rebalance"（"month" 每月末调仓=默认 / "week" 每周末）；
     池默认截断至 K 线数最多的 1000 只（filters.max_universe 可调，0=不限）。
 
     Args:

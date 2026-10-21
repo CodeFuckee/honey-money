@@ -58,7 +58,8 @@ ZCode / Claude Desktop 等 agent 直接调用本应用。8 个工具：
 - **全市场回测**（后台任务，分钟~小时级）：`run_full_backtest`（提交）→
   `get_backtest_run`（轮询）→ `get_backtest_rows`（明细排行）+
   `list_backtest_runs` / `cancel_backtest_run`。单标的策略输出逐股排行；
-  momentum 为组合级（月末动量 top_k 等权轮动，结果为单组合行
+  momentum 为组合级（月末/周末动量 top_k 等权轮动，params 可配
+  `window`/`top_k`/`rebalance`（month/week），结果为单组合行
   `_PORTFOLIO`，池默认截断至 K 线数最多的 1000 只，`filters.max_universe`
   可调）；
 - **单股/批量回测**（同步秒级）：`run_backtest`（含 momentum 轮动，≥2 只）；

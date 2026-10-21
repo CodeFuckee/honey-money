@@ -489,12 +489,15 @@ const STRAT_FIELDS = {
   grid: [{ k: 'step_pct', label: '步长 %', type: 'number', min: 0.5, max: 20, step: 0.5 },
          { k: 'levels', label: '档位数', type: 'number', min: 2, max: 10 }],
   momentum: [{ k: 'window', label: '动量窗口', type: 'number', min: 5, max: 120 },
-             { k: 'top_k', label: '买前 K 名', type: 'number', min: 1, max: 10 }],
+             { k: 'top_k', label: '买前 K 名', type: 'number', min: 1, max: 10 },
+             { k: 'rebalance', label: '调仓频率', type: 'select',
+               options: [{ value: 'month', label: '每月末' },
+                         { value: 'week', label: '每周末' }] }],
 }
 const DEFAULT_PARAMS = {
   buy_hold: {}, ma_cross: { fast: 5, slow: 20 }, donchian: { entry_n: 20, exit_n: 10 },
   bollinger: { window: 20, alpha: 2.0 }, grid: { step_pct: 5.0, levels: 4 },
-  momentum: { window: 20, top_k: 2 },
+  momentum: { window: 20, top_k: 2, rebalance: 'month' },
 }
 const learnStrat = ref('ma_cross')
 const learnCodePick = ref([])         // 多选标签：[{code, name, label}]（1 只=单股模式）
@@ -1969,7 +1972,11 @@ watch(
                     <div class="learn-params-row">
                       <label v-for="f in (STRAT_FIELDS[learnStrat] || [])" :key="f.k" class="learn-field">
                         <span>{{ f.label }}</span>
-                        <input :type="f.type === 'number' ? 'number' : 'text'" class="learn-input num"
+                        <select v-if="f.type === 'select'" v-model="learnParams[f.k]"
+                          class="learn-select">
+                          <option v-for="o in f.options" :key="o.value" :value="o.value">{{ o.label }}</option>
+                        </select>
+                        <input v-else :type="f.type === 'number' ? 'number' : 'text'" class="learn-input num"
                           :min="f.min" :max="f.max" :step="f.step"
                           v-model.number="learnParams[f.k]" />
                       </label>
@@ -1985,8 +1992,30 @@ watch(
                     </div>
                   </template>
 
-                  <!-- 全市场：过滤面板 + 发起/取消/历史 -->
+                  <!-- 全市场：策略参数（动量 window/top_k/调仓频率）+ 区间/撮合 + 过滤面板 + 发起/历史 -->
                   <template v-else>
+                    <div class="learn-params-row">
+                      <label v-for="f in (STRAT_FIELDS[learnStrat] || [])" :key="'f-' + f.k" class="learn-field">
+                        <span>{{ f.label }}</span>
+                        <select v-if="f.type === 'select'" v-model="learnParams[f.k]"
+                          class="learn-select">
+                          <option v-for="o in f.options" :key="o.value" :value="o.value">{{ o.label }}</option>
+                        </select>
+                        <input v-else :type="f.type === 'number' ? 'number' : 'text'" class="learn-input num"
+                          :min="f.min" :max="f.max" :step="f.step"
+                          v-model.number="learnParams[f.k]" />
+                      </label>
+                      <label class="learn-field"><span>回测区间</span>
+                        <select v-model="learnRange" class="learn-select">
+                          <option value="1y">近 1 年</option><option value="3y">近 3 年</option>
+                          <option value="5y">近 5 年</option><option value="all">全史</option>
+                        </select></label>
+                      <label class="learn-field"><span>撮合模式</span>
+                        <select v-model="learnExec" class="learn-select">
+                          <option value="next_open">次日开盘（正确）</option>
+                          <option value="close">当日收盘（未来函数）</option>
+                        </select></label>
+                    </div>
                     <div class="learn-params-row">
                       <label class="learn-field wide"><span>全市场过滤</span>
                         <span class="learn-full-controls">

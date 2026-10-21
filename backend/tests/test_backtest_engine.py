@@ -216,3 +216,32 @@ class TestDelistedTrailingNan:
         assert r["metrics"]["total_return"] is not None
         # 未平仓交易：pnl_pct 序列化为 null（JSON 安全），保留在明细里
         assert any(t.get("pnl_pct") is None for t in r["trades"])
+
+
+def test_momentum_rebalance_param_passthrough():
+    """四期：run_strategy 白名单透传 rebalance——week 与 month 产出不同
+    调仧行数；白名单外键被丢弃不炸（防 TypeError 500 的既有契约）。"""
+    from app.backtest.runner import run_strategy
+
+    idx = pd.bdate_range("2026-01-01", periods=90)
+    close = pd.DataFrame({
+        "000001": np.linspace(10, 12, 90),
+        "000002": np.linspace(10, 11, 90),
+        "000003": np.linspace(10, 9, 90)}, index=idx)
+    bars = {"close": close, "open": close.shift(1).fillna(close),
+            "high": close * 1.02, "low": close * 0.98,
+            "volume": close * 1e6}
+
+    def rebalance_rows(spec_params):
+        result = run_strategy(bars, strategy="momentum",
+                              params=spec_params, exec_mode="close")
+        trades = result["trades"]
+        return sum(1 for t in trades if t.get("direction") == "long")
+
+    n_week = rebalance_rows({"window": 20, "top_k": 2, "rebalance": "week"})
+    n_month = rebalance_rows({"window": 20, "top_k": 2, "rebalance": "month"})
+    assert n_week > n_month                       # 周度调仓入场次数严格更多
+    # 白名单外键丢弃：无效键与非法频率值均不炸（非法频率按 month 回退）
+    n_bad = rebalance_rows({"window": 20, "top_k": 2, "bogus": 1,
+                            "rebalance": "day"})
+    assert n_bad == n_month

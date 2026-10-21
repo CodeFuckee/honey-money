@@ -65,20 +65,24 @@ def grid_target(close: pd.Series, step_pct: float = 5.0, levels: int = 4) -> pd.
 
 
 def momentum_weights(close: pd.DataFrame, window: int = 20, top_k: int = 2,
-                     ) -> pd.DataFrame:
-    """横截面动量轮动：每月末按过去 window 日涨幅排名，等权买入前 top_k 名。
+                     rebalance: str = "month") -> pd.DataFrame:
+    """横截面动量轮动：定期按过去 window 日涨幅排名，等权买入前 top_k 名。
 
-    返回目标权重矩阵：仅月末调仓行有值（其余 NaN = 不调仓、持仓自然延续），
+    返回目标权重矩阵：仅调仓行有值（其余 NaN = 不调仓、持仓自然延续），
     由引擎按 targetpercent 撮合。教学点：强者恒强；动量崩溃风险。
+
+    rebalance：调仓频率，"month"=每月末（默认）；"week"=每周最后一个
+    交易日；其余值按 "month" 处理（对 UI/MCP 乱输入鲁棒）。
     """
     close = close.copy()
     if not isinstance(close.index, pd.DatetimeIndex):
         close.index = pd.to_datetime(close.index)  # 容忍非 DatetimeIndex 输入
     mom = close.pct_change(window)
-    month_end = mom.index.to_series().groupby(mom.index.to_period("M")).max()
-    rebalance = mom.loc[month_end]
-    rank = rebalance.rank(axis=1, ascending=False)
-    picked = (rank <= top_k) & rebalance.notna()
+    period = mom.index.to_period("W" if rebalance == "week" else "M")
+    last = mom.index.to_series().groupby(period).max()
+    rebalance_rows = mom.loc[last]
+    rank = rebalance_rows.rank(axis=1, ascending=False)
+    picked = (rank <= top_k) & rebalance_rows.notna()
     weights = picked.astype(float)
     weights = weights.div(weights.sum(axis=1), axis=0).where(picked)
     out = pd.DataFrame(np.nan, index=close.index, columns=close.columns)

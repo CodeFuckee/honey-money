@@ -18,6 +18,21 @@
   与逐笔），测试 +3，全量 362 passed。
 
 ### Added
+- **动量组合调仓频率可配（四期）+ 全市场段策略参数区**：momentum_weights
+  新增 rebalance 参数（"month" 每月末=默认 / "week" 每周末，非法值按月
+  处理），runner 白名单透传，UI/MCP/REST 全链路可配。修复三期 UI 缺口：
+  全市场段此前不显示策略参数（组合回测只能用默认值），现补齐「策略参数 +
+  回测区间 + 撮合模式」行（策略参数渲染新增 select 类型支持）。runs 列表
+  接口补返 params 字段（此前仅详情可见）。真机：周度 67 笔 vs 月度 32 笔
+  （收益 -20.52% vs -21.14%），同参指纹区分 rebalance。测试 +5（频率 4 +
+  runner 透传 1 + spec_hash params 敏感锚点 1），全量 372 passed。
+
+### Fixed
+- **pkill 模式误伤**：`pkill -f "uvicorn app.main:app"` 会命中其他项目的
+  uvicorn 容器进程（dashboard-api 被误杀一次，容器自愈）——后记入知识库，
+  此后限定 .venv 绝对路径匹配。
+
+### Added
 - **MCP/全量回测三期：动量轮动全市场（组合级）**：`momentum` 在全市场
   走独立组合路径——过滤后 universe 按区间 K 线数截断（`filters.max_universe`
   默认 1000，防全市场宽表进 vectorbt 的内存膨胀），分批加载拼接宽表后

@@ -354,18 +354,20 @@ def get_run(run_id: int) -> dict | None:
 def list_runs() -> list[dict]:
     with _connect() as conn:
         rows = conn.cursor().execute(
-            "SELECT id, strategy, range_key, status, total, skipped, done,"
-            " failed, stats, error, created_at, finished_at,"
+            "SELECT id, strategy, range_key, params, status, total, skipped,"
+            " done, failed, stats, error, created_at, finished_at,"
             " reused_from, reused_count"
             " FROM backtest_full_run ORDER BY id DESC LIMIT 100").fetchall()
-    keys = ("id", "strategy", "range", "status", "total", "skipped", "done",
-            "failed", "stats", "error", "created_at", "finished_at",
-            "reused_from", "reused_count")
+    keys = ("id", "strategy", "range", "params", "status", "total",
+            "skipped", "done", "failed", "stats", "error", "created_at",
+            "finished_at", "reused_from", "reused_count")
     out = []
     for r in rows:
         d = dict(zip(keys, r))
         if isinstance(d["stats"], str):
             d["stats"] = json.loads(d["stats"])
+        if isinstance(d["params"], str):
+            d["params"] = json.loads(d["params"])
         out.append(d)
     return out
 

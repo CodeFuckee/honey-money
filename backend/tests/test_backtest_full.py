@@ -944,3 +944,17 @@ class TestPortfolioRun:
         curves = r.json()["curves"]
         assert len(curves) == 1 and curves[0]["code"] == "_PORTFOLIO"
         assert curves[0]["equity"] == snap
+
+
+def test_spec_hash_distinguishes_params():
+    """复用指纹必须区分 params——四期曾在「旧进程执行丢参 + 指纹含参」下
+    产生月度结果挂 weekly 指纹的脏 run，锚定指纹对 params 敏感（防未来
+    指纹实现漏字段时假同参复用）。"""
+    base = {"strategy": "momentum", "range": "1y",
+            "params": {"window": 20, "top_k": 20}, "exec_mode": "next_open",
+            "commission": 2.5e-4, "sell_tax": 5e-4, "adjust": True,
+            "filters": {}}
+    weekly = {**base, "params": {"window": 20, "top_k": 20,
+                                 "rebalance": "week"}}
+    assert bf.spec_hash(base) != bf.spec_hash(weekly)
+    assert bf.spec_hash(base) == bf.spec_hash(dict(base))     # 键序无关

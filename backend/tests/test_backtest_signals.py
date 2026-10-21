@@ -152,3 +152,45 @@ class TestBuyHold:
         close = close_series([10.0, 10.5, 11.0])
         target = buy_hold_target(close)
         assert (target == 1.0).all()
+
+
+class TestMomentumRebalanceFreq:
+    """四期：动量轮动调仓频率可配（month 缺省 / week）。"""
+
+    def _close(self, days=60):
+        idx = pd.bdate_range("2026-01-01", periods=days)
+        return pd.DataFrame({"000001": np.linspace(10, 12, days),
+                             "000002": np.linspace(10, 11, days),
+                             "000003": np.linspace(10, 9, days)}, index=idx)
+
+    def test_default_is_monthly(self):
+        """缺省 rebalance：行为与旧版（月末调仓）一致。"""
+        close = self._close()
+        default = momentum_weights(close, window=20, top_k=2)
+        explicit = momentum_weights(close, window=20, top_k=2,
+                                    rebalance="month")
+        pd.testing.assert_frame_equal(default, explicit)
+
+    def test_weekly_rebalances_more_often_than_monthly(self):
+        """60 个交易日（约 3 个月）：周度调仓行数严格多于月度。"""
+        close = self._close()
+        n_month = momentum_weights(close, window=20, top_k=2
+                                   ).dropna(how="all").shape[0]
+        n_week = momentum_weights(close, window=20, top_k=2,
+                                  rebalance="week").dropna(how="all").shape[0]
+        assert n_month >= 1 and n_week > n_month >= 2
+
+    def test_weekly_picks_strongest_still_excludes_loser(self):
+        """周度调仓同样只买强者：末次调仓行排除最弱标的。"""
+        close = self._close()
+        w = momentum_weights(close, window=20, top_k=2, rebalance="week")
+        last = w.dropna(how="all").iloc[-1].dropna()
+        assert set(last.index) == {"000001", "000002"}
+        assert last.sum() == pytest.approx(1.0)
+
+    def test_unknown_freq_falls_back_to_monthly(self):
+        """非法频率值：按月度处理（不抛错——对 UI/MCP 乱输入鲁棒）。"""
+        close = self._close()
+        pd.testing.assert_frame_equal(
+            momentum_weights(close, window=20, top_k=2, rebalance="day"),
+            momentum_weights(close, window=20, top_k=2, rebalance="month"))

@@ -288,7 +288,8 @@ class TestFullBacktest:
         body = json.loads(next(c for c in calls
                                if c["kind"] == "create")["body"])
         assert body["strategy"] == "momentum"
-        assert body["params"] == {"window": 20, "top_k": 2}   # 页面默认参数
+        assert body["params"] == {"window": 20, "top_k": 2,
+                                  "rebalance": "month"}   # 页面默认参数（四期频率下拉）
         # 结果区：排行表恰好 1 行组合、统计卡 count=1 口径
         rows = page.locator(".learn-full-cmp tbody tr")
         expect(rows).to_have_count(1)

@@ -19,7 +19,7 @@ _DEFAULT_PARAMS = {
     "donchian": {"entry_n": 20, "exit_n": 10},
     "bollinger": {"window": 20, "alpha": 2.0},
     "grid": {"step_pct": 5.0, "levels": 4},
-    "momentum": {"window": 20, "top_k": 2},
+    "momentum": {"window": 20, "top_k": 2, "rebalance": "month"},
 }
 
 
