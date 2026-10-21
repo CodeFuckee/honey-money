@@ -5,6 +5,18 @@
 
 ## [Unreleased]
 
+### Fixed
+- **MCP HTTP 远程接入 421**：FastMCP 对 localhost 构造自动启用 DNS rebinding
+  保护（Host 白名单仅 localhost），agent 用 IP/域名直连被 421 拒（本地测试
+  127.0.0.1 全绿、部署后远程接入才暴露）。显式关闭该保护（服务无鉴权仅内网、
+  与 backend 同级，工具全为回测/查询类）；HTTP 冒烟测试改用非回环本机 IP
+  直连防回归。
+- **MCP run_backtest 多代码 500**：后端「多代码+单标的策略」存在信号单列 vs
+  close 全列对齐的既有边界（教学页批量模式本就是逐只调用故从未踩到，MCP
+  直连 REST 首次触发）。MCP 层多只改逐只调用并聚合摘要（单只失败记入失败
+  清单不整体崩；momentum 横截面组合保持一次调用；单只保留完整格式含曲线
+  与逐笔），测试 +3，全量 362 passed。
+
 ### Added
 - **MCP server 二期：HTTP 远程接入 + 单股回测 + 行情查询**：① `--http`
   切 streamable HTTP 传输（compose 新增 `mcp` 服务，宿主
