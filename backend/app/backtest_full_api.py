@@ -45,8 +45,6 @@ class FullBacktestIn(BaseModel):
 def register_full_backtest_routes(app: FastAPI) -> None:
     @app.post("/api/backtest/full")
     async def create_full(body: FullBacktestIn):
-        if body.strategy == "momentum":
-            raise HTTPException(400, "动量轮动暂不支持全量回测（横截面组合策略）")
         if bf.has_running_run():
             raise HTTPException(409, "已有全量回测任务在运行，请等待完成或取消")
         spec = {
@@ -105,10 +103,15 @@ def register_full_backtest_routes(app: FastAPI) -> None:
     def full_run_top(run_id: int, n: int = Query(default=20, ge=1, le=100),
                      delisted: str = Query(default="all")):
         """Top-N 归一化净值曲线：按明细排行现算（明细表不存曲线，控体积）。
-        delisted=only 供退市股收益折线图（独立分组口径）。"""
+        delisted=only 供退市股收益折线图（独立分组口径）。
+        组合级 run（momentum）：直接返回 _PORTFOLIO 行的落库快照，
+        不做逐股现算（_PORTFOLIO 无行情数据可查）。"""
         run = bf.get_run(run_id)
         if run is None:
             raise HTTPException(404, "任务不存在")
+        snap = bf.portfolio_snapshot(run_id)
+        if snap and snap.get("status") == "ok":
+            return {"curves": [snap]}
         if delisted not in bf.DELISTED_MODES:
             delisted = "all"
         picks = bf.top_codes(run_id, n, delisted)

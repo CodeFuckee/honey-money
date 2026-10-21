@@ -552,8 +552,8 @@ const learnIsMomentum = computed(() => learnStrat.value === 'momentum')
 
 watch(learnStrat, id => {
   learnParams.value = { ...DEFAULT_PARAMS[id] }
-  // 动量为横截面组合策略：只有多标的形态，锁定批量模式（单股/全市场段禁用）
-  if (id === 'momentum') learnMode.value = 'batch'
+  // 动量为横截面组合策略：无单股形态；全市场段可用（组合级回测，输出单组合行）
+  if (id === 'momentum' && learnMode.value === 'single') learnMode.value = 'batch'
 })
 
 function openLearnWith(code, name) {
@@ -1941,7 +1941,7 @@ watch(
                         @click="learnMode = 'batch'">批量对比</button>
                       <button class="learn-mode-btn" data-mode="full"
                         :class="{ active: learnMode === 'full' }"
-                        :disabled="learnIsMomentum" title="动量轮动为横截面组合策略，暂不支持全市场"
+                        title="动量在全市场为组合级回测：按月末动量持有前 top_k，结果为单组合曲线"
                         @click="learnMode = 'full'">全市场</button>
                     </div>
                   </div>

@@ -36,7 +36,9 @@ frontend/           Vue3 + Vite 前端
                       对比未来函数，净值对照买入持有）+ 单股/批量/全市场
                       三模式分段切换 + 🌐 全量回测（同策略全市场后台任务：
                       过滤面板 剔ST/最少K线数/含退市股、实时进度可取消、
-                      统计卡/Top20 叠加图/收益排行表分页排序/CSV 导出）；
+                      统计卡/Top20 叠加图/收益排行表分页排序/CSV 导出；
+                      动量轮动在全市场为组合级（月末动量 top_k，单组合行
+                      _PORTFOLIO，池护栏 max_universe 默认 1000））；
                       退市股历史补爬（--source delisted / 任务页手动任务，
                       两所退市名单 367 只 + 新浪 klc_kl 全史，修幸存者偏差）
   nginx.conf          生产：静态托管 + /api 反代后端
@@ -53,10 +55,12 @@ docs/               调研文档（A 股日线数据源实测等）
 `backend/app/mcp_server.py`：独立 MCP server（官方 mcp SDK），让
 ZCode / Claude Desktop 等 agent 直接调用本应用。8 个工具：
 
-- **全市场回测**（后台任务，分钟~小时级）：`run_full_backtest`（提交，
-  第一期主打双均线交叉 `ma_cross`，params `fast`/`slow`）→
+- **全市场回测**（后台任务，分钟~小时级）：`run_full_backtest`（提交）→
   `get_backtest_run`（轮询）→ `get_backtest_rows`（明细排行）+
-  `list_backtest_runs` / `cancel_backtest_run`；
+  `list_backtest_runs` / `cancel_backtest_run`。单标的策略输出逐股排行；
+  momentum 为组合级（月末动量 top_k 等权轮动，结果为单组合行
+  `_PORTFOLIO`，池默认截断至 K 线数最多的 1000 只，`filters.max_universe`
+  可调）；
 - **单股/批量回测**（同步秒级）：`run_backtest`（含 momentum 轮动，≥2 只）；
 - **行情查询**：`list_stocks`（搜索，含退市过滤）、`get_stock_bars`
   （日K，前复权/来源可选）。

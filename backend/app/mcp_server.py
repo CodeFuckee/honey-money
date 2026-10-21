@@ -37,9 +37,10 @@ mcp = FastMCP("honey-money", host="0.0.0.0",
 BASE_URL = os.environ.get(
     "HONEY_MONEY_BACKEND_URL", "http://127.0.0.1:8000").rstrip("/")
 
-# 与 backtest_full_api / backtest_full 的白名单一致（momentum 横截面组合
-# 策略不支持全量回测，后端 400，故不在候选内）
-STRATEGIES = ("buy_hold", "ma_cross", "donchian", "bollinger", "grid")
+# 与 backtest_full_api 的白名单一致（momentum 在全市场为组合级：输出单组合
+# 行 _PORTFOLIO，排行表仅 1 行）
+STRATEGIES = ("buy_hold", "ma_cross", "donchian", "bollinger", "grid",
+              "momentum")
 RANGES = ("1y", "3y", "5y", "all")
 SORTABLE = ("total_return", "annual_return", "max_drawdown", "sharpe",
             "win_rate", "trades", "code")
@@ -93,6 +94,9 @@ def run_full_backtest(strategy: str, range: str = "3y",
 
     双均线交叉策略传 strategy="ma_cross"，params={"fast": 5, "slow": 20}
     （fast 上穿 slow 金叉买入、下穿死叉卖出；窗口单位=交易日）。
+    momentum（动量轮动）为组合级：按月末动量取全市场前 top_k 等权持有，
+    结果为单组合行 _PORTFOLIO（排行表无逐股明细，组合净值在 curves）；
+    池默认截断至 K 线数最多的 1000 只（filters.max_universe 可调，0=不限）。
 
     Args:
         strategy: 策略名，可选 """ + STRATEGY_HINT + """
@@ -106,8 +110,7 @@ def run_full_backtest(strategy: str, range: str = "3y",
         reuse: 同参已完成任务的结果直接复用、仅重算失败股（默认 true，大幅提速）
     """
     if strategy not in STRATEGIES:
-        return (f"未知或不支持的策略: {strategy}。可选：{STRATEGY_HINT}"
-                f"（momentum 为横截面组合策略，不支持全量回测）")
+        return f"未知策略: {strategy}。可选：{STRATEGY_HINT}"
     if range not in RANGES:
         return f"非法区间: {range}。可选：{'、'.join(RANGES)}"
     body = {"strategy": strategy, "range": range,

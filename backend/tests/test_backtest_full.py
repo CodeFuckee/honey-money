@@ -154,11 +154,15 @@ def client(monkeypatch):
 
 
 class TestFullBacktestApi:
-    def test_momentum_rejected(self, client):
+    def test_momentum_accepted_for_full(self, client):
+        """三期：momentum 全市场放开（组合级路径），spec 原样透传 worker。"""
         r = client.post("/api/backtest/full", json={
-            "strategy": "momentum", "range": "3y"})
-        assert r.status_code == 400
-        assert "动量" in r.json()["detail"]
+            "strategy": "momentum", "range": "3y",
+            "params": {"window": 20, "top_k": 10}})
+        assert r.status_code == 200
+        run_id, spec = client.app.state._full_started[0]
+        assert spec["strategy"] == "momentum"
+        assert spec["params"] == {"window": 20, "top_k": 10}
 
     def test_conflict_when_run_already_running(self, client, monkeypatch):
         monkeypatch.setattr(bf, "has_running_run", lambda: True)
@@ -817,3 +821,126 @@ class TestBackfillSpecHashes:
             "sell_tax": 5e-4, "adjust": True,
             "filters": {"exclude_st": True, "min_bars": 60}})
         assert updates[0][1] == (expect, 7)
+
+
+# ------------------------------------------------- 组合级全市场（momentum）----
+
+import pandas as pd  # noqa: E402
+
+PORTFOLIO_SPEC = {"strategy": "momentum", "range": "1y",
+                  "params": {"window": 5, "top_k": 2},
+                  "exec_mode": "next_open", "commission": 2.5e-4,
+                  "sell_tax": 5e-4, "adjust": False, "reuse": False,
+                  "filters": {"exclude_st": True, "min_bars": 60,
+                              "include_delisted": True}}
+
+
+def _synth_bars(codes, days=60):
+    """合成宽表 OHLCV：A 持续涨、B 平、C 跌（动量排序确定）。"""
+    idx = pd.bdate_range("2026-01-01", periods=days)
+    drift = {"600519": 1.01, "000001": 1.0, "600596": 0.99}
+    close = pd.DataFrame({c: 10.0 * (drift[c] ** i)
+                          for i, c in enumerate(codes)}, index=idx)
+    bars = {"close": close, "open": close.shift(1).fillna(close),
+            "high": close * 1.02, "low": close * 0.98,
+            "volume": close * 1e6}
+    return bars
+
+
+class TestPortfolioRun:
+    """momentum 全市场 = 组合级回测（横截面轮动，输出单组合行而非逐股排行）。"""
+
+    def _run(self, monkeypatch, universe, chunk=2, reuse_src=None):
+        """跑 execute_run（momentum spec），捕获落库调用；默认 2 只/批测拼接。"""
+        inserts, finished, progress = [], {}, []
+        universe = [{"code": c, "name": f"股{c}", "delisted": False}
+                    for c in universe]
+        monkeypatch.setattr(bf, "_load_universe",
+                            lambda rid, spec: (universe, 0))
+        monkeypatch.setattr(bf, "set_run_totals",
+                            lambda rid, total, skipped:
+                            progress.append(("totals", total)))
+        monkeypatch.setattr(bf, "insert_row",
+                            lambda rid, row: inserts.append(row))
+        monkeypatch.setattr(bf, "update_progress",
+                            lambda rid, done, failed:
+                            progress.append(("prog", done)))
+        monkeypatch.setattr(bf, "finish_run",
+                            lambda rid, status, stats=None, error=None:
+                            finished.update(status=status, stats=stats,
+                                            error=error))
+        monkeypatch.setattr(bf, "find_reusable_run",
+                            lambda *a, **k: reuse_src)
+        monkeypatch.setattr(bf, "reusable_ok_codes",
+                            lambda rid: {"_PORTFOLIO"})
+        monkeypatch.setattr(bf, "copy_ok_rows", lambda *a, **k: 1)
+        monkeypatch.setattr(bf, "mark_reuse", lambda *a, **k: None)
+        monkeypatch.setattr(bf, "ok_rows", lambda rid, *a, **k: [
+            {"status": "ok", "total_return": 0.1,
+             "buyhold_return": 0.05, "delisted": False}])
+        codes = [s["code"] for s in universe]
+        chunks = [codes[i:i + chunk] for i in range(0, len(codes), chunk)]
+
+        def fake_chunk(batch_codes, spec):
+            bars = _synth_bars(batch_codes)
+            return {"bars": bars, "factors": None}
+
+        monkeypatch.setattr(bf, "_load_bars_chunk", fake_chunk)
+        monkeypatch.setattr(bf, "CHUNK", chunk)
+        spec = {**PORTFOLIO_SPEC, "reuse": reuse_src is not None}
+        asyncio.run(bf.execute_run(99, spec))
+        return inserts, finished, progress, chunks
+
+    def test_portfolio_writes_single_row(self, monkeypatch):
+        """组合路径：落库恰好 1 行 _PORTFOLIO（ok + 组合快照），终态 done。"""
+        inserts, finished, _, _ = self._run(
+            monkeypatch, ["600519", "000001", "600596"])
+        assert len(inserts) == 1
+        row = inserts[0]
+        assert row["code"] == "_PORTFOLIO"
+        assert row["status"] == "ok"
+        assert row["total_return"] is not None
+        assert row["equity_snapshot"] and len(row["equity_snapshot"]) > 10
+        assert finished["status"] == "done"
+        stats = finished["stats"]
+        assert stats["count"] == 1                       # 组合即单样本分布
+        assert stats["median_return"] == pytest.approx(0.1)
+
+    def test_multi_chunk_concat_uses_all_codes(self, monkeypatch):
+        """分批加载后按列拼接：组合收益基于全部 3 只（曲线行数=交易日数）。"""
+        inserts, _, _, _ = self._run(
+            monkeypatch, ["600519", "000001", "600596"], chunk=2)
+        row = inserts[0]
+        # 若漏拼某批，末段日期会缺失——快照覆盖完整 60 交易日区间
+        assert row["equity_snapshot"][-1][0] == "2026-03-25"  # 60 个 bday 末日
+
+    def test_reuse_copies_portfolio_row(self, monkeypatch):
+        """同参复用：找到源 run → 整行复制、不再加载/回测。"""
+        inserts, finished, progress, _ = self._run(
+            monkeypatch, ["600519", "000001"], reuse_src={"id": 55})
+        assert finished["status"] == "done"
+        assert inserts == []                             # 无新回测落库
+        assert ("prog", 1) in progress                   # 进度直接置完成
+
+    def test_truncate_by_bars_prefers_longest_history(self):
+        """max_universe 截断：按区间 K 线数降序取前 N，同数按代码序稳定。"""
+        universe = [{"code": c, "name": c, "delisted": False}
+                    for c in ("600519", "000001", "600596", "600070")]
+        counts = {"600519": 100, "000001": 300, "600596": 200, "600070": 300}
+        kept = bf._truncate_by_bars(universe, counts, 2)
+        assert [s["code"] for s in kept] == ["000001", "600070"]
+        assert bf._truncate_by_bars(universe, counts, 0) == universe  # 0=不限
+
+    def test_top_endpoint_returns_portfolio_snapshot(self, client, monkeypatch):
+        """momentum run 的 Top 图：直接返回组合快照曲线，不走逐股现算。"""
+        snap = [["2026-01-05", 1.0, 1.0], ["2026-01-06", 1.02, 1.01]]
+        run = {**RUN, "strategy": "momentum", "status": "done"}
+        monkeypatch.setattr(bf, "get_run", lambda rid: dict(run) if rid == 7 else None)
+        monkeypatch.setattr(bf, "portfolio_snapshot", lambda rid: {
+            "code": "_PORTFOLIO", "name": "全市场动量轮动组合",
+            "status": "ok", "total_return": 0.02, "equity": snap})
+        r = client.get("/api/backtest/full/runs/7/top")
+        assert r.status_code == 200
+        curves = r.json()["curves"]
+        assert len(curves) == 1 and curves[0]["code"] == "_PORTFOLIO"
+        assert curves[0]["equity"] == snap

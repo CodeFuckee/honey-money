@@ -13,6 +13,7 @@ import datetime as dt
 import hashlib
 import json
 
+import pandas as pd
 import psycopg
 
 from . import config
@@ -432,6 +433,128 @@ def request_cancel(run_id: int) -> bool:
     return True
 
 
+# ------------------------------------------------- 组合级全市场（momentum）----
+
+PORTFOLIO_CODE = "_PORTFOLIO"
+PORTFOLIO_NAME = "全市场动量轮动组合"
+
+
+def _truncate_by_bars(universe: list[dict], counts: dict, max_n: int) -> list[dict]:
+    """组合池护栏：按区间 K 线数降序取前 max_n（数据最全优先，同数按代码序稳定）。
+
+    全市场宽表进 vectorbt 的内存随列数线性膨胀（5000 只 all 区间仅 close 即
+    ~320MB，撮合中再翻数倍），组合路径默认 max_universe=1000；0 = 不限。
+    """
+    if not max_n or max_n <= 0 or len(universe) <= max_n:
+        return universe
+    ranked = sorted(universe,
+                    key=lambda s: (-counts.get(s["code"], 0), s["code"]))
+    return ranked[:max_n]
+
+
+def _universe_bar_counts(spec: dict) -> dict:
+    start = _range_start(spec["range"])
+    with _connect() as conn:
+        cur = conn.cursor()
+        if start is None:
+            counts = dict(cur.execute(
+                "SELECT code, count(DISTINCT trade_date) FROM daily_bar"
+                " GROUP BY code").fetchall())
+        else:
+            counts = dict(cur.execute(
+                "SELECT code, count(DISTINCT trade_date) FROM daily_bar"
+                " WHERE trade_date >= %s GROUP BY code", (start,)))
+    return counts
+
+
+def _run_portfolio(pieces: list[dict], factors, spec: dict) -> dict:
+    """全市场宽表（分批加载后按列拼接）跑 momentum 组合 → 单组合行。"""
+    full = {k: pd.concat([p[k] for p in pieces], axis=1) for k in pieces[0]}
+    full = {k: df.loc[:, sorted(df.columns)] for k, df in full.items()}
+    result = run_strategy(
+        full, strategy="momentum", params=spec.get("params") or {},
+        exec_mode=spec.get("exec_mode", "next_open"),
+        commission=spec.get("commission", 2.5e-4),
+        sell_tax=spec.get("sell_tax", 5e-4), factors=factors)
+    return row_from_result(PORTFOLIO_CODE, PORTFOLIO_NAME, result)
+
+
+def portfolio_snapshot(run_id: int) -> dict | None:
+    """组合行的净值快照（Top 图特判：_PORTFOLIO 不参与逐股现算）。"""
+    with _connect() as conn:
+        r = conn.cursor().execute(
+            "SELECT name, status, total_return, equity_snapshot"
+            " FROM backtest_full_row WHERE run_id=%s AND code=%s",
+            (run_id, PORTFOLIO_CODE)).fetchone()
+    if not r or r[3] is None:
+        return None
+    return {"code": PORTFOLIO_CODE, "name": r[0], "status": r[1],
+            "total_return": r[2],
+            "equity": json.loads(r[3]) if isinstance(r[3], str) else r[3]}
+
+
+async def _execute_portfolio(run_id: int, spec: dict, universe: list[dict]) -> None:
+    """组合路径：截断护栏 → （可选复用）→ 分批加载拼接 → 一次组合回测落库。
+
+    落库形态：恰好 1 行 _PORTFOLIO（equity_snapshot=组合净值，基准线为
+    等权买入持有）——既有统计/排行/CSV/复用机制对该行自然生效。
+    """
+    max_n = int((spec.get("filters") or {}).get("max_universe", 1000))
+    if 0 < max_n < len(universe):
+        counts = await asyncio.to_thread(_universe_bar_counts, spec)
+        universe = _truncate_by_bars(universe, counts, max_n)
+        await asyncio.to_thread(set_run_totals, run_id, len(universe), 0)
+
+    if spec.get("reuse", True):
+        src = await asyncio.to_thread(
+            find_reusable_run, spec_hash(spec), run_id)
+        if src:
+            ok_codes = set(await asyncio.to_thread(
+                reusable_ok_codes, src["id"]))
+            if PORTFOLIO_CODE in ok_codes:
+                copied = await asyncio.to_thread(
+                    copy_ok_rows, src["id"], run_id, [PORTFOLIO_CODE])
+                if copied:
+                    await asyncio.to_thread(
+                        mark_reuse, run_id, src["id"], copied)
+                    await asyncio.to_thread(update_progress, run_id, 1, 0)
+                    stats = await asyncio.to_thread(compute_stats,
+                                                    ok_rows(run_id))
+                    finish_run(run_id, "done", stats=stats)
+                    return
+
+    pieces, factors, done = [], None, 0
+    for i in range(0, len(universe), CHUNK):
+        if _canceled(run_id):
+            finish_run(run_id, "canceled")
+            return
+        chunk = universe[i:i + CHUNK]
+        pack = await asyncio.to_thread(
+            _load_bars_chunk, [s["code"] for s in chunk], spec)
+        if pack.get("bars"):
+            pieces.append(pack["bars"])
+        if pack.get("factors"):
+            factors = {**(factors or {}), **pack["factors"]}
+        done += len(chunk)
+        await asyncio.to_thread(update_progress,
+                                run_id, min(done, len(universe)), 0)
+        await asyncio.sleep(0)
+    if _canceled(run_id):
+        finish_run(run_id, "canceled")
+        return
+    if not pieces:
+        finish_run(run_id, "failed", error="区间内无行情数据")
+        return
+    row = await asyncio.to_thread(_run_portfolio, pieces, factors, spec)
+    if row.get("status") != "ok":
+        finish_run(run_id, "failed",
+                   error=row.get("reason") or "组合回测失败")
+        return
+    await asyncio.to_thread(insert_row, run_id, row)
+    stats = await asyncio.to_thread(compute_stats, ok_rows(run_id))
+    finish_run(run_id, "done", stats=stats)
+
+
 DELISTED_MODES = ("all", "only", "exclude")     # 退市股分组过滤白名单
 
 
@@ -662,6 +785,9 @@ async def execute_run(run_id: int, spec: dict) -> None:
     """
     try:
         universe, skipped = await asyncio.to_thread(_load_universe, run_id, spec)
+        if spec.get("strategy") == "momentum":
+            await _execute_portfolio(run_id, spec, universe)
+            return
         done = failed = 0
         pending = universe
         if spec.get("reuse", True):

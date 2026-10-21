@@ -73,13 +73,13 @@ class TestRunFullBacktest:
         out = ms.run_full_backtest("ma_cross")
         assert "不可达" in out or "refused" in out
 
-    def test_momentum_rejected_before_request(self, monkeypatch):
-        """momentum（横截面组合）后端不支持：直接校验拒绝，不发请求。"""
-        fake = FakeApi()
+    def test_momentum_accepted_for_full(self, monkeypatch):
+        """三期：momentum 全市场放开（组合级），请求原样透传。"""
+        fake = FakeApi(result={"run_id": 8})
         monkeypatch.setattr(ms, "_api", fake)
-        out = ms.run_full_backtest("momentum")
-        assert fake.calls == []
-        assert "ma_cross" in out                     # 提示可用策略
+        out = ms.run_full_backtest("momentum", params={"window": 20, "top_k": 10})
+        assert fake.calls[0][2]["strategy"] == "momentum"
+        assert "8" in out
 
     def test_unknown_strategy_rejected(self, monkeypatch):
         fake = FakeApi()

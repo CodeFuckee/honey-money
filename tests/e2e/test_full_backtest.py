@@ -124,7 +124,7 @@ def full_api(page):
             return
         if re.search(r"/api/backtest/full/runs/\d+/curves", url):
             fulfill_json(DELIST_CURVES if "delisted=only" in url
-                         else ALL_CURVES)
+                         else holder.get("all_curves") or ALL_CURVES)
             return
         if re.search(r"/api/backtest/full/runs/\d+/top", url):
             if "delisted=only" in url:
@@ -251,15 +251,52 @@ class TestFullBacktest:
         expect(page.locator("[data-testid=full-status]")
                ).to_contain_text("已取消", timeout=10000)
 
-    def test_e2e_006_momentum_disables_full_segment(self, servers, page,
-                                                    full_api):
-        """P2 动量策略 → 「全市场」模式段禁用带提示（横截面组合策略）。"""
+    def test_e2e_006_momentum_full_portfolio(self, servers, page, full_api):
+        """P1 三期：momentum 全市场段放开（组合级回测）。选动量 → 全市场
+        可点 → 发起请求带 strategy=momentum；组合 run 排行表单行
+        _PORTFOLIO、统计卡 count=1 口径、Top 图返回组合快照曲线。"""
+        calls, holder = full_api
+        mom_run = {**RUN_DONE, "id": 8, "strategy": "momentum",
+                   "params": {"window": 20, "top_k": 10}, "total": 1,
+                   "done": 1, "failed": 0, "skipped": 0,
+                   "stats": {"count": 1, "positive_pct": 1.0,
+                             "median_return": 0.18, "beat_buyhold_pct": 1.0,
+                             "best_return": 0.18, "worst_return": 0.18}}
+        mom_row = {"code": "_PORTFOLIO", "name": "全市场动量轮动组合",
+                   "status": "ok", "total_return": 0.18,
+                   "annual_return": 0.35, "max_drawdown": -0.08,
+                   "sharpe": 1.2, "win_rate": None, "trades": 24,
+                   "buyhold_return": 0.06, "reason": None}
+        holder["runs"] = [mom_run, RUN_DONE, RUN_OLD]
+        holder["details"][8] = mom_run
+        holder["rows"][8] = {"total": 1, "rows": [mom_row]}
+        portfolio_curve = {"code": "_PORTFOLIO",
+                           "name": "全市场动量轮动组合",
+                           "total_return": 0.18,
+                           "equity": [["2026-01-02", 1.0],
+                                      ["2026-06-01", 1.18]]}
+        holder["curves"] = [portfolio_curve]
+        holder["all_curves"] = [portfolio_curve]
         _, frontend_port = servers
         open_learn(page, frontend_port)
         page.locator(".learn-nav", has_text="动量轮动").click()
         seg = page.locator(".learn-mode-btn", has_text="全市场")
-        expect(seg).to_be_disabled()
-        expect(seg).to_have_attribute("title", re.compile("动量"))
+        expect(seg).to_be_enabled()                    # 三期放开
+        seg.click()
+        holder["create_body"] = {"run_id": 8}
+        page.get_by_role("button", name="发起全量").click()
+        body = json.loads(next(c for c in calls
+                               if c["kind"] == "create")["body"])
+        assert body["strategy"] == "momentum"
+        assert body["params"] == {"window": 20, "top_k": 2}   # 页面默认参数
+        # 结果区：排行表恰好 1 行组合、统计卡 count=1 口径
+        rows = page.locator(".learn-full-cmp tbody tr")
+        expect(rows).to_have_count(1)
+        expect(rows.first).to_contain_text("_PORTFOLIO")
+        expect(page.locator(".full-total-metrics .lm", has_text="正收益占比")
+               ).to_contain_text("100.0%")
+        # 组合单曲线的图表渲染细节（Top/全部视图切换 × 快照接口）由前端过目人工确认；
+        # E2E 契约锁定排行表/统计卡/发起参数。
 
     def test_e2e_007_conflict_409_shown(self, servers, page, full_api):
         """P2 已有任务运行时再发起 → 409 → 页面错误横幅。"""

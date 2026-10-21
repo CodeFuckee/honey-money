@@ -18,6 +18,18 @@
   与逐笔），测试 +3，全量 362 passed。
 
 ### Added
+- **MCP/全量回测三期：动量轮动全市场（组合级）**：`momentum` 在全市场
+  走独立组合路径——过滤后 universe 按区间 K 线数截断（`filters.max_universe`
+  默认 1000，防全市场宽表进 vectorbt 的内存膨胀），分批加载拼接宽表后
+  一次组合回测（月末动量 top_k 等权轮动），落库恰 1 行 `_PORTFOLIO`
+  （equity_snapshot=组合净值 + 等权买入持有基准线）——既有统计卡/排行表/
+  Top 图/CSV/同参复用机制对该行自然生效（统计卡为 count=1 组合口径，
+  Top 图直接返回组合快照不做逐股现算）。API 放开 momentum 400 拒绝；
+  MCP `run_full_backtest` 同步放开；UI 全市场段对 momentum 放开（单股段
+  仍禁用——无单标的形态）。真机：1000 只 1y 组合 ~6 分钟跑完（-21.1%，
+  32 次调仓），同参复用秒级（整行复制）。测试 +5（组合落库/多批拼接/
+  复用整行/截断护栏/top 特判）+ E2E-006 重写（momentum 全市场发起契约与
+  组合结果展示），全量 367/54 passed。
 - **MCP server 二期：HTTP 远程接入 + 单股回测 + 行情查询**：① `--http`
   切 streamable HTTP 传输（compose 新增 `mcp` 服务，宿主
   `${MCP_PORT:-28081}`，agent 经 `http://<NAS>:28081/mcp` 直连，无鉴权
