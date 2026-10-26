@@ -8,6 +8,7 @@
 - E2E-005 P1 运行中取消→已取消态
 - E2E-006 P2 动量策略按钮置灰
 - E2E-007 P2 重复发起 409 提示
+- E2E-008 P0 选股域过滤（流通市值区间/一手价上限）参数传递契约（2026-10-21）
 真实批量计算由 backend worker 测试覆盖（test_backtest_full.py）。
 """
 
@@ -328,7 +329,9 @@ class TestFullBacktest:
         # 主按钮变为发起全量
         goto_full_mode(page)
         expect(page.locator(".learn-ac")).to_have_count(0)
-        expect(page.locator(".learn-full-controls")).to_be_visible()
+        # 两行过滤面板：全市场过滤 + 选股域（2026-10-21 实验加行）
+        expect(page.locator(".learn-full-controls")).to_have_count(2)
+        expect(page.locator(".learn-full-controls").first).to_be_visible()
         del_cb = page.locator(".learn-full-controls .learn-check",
                               has_text="含退市股")
         expect(del_cb.locator("input")).to_be_checked()
@@ -436,3 +439,25 @@ class TestFullBacktest:
         expect(page.locator("[data-testid=full-status]")
                ).to_contain_text("已完成", timeout=10000)
         assert create_bodies()[-1]["reuse"] is True
+
+    def test_e2e_012_selection_filters_payload(self, servers, page, full_api):
+        """P0 选股域过滤（2026-10-21 实验）：三个新输入默认值可见，
+        修改后发起 → create 请求体携带换算后的 min/max_market_cap（亿→元）
+        与 max_lot_cost（元/手）。"""
+        calls, _ = full_api
+        _, frontend_port = servers
+        open_learn(page, frontend_port)
+        goto_full_mode(page)
+        panel = page.locator(".learn-params-row", has_text="选股域")
+        expect(panel.get_by_test_id("full-min-cap")).to_have_value("20")
+        expect(panel.get_by_test_id("full-max-cap")).to_have_value("200")
+        expect(panel.get_by_test_id("full-max-lot")).to_have_value("1000")
+        panel.get_by_test_id("full-min-cap").fill("30")
+        panel.get_by_test_id("full-max-cap").fill("300")
+        panel.get_by_test_id("full-max-lot").fill("800")
+        page.get_by_role("button", name="发起全量").click()
+        body = json.loads(next(c for c in calls
+                               if c["kind"] == "create")["body"])
+        assert body["filters"]["min_market_cap"] == 3e9      # 30 亿 → 元
+        assert body["filters"]["max_market_cap"] == 3e10     # 300 亿 → 元
+        assert body["filters"]["max_lot_cost"] == 800

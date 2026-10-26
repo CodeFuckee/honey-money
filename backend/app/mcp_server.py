@@ -107,7 +107,11 @@ def run_full_backtest(strategy: str, range: str = "3y",
         commission: 买入佣金率（默认 2.5e-4）
         sell_tax: 卖出成本率（默认 5e-4，含印花税）
         adjust: 前复权口径（默认 true）
-        filters: 股票池过滤 {"exclude_st": true, "min_bars": 60, "include_delisted": true}
+        filters: 股票池过滤 {"exclude_st": true, "min_bars": 60, "include_delisted": true,
+              "min_market_cap": 2e9, "max_market_cap": 2e10, "max_lot_cost": 1000.0}
+              （选股域三键=实验默认值：流通市值 20亿~200亿（元，0=不限）、一手成本
+              ≤1000 元（即股价 ≤10 元）；参考时点=区间首日收盘×流通股本，退市股
+              无流通股本数据豁免市值维度；adjust 参数实为后复权口径）
         reuse: 同参已完成任务的结果直接复用、仅重算失败股（默认 true，大幅提速）
     """
     if strategy not in STRATEGIES:

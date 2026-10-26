@@ -35,7 +35,9 @@ frontend/           Vue3 + Vite 前端
                       教学页六大经典回测策略（vectorbt 引擎，撮合模式可切换
                       对比未来函数，净值对照买入持有）+ 单股/批量/全市场
                       三模式分段切换 + 🌐 全量回测（同策略全市场后台任务：
-                      过滤面板 剔ST/最少K线数/含退市股、实时进度可取消、
+                      过滤面板 剔ST/最少K线数/含退市股/选股域——流通市值
+                      区间+一手价上限（参考=区间首日收盘×流通股本，退市股
+                      豁免市值维度）、实时进度可取消、
                       统计卡/Top20 叠加图/收益排行表分页排序/CSV 导出；
                       动量轮动在全市场为组合级（月末动量 top_k，单组合行
                       _PORTFOLIO，池护栏 max_universe 默认 1000））；
@@ -58,7 +60,10 @@ ZCode / Claude Desktop 等 agent 直接调用本应用。8 个工具：
 - **全市场回测**（后台任务，分钟~小时级）：`run_full_backtest`（提交）→
   `get_backtest_run`（轮询）→ `get_backtest_rows`（明细排行）+
   `list_backtest_runs` / `cancel_backtest_run`。单标的策略输出逐股排行；
-  momentum 为组合级（月末/周末动量 top_k 等权轮动，params 可配
+  选股域过滤 `filters` 可配 `min_market_cap`/`max_market_cap`（流通市值
+  元，默认 20亿~200亿）、`max_lot_cost`（一手成本上限元，默认 1000 即
+  股价 ≤10 元；参考时点=区间首日收盘×流通股本，退市股无股本数据豁免
+  市值维度）；momentum 为组合级（月末/周末动量 top_k 等权轮动，params 可配
   `window`/`top_k`/`rebalance`（month/week），结果为单组合行
   `_PORTFOLIO`，池默认截断至 K 线数最多的 1000 只，`filters.max_universe`
   可调）；

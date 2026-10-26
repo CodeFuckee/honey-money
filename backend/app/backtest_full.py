@@ -21,7 +21,10 @@ from .backtest.data import load_history
 from .backtest.runner import run_strategy
 
 DEFAULT_FILTERS = {"exclude_st": True, "min_bars": 60,
-                   "include_delisted": True}
+                   "include_delisted": True,
+                   "min_market_cap": 2e9,       # 流通市值下限（元），0=不限
+                   "max_market_cap": 2e10,      # 流通市值上限（元），0=不限
+                   "max_lot_cost": 1000.0}      # 一手成本上限（元），0=不限
 CHUNK = 300             # 每批加载的股票数（控制单条 SQL 与内存占用）
 SORTABLE = ("total_return", "annual_return", "max_drawdown", "sharpe",
             "win_rate", "trades", "code")
@@ -95,16 +98,41 @@ def spec_hash(spec: dict) -> str:
                            default=str)
     return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
+def _num(value) -> float:
+    """过滤数值鲁棒化：非法/负数一律归 0（=不限），junk 输入不炸过滤。"""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return v if v > 0 else 0.0
+
+
 def filter_universe(stocks: list[dict], bars_counts: dict, *,
                     exclude_st: bool = True, min_bars: int = 60,
-                    include_delisted: bool = True):
+                    include_delisted: bool = True,
+                    ref_metrics: dict | None = None,
+                    min_market_cap: float = 0, max_market_cap: float = 0,
+                    max_lot_cost: float = 0):
     """全市场清单过滤：剔 ST/退（按名称，仅作用在市股）+ 区间内最少 K 线数
-    + 退市股开关（include_delisted=False 回到纯在市口径）。
+    + 退市股开关（include_delisted=False 回到纯在市口径）
+    + 选股域（流通市值区间 + 一手成本上限，2026-10-21 实验需求）。
 
     返回 (kept, skipped)。名称含 ST（含 *ST）或「退」的**在市**股视为风险股
     剔除——退市股是修幸存者偏差的本体，不受该过滤影响；K 线数不足 min_bars
     的次新股/长期停牌股剔除。
+
+    选股域过滤参考时点=回测区间首日（不复权收盘价，来自 ref_metrics）：
+    - 一手成本：close × 100 ≤ max_lot_cost（0=不限）；无参考价的股无法
+      核验，一并剔除；
+    - 流通市值：min_market_cap ≤ close × 流通股本 ≤ max_market_cap
+      （0=不限该侧）；流通股本缺失（当前即退市股）→ **豁免**市值维度——
+      修幸存者偏差的对照组不能被数据缺失清空；
+    - ref_metrics=None 时选股域整体不生效（数据缺失安全阀，不静默清空池）。
     """
+    lot_cap = _num(max_lot_cost)
+    cap_min, cap_max = _num(min_market_cap), _num(max_market_cap)
+    selection_on = ref_metrics is not None and (lot_cap > 0 or cap_min > 0
+                                                or cap_max > 0)
     kept = []
     for s in stocks:
         if not include_delisted and s.get("delisted"):
@@ -115,6 +143,15 @@ def filter_universe(stocks: list[dict], bars_counts: dict, *,
             continue
         if bars_counts.get(s["code"], 0) < min_bars:
             continue
+        if selection_on:
+            ref = ref_metrics.get(s["code"]) or {}
+            close = ref.get("close")
+            if lot_cap > 0 and (close is None or close * 100 > lot_cap):
+                continue
+            mv = ref.get("float_mv")
+            if mv is not None and ((cap_min > 0 and mv < cap_min)
+                                   or (cap_max > 0 and mv > cap_max)):
+                continue
         kept.append(s)
     return kept, len(stocks) - len(kept)
 
@@ -690,23 +727,57 @@ def _range_start(range_key: str) -> str | None:
         if range_key != "all" else None
 
 
-def _load_universe(run_id: int, spec: dict) -> tuple[list[dict], int]:
-    """全市场清单 + 区间内 K 线数 → 过滤后的 universe（同时落库 total/skipped）。"""
-    start = _range_start(spec["range"])
+# 区间首日参考指标（选股域过滤用）：两条 LATERAL 各按 (code, trade_date)
+# 主键前缀索引取 LIMIT 1——GROUP BY 全表扫要 60s+，这个写法秒级。
+_REF_SQL = """
+SELECT s.code, fb.close, fs.outstanding_share
+FROM stock_basic s
+LEFT JOIN LATERAL (
+  SELECT d.close FROM daily_bar d
+  WHERE d.code = s.code AND d.close IS NOT NULL{date_clause}
+  ORDER BY d.trade_date ASC, d.source DESC LIMIT 1
+) fb ON TRUE
+LEFT JOIN LATERAL (
+  SELECT d.outstanding_share FROM daily_bar d
+  WHERE d.code = s.code AND d.outstanding_share IS NOT NULL{date_clause}
+  ORDER BY d.trade_date ASC, d.source DESC LIMIT 1
+) fs ON TRUE
+"""
+
+
+def _ref_rows_to_metrics(rows: list[tuple]) -> dict:
+    """(code, close, 流通股本) 行 → {code: {close, float_mv}}。
+
+    float_mv = close × 流通股本（流通市值，元）；收盘或股本任一缺失 →
+    市值未知（None），选股域过滤对该股豁免市值维度。
+    """
+    out = {}
+    for code, close, share in rows:
+        mv = close * share if (close is not None
+                               and share is not None) else None
+        out[code] = {"close": close, "float_mv": mv}
+    return out
+
+
+def _range_ref_metrics(start: str | None) -> dict:
+    """区间首日参考指标（不复权）：close=区间内首根有效收盘；
+    流通股本=区间内首个非空值（新浪源专有字段，退市股全 NULL）。"""
+    # 两条 LATERAL 各带一个 {date_clause}：占位符按出现次数复制参数
+    # （只传一个会 ProgrammingError: 2 placeholders but 1 parameters）
+    n = _REF_SQL.count("{date_clause}")
+    clause = " AND d.trade_date >= %s" if start else ""
+    params = (start,) * n if start else ()
     with _connect() as conn:
-        stocks = conn.cursor().execute(
-            "SELECT code, name FROM stock_basic ORDER BY code").fetchall()
-        # 注意不可写 `(%s IS NULL OR trade_date >= %s)`：psycopg3 服务端绑定下
-        # $1 仅出现在 IS NULL 位，Postgres 推断不出类型（IndeterminateDatatype）
-        cur = conn.cursor()
-        if start is None:
-            counts = dict(cur.execute(
-                "SELECT code, count(DISTINCT trade_date) FROM daily_bar"
-                " GROUP BY code").fetchall())
-        else:
-            counts = dict(cur.execute(
-                "SELECT code, count(DISTINCT trade_date) FROM daily_bar"
-                " WHERE trade_date >= %s GROUP BY code", (start,)))
+        rows = conn.cursor().execute(
+            _REF_SQL.replace("{date_clause}", clause), params).fetchall()
+    return _ref_rows_to_metrics(rows)
+
+
+def _load_universe(run_id: int, spec: dict) -> tuple[list[dict], int]:
+    """全市场清单 + 区间内 K 线数 + 区间首日参考指标 → 过滤后的 universe
+    （同时落库 total/skipped）。选股域阈值缺省 0=不限，默认值只在 API
+    合并层（DEFAULT_FILTERS）注入——worker 层不复制默认，避免两处漂移。"""
+    start = _range_start(spec["range"])
     filters = spec.get("filters") or {}
     include_delisted = bool(filters.get("include_delisted", True))
     with _connect() as conn:
@@ -722,6 +793,8 @@ def _load_universe(run_id: int, spec: dict) -> tuple[list[dict], int]:
                 "WHERE delisted = FALSE ORDER BY code").fetchall()
         stocks = [{"code": c, "name": n, "delisted": bool(d)}
                   for c, n, d in rows]
+        # 注意不可写 `(%s IS NULL OR trade_date >= %s)`：psycopg3 服务端绑定下
+        # $1 仅出现在 IS NULL 位，Postgres 推断不出类型（IndeterminateDatatype）
         if start is None:
             counts = dict(cur.execute(
                 "SELECT code, count(DISTINCT trade_date) FROM daily_bar"
@@ -730,11 +803,16 @@ def _load_universe(run_id: int, spec: dict) -> tuple[list[dict], int]:
             counts = dict(cur.execute(
                 "SELECT code, count(DISTINCT trade_date) FROM daily_bar"
                 " WHERE trade_date >= %s GROUP BY code", (start,)))
+    ref_metrics = _range_ref_metrics(start)
     kept, skipped = filter_universe(
         stocks, counts,
         exclude_st=bool(filters.get("exclude_st", True)),
         min_bars=int(filters.get("min_bars", 60)),
-        include_delisted=include_delisted)
+        include_delisted=include_delisted,
+        ref_metrics=ref_metrics,
+        min_market_cap=filters.get("min_market_cap", 0),
+        max_market_cap=filters.get("max_market_cap", 0),
+        max_lot_cost=filters.get("max_lot_cost", 0))
     set_run_totals(run_id, total=len(kept), skipped=skipped)
     return kept, skipped
 

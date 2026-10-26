@@ -63,6 +63,165 @@ class TestFilterUniverse:
         assert kept == [] and skipped == 0
 
 
+# ----------------------------------------------------- 选股域过滤 ----
+
+def _sel_stocks():
+    return [
+        {"code": "100001", "name": "低价中盘", "delisted": False},
+        {"code": "100002", "name": "高价股", "delisted": False},
+        {"code": "100003", "name": "巨无霸", "delisted": False},
+        {"code": "100004", "name": "迷你壳", "delisted": False},
+        {"code": "100005", "name": "老退市", "delisted": True},
+        {"code": "100006", "name": "无价数据", "delisted": False},
+    ]
+
+
+SEL_COUNTS = {s["code"]: 100 for s in _sel_stocks()}
+
+SEL_REF = {
+    "100001": {"close": 8.0, "float_mv": 50e8},
+    "100002": {"close": 15.0, "float_mv": 80e8},
+    "100003": {"close": 9.0, "float_mv": 500e8},
+    "100004": {"close": 5.0, "float_mv": 8e8},
+    "100005": {"close": 6.0, "float_mv": None},    # 退市股：无流通股本数据
+    "100006": {"close": None, "float_mv": None},   # 区间内无有效收盘价
+}
+
+
+class TestUniverseSelection:
+    """选股域过滤（2026-10-21 实验需求）：流通市值区间 + 一手价格上限。
+
+    参考时点=回测区间首日收盘（不复权）；一手=A股 100 股；无流通股本数据
+    （当前即退市股）豁免市值维度——修幸存者偏差的对照组不能被数据缺失清空。
+    """
+
+    def _filter(self, stocks=None, ref=None, **kw):
+        stocks = stocks if stocks is not None else _sel_stocks()
+        return bf.filter_universe(
+            stocks, {s["code"]: 100 for s in stocks},
+            ref_metrics=SEL_REF if ref is None else ref, **kw)
+
+    def test_lot_cost_filter_drops_expensive(self):
+        kept, _ = self._filter(max_lot_cost=1000)
+        codes = [s["code"] for s in kept]
+        assert "100002" not in codes              # 15 元 × 100 = 1500 > 1000
+        assert "100001" in codes                  # 8 元 × 100 = 800 ≤ 1000
+
+    def test_lot_cost_boundary_exactly_1000_kept(self):
+        ref = {**SEL_REF, "100001": {"close": 10.0, "float_mv": 50e8}}
+        kept, _ = self._filter(ref=ref, max_lot_cost=1000)
+        assert "100001" in [s["code"] for s in kept]   # 恰好 1000 元/手放行
+
+    def test_market_cap_band(self):
+        kept, _ = self._filter(min_market_cap=20e8, max_market_cap=200e8)
+        codes = [s["code"] for s in kept]
+        assert "100003" not in codes              # 500 亿 > 200 亿上限
+        assert "100004" not in codes              # 8 亿 < 20 亿下限
+        assert "100001" in codes                  # 50 亿在区间内
+
+    def test_cap_min_only_and_max_only(self):
+        only_min, _ = self._filter(min_market_cap=20e8)      # 只设下限
+        assert "100004" not in [s["code"] for s in only_min]
+        assert "100003" in [s["code"] for s in only_min]     # 上限不设→巨无霸保留
+        only_max, _ = self._filter(max_market_cap=200e8)     # 只设上限
+        assert "100003" not in [s["code"] for s in only_max]
+        assert "100004" in [s["code"] for s in only_max]     # 下限不设→迷你壳保留
+
+    def test_delisted_exempt_from_cap_but_not_price(self):
+        kept, _ = self._filter(min_market_cap=20e8, max_market_cap=200e8,
+                               max_lot_cost=1000)
+        codes = [s["code"] for s in kept]
+        assert "100005" in codes                  # 无股本→豁免市值；6 元价格过关
+        ref = {**SEL_REF, "100005": {"close": 15.0, "float_mv": None}}
+        kept2, _ = self._filter(ref=ref, max_lot_cost=1000)
+        assert "100005" not in [s["code"] for s in kept2]    # 价格关照过
+
+    def test_missing_close_dropped_only_when_price_filter_on(self):
+        kept, _ = self._filter(max_lot_cost=1000)
+        assert "100006" not in [s["code"] for s in kept]     # 无法核验一手成本
+        kept2, _ = self._filter()                            # 过滤全关不剔除
+        assert "100006" in [s["code"] for s in kept2]
+
+    def test_zero_means_unlimited(self):
+        kept, _ = self._filter(min_market_cap=0, max_market_cap=0,
+                               max_lot_cost=0)
+        assert [s["code"] for s in kept] == \
+            [s["code"] for s in _sel_stocks()]
+
+    def test_junk_values_treated_as_unlimited(self):
+        kept, _ = self._filter(min_market_cap="abc", max_market_cap=-5,
+                               max_lot_cost=None)
+        assert [s["code"] for s in kept] == \
+            [s["code"] for s in _sel_stocks()]
+
+    def test_ref_metrics_none_keeps_legacy_behavior(self):
+        """缺参考数据安全阀：ref_metrics 未提供时新过滤不生效（不静默清空池）。"""
+        kept, _ = bf.filter_universe(
+            _sel_stocks(), SEL_COUNTS,
+            min_market_cap=20e8, max_market_cap=200e8, max_lot_cost=1000)
+        assert len(kept) == len(_sel_stocks())
+
+
+class TestRefMetricsMapping:
+    """_ref_rows_to_metrics：SQL 行 → {code: {close, float_mv}} 纯映射。"""
+
+    def test_products_and_missing_data(self):
+        rows = [("600001", 8.0, 1_000_000.0), ("600002", 15.0, None),
+                ("600003", None, 2_000_000.0)]
+        m = bf._ref_rows_to_metrics(rows)
+        assert m["600001"] == {"close": 8.0, "float_mv": 8e6}
+        assert m["600002"] == {"close": 15.0, "float_mv": None}  # 无股本→市值未知
+        assert m["600003"] == {"close": None, "float_mv": None}  # 无收盘→不可用
+
+    def test_empty_rows(self):
+        assert bf._ref_rows_to_metrics([]) == {}
+
+
+class TestRefMetricsSql:
+    """回归：参考日 SQL 两条 LATERAL 各带一个日期占位符，参数必须按
+    占位符个数复制（曾漏复制 → ProgrammingError 2 placeholders but 1）。"""
+
+    class FakeCur:
+        def __init__(self, executed):
+            self.executed = executed
+
+        def execute(self, q, p=None):
+            self.executed.append((q, p))
+            return self
+
+        def fetchall(self):
+            return []
+
+    class FakeConn:
+        def __init__(self, executed):
+            self.executed = executed
+
+        def cursor(self):
+            return TestRefMetricsSql.FakeCur(self.executed)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def test_placeholder_count_matches_params(self, monkeypatch):
+        executed = []
+        monkeypatch.setattr(bf, "_connect",
+                            lambda: self.FakeConn(executed))
+        bf._range_ref_metrics("2023-10-21")
+        sql, params = executed[0]
+        assert sql.count("%s") == len(params) == 2   # 两条 LATERAL 各一个
+
+    def test_all_range_has_no_params(self, monkeypatch):
+        executed = []
+        monkeypatch.setattr(bf, "_connect",
+                            lambda: self.FakeConn(executed))
+        bf._range_ref_metrics(None)
+        sql, params = executed[0]
+        assert "%s" not in sql and params == ()
+
+
 # ---------------------------------------------------------------- 统计 ----
 
 def _row(ret, bench, status="ok"):
@@ -187,8 +346,21 @@ class TestFullBacktestApi:
             "strategy": "ma_cross", "range": "1y"})
         spec = client.app.state._full_started[-1][1]
         assert spec["filters"] == {"exclude_st": True, "min_bars": 60,
-                                   "include_delisted": True}
+                                   "include_delisted": True,
+                                   "min_market_cap": 2e9,
+                                   "max_market_cap": 2e10,
+                                   "max_lot_cost": 1000.0}
         assert spec["adjust"] is True
+
+    def test_selection_filters_override_defaults(self, client):
+        """选股域过滤可覆盖默认值（0=不限按原样透传）。"""
+        client.post("/api/backtest/full", json={
+            "strategy": "ma_cross", "range": "1y",
+            "filters": {"min_market_cap": 5e9, "max_lot_cost": 500}})
+        filters = client.app.state._full_started[-1][1]["filters"]
+        assert filters["min_market_cap"] == 5e9
+        assert filters["max_lot_cost"] == 500
+        assert filters["max_market_cap"] == 2e10          # 未覆盖的保留默认
 
     def test_reuse_flag_passed_to_worker_spec(self, client):
         """复用开关透传 worker spec（默认开；显式关→False）。"""
