@@ -18,7 +18,7 @@ from . import config
 from .scheduler import SH_TZ, TaskScheduler, next_run_at
 from .task_store import TaskStore
 
-VALID_SOURCES = ("sina", "eastmoney")
+VALID_SOURCES = ("sina", "eastmoney", "fund")
 VALID_MODES = ("incremental", "full")
 
 

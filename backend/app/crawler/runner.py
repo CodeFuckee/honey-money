@@ -37,9 +37,12 @@ class CrawlSummary:
 class CrawlRunner:
     def __init__(self, *, client: EastmoneyClient, store: Store, conn,
                  concurrency: int = 8, progress=None,
-                 sleep=asyncio.sleep, clock=time.monotonic):
+                 sleep=asyncio.sleep, clock=time.monotonic, upsert=None):
         """progress: 可选回调 progress(done, total)，每完成一股触发。
-        批次/熔停等单次运行策略放在 run() 参数里。"""
+        批次/熔停等单次运行策略放在 run() 参数里。
+        upsert: 写库函数注入点 (conn, code, rows, source) -> 行数，默认
+        store.upsert_daily_bars——基金净值等非日线数据换表落库时注入
+        （基金源传 FundStore.upsert_fund_navs），流水线其余机制全部复用。"""
         self._client = client
         self._store = store
         self._conn = conn
@@ -47,6 +50,7 @@ class CrawlRunner:
         self._progress = progress
         self._sleep = sleep
         self._clock = clock
+        self._upsert = upsert or store.upsert_daily_bars
 
     @staticmethod
     def _beg_for(max_date: dt.date | None) -> str:
@@ -164,7 +168,6 @@ class CrawlRunner:
             code, rows, bars_source = item
             # 数据源以客户端声明为准（退市股走新浪通道但任务源是 delisted）
             n = await asyncio.to_thread(
-                self._store.upsert_daily_bars, self._conn, code, rows,
-                bars_source or source)
+                self._upsert, self._conn, code, rows, bars_source or source)
             summary.ok_stocks += 1
             summary.bars_upserted += n

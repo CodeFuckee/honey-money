@@ -145,7 +145,8 @@ docker compose up -d --build
 爬全市场 A 股历史日线（不复权）入 PostgreSQL，多数据源、断点续爬、动态限速、防封保护。
 
 限速默认：**东财源 drip 模式——每 30 秒 1 请求 + ±30% 随机抖动（实际 21~39s），
-min=max 锁死不提速**（出口 IP 曾被封）；新浪源 1 QPS 起步 AIMD 自适应（上限 5）。
+min=max 锁死不提速**（出口 IP 曾被封）；新浪源 1 QPS 起步 AIMD 自适应（上限 5）；
+基金源 1 QPS 起步 AIMD 自适应（0.1~2.0，基金接口与 push2his 不同子系统、无被封史）。
 可用 `--initial-qps/--max-qps/--min-qps/--jitter` 覆盖。
 
 ```bash
@@ -155,9 +156,11 @@ docker exec honey-money-backend-1 python -m app.crawler              # 全量/�
 docker exec honey-money-backend-1 python -m app.crawler --source eastmoney  # 东财源（解封后校验用）
 docker exec honey-money-backend-1 python -m app.crawler --source delisted   # 退市股历史补爬（367 只，新浪 klc_kl 全史；
                                                                             #  无成交额/换手率置 NULL；与主爬虫共用限速通道）
+docker exec honey-money-backend-1 python -m app.crawler --source fund       # 基金历史净值全量（2.8 万只，约 8 小时；
+                                                                            #  单请求全史 upsert 幂等，落 fund_nav 表）
 
 # 常用参数
-#   --source sina|eastmoney|delisted  默认 sina（delisted 见上，一次性补爬+幂等重跑）
+#   --source sina|eastmoney|delisted|fund  默认 sina（delisted/fund 见上）
 #   --mode incremental|full  默认 incremental：按库内断点续爬（按源隔离）；full 全量重爬
 #   --initial-qps/--max-qps  每通道限速（默认按源：sina 1→5，AIMD 动态调整）
 #   --jitter 0.3             请求间隔随机抖动 ±30%（防封，默认开）
@@ -181,6 +184,15 @@ docker exec honey-money-backend-1 python -m app.crawler --source delisted   # �
 `crawl_run`（运行汇总与失败清单，`task_id`/`trigger_kind` 关联调度任务与触发方式）、
 `crawl_task`（任务定义）。新浪源全量约 5200+ 请求，1 QPS 起步（AIMD
 自动升速）约 1~2 小时；此后每日增量数分钟。
+
+**基金历史净值（source=fund，2026-10 新增）**：爬全部公募基金（东财全集
+28,169 只，含已清盘与 A/C 份额——全量爬取避免回测幸存者偏差）的全史净值入
+`fund_basic`（代码/名称/类型）与 `fund_nav`（净值日，主键 `(code, nav_date,
+source)`：单位净值/累计净值/日增长率/分红原始串）。数据通道为天天基金
+`pingzhongdata/{code}.js` 单请求全史（lsjz 分页接口单页上限 20 条不可用作
+爬虫通道，实测结论见 docs 与知识库）；免 Cookie、带 Referer 即可；货币基金
+无净值走势按跳过处理。任务页预置手动任务「基金历史净值」（默认禁用，立即
+执行或开启定时才开始爬），全量约 8 小时。
 
 ## 每日数据更新调度（进程内自治，无需外部计划任务）
 

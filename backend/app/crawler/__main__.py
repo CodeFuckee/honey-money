@@ -5,6 +5,7 @@
   python -m app.crawler --limit 20               # 试跑前 20 只
   python -m app.crawler --source eastmoney       # 东财源（解封后用于校验/补数）
   python -m app.crawler --mode full --only 600000
+  python -m app.crawler --source fund            # 基金历史净值全量（落 fund_nav）
 退出码：0 全部成功；1 有失败股票或触发熔停；2 参数/环境错误。
 
 防封默认值（新浪源）：1 QPS 起步（AIMD 自适应、上限 5）+ 间隔抖动 ±30% +
@@ -37,19 +38,23 @@ PROGRESS_EVERY = 200   # 每完成 N 只打一行进度
 SOURCE_DEFAULTS = {
     "sina": {"initial_qps": 1.0, "max_qps": 5.0},
     "eastmoney": {"initial_qps": 1 / 30, "max_qps": 1 / 30, "min_qps": 1 / 30},
+    # 基金接口不同子系统、无被封史：1 QPS AIMD 自适应（0.1~2.0）
+    "fund": {"initial_qps": 1.0, "max_qps": 2.0, "min_qps": 0.1},
 }
 
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         prog="python -m app.crawler",
-        description="A 股历史日线爬虫（多源：新浪(默认)/东财；按域名动态限速+断点续爬）",
+        description="A 股历史日线/基金净值爬虫（多源：新浪(默认)/东财/退市股/基金；"
+                    "按域名动态限速+断点续爬）",
     )
-    parser.add_argument("--source", choices=["sina", "eastmoney", "delisted"],
+    parser.add_argument("--source", choices=["sina", "eastmoney", "delisted", "fund"],
                         default="sina",
                         help="数据源（默认 sina：直连可用且带换手率字段；"
                              "eastmoney 出口 IP 曾被封禁，慎用；delisted=退市股"
-                             "历史补爬，klc_kl 全史无换手率字段）")
+                             "历史补爬，klc_kl 全史无换手率字段；fund=基金历史净值，"
+                             "pingzhongdata 单请求全史，落 fund_nav 表）")
     parser.add_argument("--mode", choices=["incremental", "full"], default="incremental",
                         help="incremental=按库内断点续爬（默认）；full=全量重爬")
     parser.add_argument("--limit", type=int, default=None, help="只处理清单前 N 只（试跑）")
@@ -86,7 +91,9 @@ async def amain(args) -> int:
 
     rate = RateLimiter(initial_qps=initial_qps, min_qps=min_qps, max_qps=max_qps,
                        jitter=args.jitter)
-    store = Store()
+    from .fund import FundClient
+    from .fund_store import FundStore
+    store = FundStore() if args.source == "fund" else Store()
 
     if args.source == "sina":
         direct = httpx.AsyncClient(timeout=30.0)
@@ -94,6 +101,9 @@ async def amain(args) -> int:
     elif args.source == "delisted":
         direct = httpx.AsyncClient(timeout=30.0)
         client = DelistedClient(rate=rate, http=direct)
+    elif args.source == "fund":
+        direct = httpx.AsyncClient(timeout=30.0)
+        client = FundClient(rate=rate, http=direct)
     else:
         from .. import em_cookie
         cookie = em_cookie.load_cookie()
@@ -144,11 +154,15 @@ async def amain(args) -> int:
                 n = store.migrate_delisted_source(conn)
                 if n:
                     print(f"[migrate] {n} 行 source delisted → sina")
-            store.upsert_stock_basic(conn, stocks)
+            if args.source == "fund":
+                store.upsert_fund_basic(conn, stocks)
+            else:
+                store.upsert_stock_basic(conn, stocks)
             conn.commit()
             runner = CrawlRunner(
                 client=client, store=store, conn=conn,
                 concurrency=args.concurrency, progress=progress,
+                upsert=store.upsert_fund_navs if args.source == "fund" else None,
             )
             summary_total = len(stocks)
 

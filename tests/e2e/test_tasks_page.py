@@ -209,6 +209,20 @@ class TestCreateAndEdit:
         expect(page.locator(".dialog .task-risk")).to_contain_text("全量重爬")
         page.locator(".dialog-actions").get_by_role("button", name="取消").click()
 
+    def test_fund_source_option_and_risk_note(self, servers, page, api_calls):
+        """E2E-110：新建弹窗含「基金净值」源选项，选中后显示基金源风险提示。"""
+        _, frontend_port = servers
+        open_tasks(page, frontend_port)
+        page.get_by_role("button", name="＋ 新建任务").click()
+        expect(page.locator(".dialog")).to_be_visible()
+
+        src = page.locator(".dialog-field", has_text="数据源").locator("select")
+        opts = src.locator("option").all_text_contents()
+        assert "基金净值" in opts, f"数据源下拉应含基金净值，实际 {opts}"
+        src.select_option("fund")
+        expect(page.locator(".dialog .task-risk")).to_contain_text("基金源")
+        page.locator(".dialog-actions").get_by_role("button", name="取消").click()
+
 
 class TestActions:
     def test_enable_switch_patches(self, servers, page, api_calls):

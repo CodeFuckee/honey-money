@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 import psycopg
 
 from .crawler.eastmoney import EastmoneyClient
+from .crawler.fund_store import FundStore
 from .crawler.proxies import ProxyBroker
 from .crawler.rate import RateLimiter
 from .crawler.runner import CrawlRunner
@@ -39,6 +40,9 @@ _SOURCE_DEFAULTS = {
     "sina": {"initial_qps": 1.0, "min_qps": 0.2, "max_qps": 5.0},
     "eastmoney": {"initial_qps": 1 / 30, "min_qps": 1 / 30, "max_qps": 1 / 30},
     "delisted": {"initial_qps": 1.0, "min_qps": 0.2, "max_qps": 2.0},
+    # 基金接口与 push2his 不同子系统、无被封史：1 QPS 起步 AIMD 自适应，
+    # 失败降速托底 0.1、成功最多回到 2，熔停/批休全套照旧
+    "fund": {"initial_qps": 1.0, "min_qps": 0.1, "max_qps": 2.0},
 }
 _BATCH_SIZE, _BATCH_PAUSE, _ABORT_AFTER, _CONCURRENCY = 300, 30.0, 15, 4
 
@@ -105,7 +109,7 @@ def build_crawl_executor(dsn: str, proxy_pool_url: str):
         rate = RateLimiter(initial_qps=defaults["initial_qps"],
                            min_qps=defaults["min_qps"], max_qps=defaults["max_qps"],
                            jitter=0.3)
-        store = Store()
+        store = (FundStore() if task["source"] == "fund" else Store())
         if task["source"] == "sina":
             direct = httpx_async_client(timeout=30.0)
             client = SinaClient(rate=rate, http=direct)
@@ -118,6 +122,11 @@ def build_crawl_executor(dsn: str, proxy_pool_url: str):
                 conn.commit()
                 if n:
                     print(f"[migrate] {n} 行 source delisted → sina")
+        elif task["source"] == "fund":
+            from .crawler.fund import FundClient
+            # 免 Cookie（带 Referer 即可），直连 + AIMD 自适应限速
+            direct = httpx_async_client(timeout=30.0)
+            client = FundClient(rate=rate, http=direct)
         else:
             from . import em_cookie
             cookie = em_cookie.load_cookie()
@@ -141,10 +150,16 @@ def build_crawl_executor(dsn: str, proxy_pool_url: str):
         try:
             stocks = await client.fetch_stock_list()
             with psycopg.connect(dsn) as conn:
-                store.upsert_stock_basic(conn, stocks)
+                if task["source"] == "fund":
+                    store.upsert_fund_basic(conn, stocks)
+                else:
+                    store.upsert_stock_basic(conn, stocks)
                 conn.commit()
-                runner = CrawlRunner(client=client, store=store, conn=conn,
-                                     concurrency=_CONCURRENCY, progress=progress)
+                runner = CrawlRunner(
+                    client=client, store=store, conn=conn,
+                    concurrency=_CONCURRENCY, progress=progress,
+                    upsert=(store.upsert_fund_navs
+                            if task["source"] == "fund" else None))
                 summary = await runner.run(
                     stocks, mode=task["mode"], source=task["source"],
                     batch_size=_BATCH_SIZE, batch_pause=_BATCH_PAUSE,

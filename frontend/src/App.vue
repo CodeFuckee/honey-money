@@ -53,6 +53,9 @@ function buildQuery() {
     q.set('mbars', fullMinBars.value)
     q.set('adj', fullAdjust.value ? 1 : 0)
     q.set('incd', fullIncludeDelisted.value ? 1 : 0)
+    q.set('mnc', fullMinCap.value)
+    q.set('mxc', fullMaxCap.value)
+    q.set('mlot', fullMaxLot.value)
   } else if (nav === 'stock') {
     if (stock.value?.code) q.set('code', stock.value.code)
     if (stockAdjust.value) q.set('adjust', stockAdjust.value)
@@ -116,6 +119,12 @@ function applyUrl() {
     fullMinBars.value = +q.get('mbars')
   if (q.get('adj') != null) fullAdjust.value = q.get('adj') === '1'
   if (q.get('incd') != null) fullIncludeDelisted.value = q.get('incd') === '1'
+  if (q.get('mnc') != null && !Number.isNaN(+q.get('mnc')))
+    fullMinCap.value = +q.get('mnc')
+  if (q.get('mxc') != null && !Number.isNaN(+q.get('mxc')))
+    fullMaxCap.value = +q.get('mxc')
+  if (q.get('mlot') != null && !Number.isNaN(+q.get('mlot')))
+    fullMaxLot.value = +q.get('mlot')
   // 个股详情
   if (NAV_BY_PATH[u.pathname] === 'stock' && q.get('code')) {
     stock.value = { code: q.get('code'), name: q.get('code'),
@@ -321,7 +330,7 @@ watch(activeNav, nav => {
 })
 
 const TASK_SOURCES = [{ v: 'sina', label: '新浪财经' }, { v: 'eastmoney', label: '东方财富' },
-  { v: 'delisted', label: '退市股补爬' }]
+  { v: 'delisted', label: '退市股补爬' }, { v: 'fund', label: '基金净值' }]
 const TASK_MODES = [{ v: 'incremental', label: '增量续爬' }, { v: 'full', label: '全量重爬' }]
 const sourceLabel = v => (TASK_SOURCES.find(s => s.v === v) || {}).label || v
 const modeLabel = v => (TASK_MODES.find(m => m.v === v) || {}).label || v
@@ -417,6 +426,8 @@ function taskLastRunText(r) {
 function riskNote(t) {
   if (t.source === 'eastmoney')
     return '东财源 drip 模式：每 30 秒 1 请求（出口 IP 曾被封），全市场一轮约需 40+ 小时，仅作解封后校验/补数用'
+  if (t.source === 'fund')
+    return '基金源：全部 2.8 万只、1 QPS 自适应限速，全量回补约 8 小时；货币基金无净值走势，记为跳过'
   if (t.mode === 'full')
     return '全量重爬：每轮 5200+ 请求、约 1~2 小时，确认需要重建数据时再开启'
   return ''
@@ -426,6 +437,8 @@ const dialogRisk = computed(() => {
   if (!d) return ''
   if (d.source === 'eastmoney')
     return '东财源 drip 模式：每 30 秒 1 请求（出口 IP 曾被封），全市场一轮约 40+ 小时，仅作解封后校验/补数用'
+  if (d.source === 'fund')
+    return '基金源：全部 2.8 万只、1 QPS 自适应限速，全量回补约 8 小时；货币基金无净值走势，记为跳过'
   if (d.taskMode === 'full')
     return '全量重爬：每轮 5200+ 请求、约 1~2 小时，确认需要重建数据时再开启'
   return ''
@@ -770,6 +783,9 @@ const fullFilterSt = ref(true)        // 剔除名称含 ST/退
 const fullMinBars = ref(60)           // 区间内最少 K 线数（挡次新/长期停牌）
 const fullAdjust = ref(true)          // 后复权口径（关闭提速但跨除权失真）
 const fullIncludeDelisted = ref(true) // 含退市股（修幸存者偏差的本体）
+const fullMinCap = ref(20)            // 选股域：流通市值下限（亿元，0=不限）
+const fullMaxCap = ref(200)           // 选股域：流通市值上限（亿元，0=不限）
+const fullMaxLot = ref(1000)          // 选股域：一手成本上限（元，0=不限）
 const fullReuse = ref(true)           // 同参历史结果复用（成功股免算，失败股重跑）
 const fullRuns = ref([])              // 历史 run 列表
 const fullRunId = ref(null)           // 当前查看/运行中的 run
@@ -999,7 +1015,10 @@ async function startFullRun() {
         reuse: fullReuse.value,
         filters: { exclude_st: fullFilterSt.value,
                    min_bars: fullMinBars.value || 0,
-                   include_delisted: fullIncludeDelisted.value },
+                   include_delisted: fullIncludeDelisted.value,
+                   min_market_cap: (fullMinCap.value || 0) * 1e8,
+                   max_market_cap: (fullMaxCap.value || 0) * 1e8,
+                   max_lot_cost: fullMaxLot.value || 0 },
       }),
     })
     if (!r.ok) {
@@ -2027,6 +2046,23 @@ watch(
                           <label class="learn-check"><input type="checkbox" v-model="fullIncludeDelisted" />含退市股</label>
                           <label class="learn-check" title="同参数已有完成结果时，成功股直接复用（以源任务时点数据为准），仅重算其失败股与新进股票">
                             <input type="checkbox" v-model="fullReuse" />复用历史结果</label>
+                        </span>
+                      </label>
+                    </div>
+                    <div class="learn-params-row">
+                      <label class="learn-field wide"
+                        title="选股域过滤（实验）：参考时点=回测区间首日收盘（不复权）。流通市值=首日收盘×流通股本；一手成本=首日收盘×100（A股一手=100股，1000 元即股价 ≤10 元）。退市股无流通股本数据，仅受一手价过滤、豁免市值维度（保留修幸存者偏差对照组）。0=不限。">
+                        <span>选股域（实验）</span>
+                        <span class="learn-full-controls">
+                          <label class="learn-check">流通市值下限(亿)
+                            <input type="number" class="learn-input num" min="0" step="10"
+                              data-testid="full-min-cap" v-model.number="fullMinCap" /></label>
+                          <label class="learn-check">流通市值上限(亿)
+                            <input type="number" class="learn-input num" min="0" step="10"
+                              data-testid="full-max-cap" v-model.number="fullMaxCap" /></label>
+                          <label class="learn-check">一手价上限(元)
+                            <input type="number" class="learn-input num" min="0" step="100"
+                              data-testid="full-max-lot" v-model.number="fullMaxLot" /></label>
                         </span>
                       </label>
                     </div>

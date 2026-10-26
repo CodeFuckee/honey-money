@@ -20,7 +20,7 @@ import datetime as dt
 
 import psycopg
 
-SOURCE_NAMES = {"sina": "新浪", "eastmoney": "东财"}
+SOURCE_NAMES = {"sina": "新浪", "eastmoney": "东财", "fund": "基金"}
 MODE_NAMES = {"incremental": "增量", "full": "全量"}
 
 _DDL_TASK = """
@@ -79,6 +79,13 @@ class TaskStore:
                 " SELECT '退市股历史补爬', 'delisted', 'full', NULL::time, FALSE"
                 " WHERE NOT EXISTS (SELECT 1 FROM crawl_task"
                 "                    WHERE name = '退市股历史补爬')")
+            # 基金历史净值：全量回补 2.8 万只、耗时长，同退市股走手动触发，
+            # 默认禁用——开开关或手动「立即执行」才开始爬
+            cur.execute(
+                "INSERT INTO crawl_task (name, source, mode, schedule_time, enabled)"
+                " SELECT '基金历史净值', 'fund', 'full', NULL::time, FALSE"
+                " WHERE NOT EXISTS (SELECT 1 FROM crawl_task"
+                "                    WHERE name = '基金历史净值')")
     def list_tasks(self, conn) -> list[dict]:
         with conn.cursor() as cur:
             cur.execute(f"SELECT {_TASK_COLS} FROM crawl_task ORDER BY id")

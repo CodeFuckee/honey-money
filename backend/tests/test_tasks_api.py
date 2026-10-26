@@ -186,6 +186,14 @@ class TestCreateTask:
         assert resp.status_code == 200
         assert resp.json()["schedule_time"] == "07:30"
 
+    def test_create_fund_source_ok(self):
+        """基金源接入：source=fund 可建任务（与 sina/eastmoney 同级）。"""
+        client, store, _ = make_client()
+        r = client.post("/api/tasks", json={
+            "source": "fund", "mode": "full", "schedule_time": "02:00"})
+        assert r.status_code == 200
+        assert r.json()["source"] == "fund"
+
     def test_create_bad_source_rejected(self):
         client, _, _ = make_client()
         assert client.post("/api/tasks", json={
