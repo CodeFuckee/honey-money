@@ -23,6 +23,7 @@ from . import em_cookie
 from .backtest_api import register_backtest_routes
 from .backtest_full_api import register_full_backtest_routes
 from .browse import fetch_stock_bars, fetch_stock_basic, fetch_stock_list
+from .crawler.fund_store import FundStore
 from .crawler.store import Store
 from .crawl_stats import fetch_crawl_stats
 from .infra import check_postgres, check_proxy_pool
@@ -44,10 +45,13 @@ def create_app(*, scheduler: TaskScheduler | None = None,
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        # 三个初始化各自独立事务/失败域：一个挂不回滚其他
-        # （教训：任务 seed 曾与建表同事务，NULL 违约连带回滚新表）
+        # 四个初始化各自独立事务/失败域：一个挂不回滚其他
+        # （教训：任务 seed 曾与建表同事务，NULL 违约连带回滚新表；
+        # 教训2：基金表漏在启动清单里，调度执行体不建表，首次基金任务
+        # UndefinedTable 秒退且无 run 记录——2026-10-26）
         for name, init in (("基础表", Store().init_schema),
                            ("任务表", task_store.init_schema),
+                           ("基金表", FundStore().init_schema),
                            ("全量回测表", backtest_full.ensure_schema)):
             try:
                 with connect(config.DATABASE_URL) as conn:

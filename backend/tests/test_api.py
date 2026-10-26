@@ -9,6 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # backend/ 加入导入路径
 
 from app.main import create_app  # noqa: E402
+from app.task_store import TaskStore  # noqa: E402
 
 
 @pytest.fixture
@@ -113,3 +114,58 @@ class TestInfra:
         assert body["status"] == "up"
         assert body["count"] == 75 and body["count_useful"] is None
         assert body["detail"] == "proxy_pool:5010 · 在池 75"
+
+
+class TestLifespanSchemaInit:
+    def test_startup_inits_fund_tables(self, monkeypatch):
+        """启动初始化须建基金表（fund_basic/fund_nav）。
+
+        调度执行体不建表——漏初始化时首次基金任务在 upsert_fund_basic 处
+        UndefinedTable 秒退，且异常发生在 runner.start_run 之前、crawl_run
+        无任何记录（2026-10-26 线上事故回归锚点）。"""
+        monkeypatch.setattr(
+            "app.config.DATABASE_URL",
+            "postgresql://nobody:x@127.0.0.1:59999/none")   # 秒拒，不真连
+        monkeypatch.setattr("app.backtest.engine.warmup", lambda: None)
+        executed: list[str] = []
+
+        class FakeCur:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def execute(self, q, p=None):
+                executed.append(q)
+
+            def fetchone(self):
+                return None
+
+        class FakeConn:
+            def cursor(self):
+                return FakeCur()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def commit(self):
+                pass
+
+        class FakeSched:
+            async def start(self):
+                pass
+
+            async def stop(self):
+                pass
+
+        app = create_app(scheduler=FakeSched(), task_store=TaskStore(),
+                         connect=lambda *a, **k: FakeConn())
+        with TestClient(app):          # with 上下文才触发 lifespan
+            pass
+        ddl = "\n".join(executed)
+        assert "CREATE TABLE IF NOT EXISTS fund_basic" in ddl
+        assert "CREATE TABLE IF NOT EXISTS fund_nav" in ddl
