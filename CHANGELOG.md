@@ -6,6 +6,32 @@
 ## [Unreleased]
 
 ### Added
+- **数据页基金净值子页**：侧栏「数据源」组新增「基金净值」——`/api/funds`
+  列表（两段式查询对齐股票列表：fund_basic 小表分页、当页 LATERAL 聚合
+  fund_nav，列含代码/名称/类型/最新单位净值/日增长率/净值条数/最早与最新
+  净值日，支持搜索分页）+ 点行进净值详情（`/api/funds/{code}/navs`，单位/
+  累计净值双线 ECharts 走势图近 2500 净值日可缩放 + 分页明细表含分红原始
+  串），深链接与返回保留列表状态，形态对齐个股详情。降级约定同 /api/stocks
+  （始终 200，PG 不可达在 status 表达）。backend +5（列表两段式/倒序升序
+  契约/路由降级/钳制）、E2E +2（列表渲染/详情图表明细返回）。
+
+- **任务卡两处修复**：①启用的纯手动任务（无调度时刻，如退市股补爬）「下次
+  执行」由误标「已禁用」改为显示「手动」（前端只看 next_run_at 判空所致，
+  fixture 同步对齐真实后端契约：禁用任务不返回 next_run_at）；②执行体异常
+  原因经 /api/tasks `last_error` 透出到任务卡红条（crawl_run 无记录类事故
+  ——如基金建表缺失秒退——的排查入口；内存态重启即失）。
+
+### Fixed
+- **Store.init_schema 全新库必炸**：`ALTER TABLE stock_basic ADD COLUMN`
+  排在 DDL 之前，表不存在时直接 UndefinedTable（fresh bootstrap 本地实测
+  暴露；生产老库两序等价无影响）。建表挪到补列之前。
+- **基金任务首次运行 UndefinedTable 秒退**：启动初始化清单漏列「基金表」，
+  调度执行体不建表（CLI 路径才自带 init），fund_basic/fund_nav 从未创建；
+  异常发生在 runner.start_run 之前故 crawl_run 无记录，表现为任务秒退、零
+  爬取、历史空白（7323ca0）+ lifespan 回归测试（项目首个真正触发 lifespan
+  的用例，TestClient with 上下文 + 假连接断言 DDL）。
+
+### Added
 - **基金历史净值爬虫任务（source=fund）**：爬虫任务系统新增第四种数据源——
   全部公募基金（东财全集 28,169 只，含已清盘与 A/C 份额，避免回测幸存者
   偏差）的全史净值，落新表 `fund_basic`（代码/名称/类型）与 `fund_nav`
