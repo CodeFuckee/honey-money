@@ -110,18 +110,21 @@ ON CONFLICT (code) DO UPDATE SET
 
 class Store:
     def init_schema(self, conn) -> None:
-        # 老库补列：stock_basic.delisted（退市股补爬标记，2026-10-11）
-        with conn.cursor() as cur:
-            cur.execute("ALTER TABLE stock_basic "
-                        "ADD COLUMN IF NOT EXISTS delisted "
-                        "BOOLEAN NOT NULL DEFAULT FALSE")
         with conn.cursor() as cur:
             cur.execute(_PK_CHECK)
             row = cur.fetchone()
             if row and row[0] and row[0] != _PK_EXPECTED:
                 # 旧主键结构：无数据阶段直接重建（见模块 docstring 的升级约定）
                 cur.execute("DROP TABLE daily_bar")
+            # 建表在前、补列在后——ALTER 排最前的话全新库上表不存在直接炸
+            # （fresh bootstrap 2026-10-26 本地实测暴露；老库两序等价）
             cur.execute(DDL)
+        # 老库补列：stock_basic.delisted（退市股补爬标记，2026-10-11）
+        with conn.cursor() as cur:
+            cur.execute("ALTER TABLE stock_basic "
+                        "ADD COLUMN IF NOT EXISTS delisted "
+                        "BOOLEAN NOT NULL DEFAULT FALSE")
+        with conn.cursor() as cur:
             # crawl_run 旧表补列（CREATE IF NOT EXISTS 不会加新列）
             cur.execute("ALTER TABLE crawl_run ADD COLUMN IF NOT EXISTS source VARCHAR(16)")
             cur.execute("ALTER TABLE crawl_run ADD COLUMN IF NOT EXISTS aborted BOOLEAN "

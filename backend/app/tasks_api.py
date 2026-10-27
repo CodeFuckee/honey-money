@@ -98,6 +98,15 @@ def register_task_routes(app: FastAPI, *, scheduler: TaskScheduler,
     def _phase(task_id: int) -> str:
         return scheduler.runtime_state()["phases"].get(task_id, "idle")
 
+    def _last_error(task_id: int):
+        """上次执行体异常原因（内存态，重启即失；正常/未跑过为 None）。
+
+        执行体异常发生在 start_run 之前时 crawl_run 无记录（如建表缺失），
+        「历史」查不到——失败原因只能从调度器的内存结果里透出。"""
+        result = scheduler.last_results.get(task_id)
+        return (result or {}).get("detail") if result and result.get("error") \
+            else None
+
     @app.get("/api/tasks")
     def list_tasks():
         state = scheduler.runtime_state()
@@ -119,6 +128,7 @@ def register_task_routes(app: FastAPI, *, scheduler: TaskScheduler,
                         "next_run_at": nxt.isoformat() if nxt else None,
                         "progress": state["progress"].get(t["id"]),
                         "last_run": last[0] if last else None,
+                        "last_error": _last_error(t["id"]),
                     })
         except Exception as exc:              # PG 不可达：降级而非 5xx
             return {"status": "down", "detail": f"{type(exc).__name__}: "

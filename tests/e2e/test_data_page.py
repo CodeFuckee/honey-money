@@ -107,3 +107,61 @@ class TestDataPageDelistedFilter:
         page.wait_for_timeout(500)
         assert any("delisted=true" in u and "offset=50" in u
                    for u in mock_list[n0:]), mock_list[n0:]
+
+
+# ---------------------------------------------------------- 基金净值子页 ----
+
+FUNDS_BODY = {"status": "up", "total": 2, "limit": 50, "offset": 0, "funds": [
+    {"code": "000001", "name": "华夏成长混合", "fund_type": "混合型-灵活",
+     "unit_nav": 1.046, "pct_chg": 2.05, "navs": 6029,
+     "last_date": "2026-10-23", "first_date": "2001-12-18"},
+    {"code": "005827", "name": "易方达蓝筹精选", "fund_type": "混合型-偏股",
+     "unit_nav": 1.8721, "pct_chg": -0.31, "navs": 3200,
+     "last_date": "2026-10-23", "first_date": "2018-09-05"},
+]}
+FUND_NAV_BODY = {"status": "up", "code": "000001", "count": 3, "navs": [
+    {"date": "2026-10-21", "unit_nav": 1.064, "accum_nav": 3.637,
+     "pct_chg": -0.37, "unit_money": None, "source": "fund_em"},
+    {"date": "2026-10-22", "unit_nav": 1.025, "accum_nav": 3.598,
+     "pct_chg": -3.67, "unit_money": None, "source": "fund_em"},
+    {"date": "2026-10-23", "unit_nav": 1.046, "accum_nav": 3.619,
+     "pct_chg": 2.05, "unit_money": "0.018", "source": "fund_em"},
+]}
+
+
+class TestFundBrowse:
+    def test_fund_list_renders(self, servers, page):
+        """E2E-311：侧栏「基金净值」子页列表渲染（类型/净值条数/最早净值日）。"""
+        _, frontend_port = servers
+        page.route("**/api/funds?**", lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body=json.dumps(FUNDS_BODY)))
+        page.goto(f"http://127.0.0.1:{frontend_port}/")
+        page.get_by_role("button", name="基金净值").click()
+        expect(page.get_by_role("heading", name="基金净值")).to_be_visible()
+        row = page.locator(".browse-pv tbody tr", has_text="华夏成长混合")
+        expect(row).to_contain_text("混合型-灵活")
+        expect(row).to_contain_text("6029")
+        expect(row).to_contain_text("2001-12-18")
+
+    def test_fund_detail_chart_and_table_and_back(self, servers, page):
+        """E2E-312：点行进净值详情——图表 canvas 渲染、明细最新日期在上、
+        分红串展示、返回列表回到基金子页。"""
+        _, frontend_port = servers
+        page.route("**/api/funds?**", lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body=json.dumps(FUNDS_BODY)))
+        page.route("**/api/funds/000001/navs**", lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body=json.dumps(FUND_NAV_BODY)))
+        page.goto(f"http://127.0.0.1:{frontend_port}/")
+        page.get_by_role("button", name="基金净值").click()
+        page.locator(".browse-pv tbody tr", has_text="华夏成长混合").click()
+        expect(page.locator("h2.h1")).to_contain_text("000001")
+        expect(page.locator(".kchart canvas").first).to_be_visible()
+        rows = page.locator(".detail-table-card tbody tr")
+        expect(rows.first).to_contain_text("2026-10-23")     # 最新在上
+        expect(rows.nth(1)).to_contain_text("2026-10-22")
+        expect(page.locator(".detail-table-card")).to_contain_text("0.018")
+        page.get_by_role("button", name="← 返回列表").click()
+        expect(page.get_by_role("heading", name="基金净值")).to_be_visible()

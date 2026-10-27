@@ -430,3 +430,113 @@ class TestBarsAdjust:
         body = self._fetch(monkeypatch, adjust="")
         assert body["adjust_applied"] is False
         assert body["bars"][0]["close"] == pytest.approx(51.5)  # 倒序：最新在上
+
+
+# ---------------------------------------------------------- 基金列表/净值 ----
+
+# 基金列表第二段查询返回行（code, name, fund_type, unit_nav, pct_chg,
+# nav_date, navs, first_date）
+FUND_PAGE_ROW = ("000001", "华夏成长混合", "混合型-灵活",
+                 1.046012, 2.054, dt.date(2026, 10, 23),
+                 6029, dt.date(2001, 12, 18))
+# 基金净值明细行（nav_date, unit_nav, accum_nav, pct_chg, unit_money, source）
+FUND_NAV_NEW = (dt.date(2026, 10, 23), 1.046, 3.619, 2.05, "0.018", "fund_em")
+FUND_NAV_OLD = (dt.date(2026, 10, 22), 1.025, 3.598, -3.67, None, "fund_em")
+
+
+def _with_fake_conn(monkeypatch, rows):
+    """monkeypatch browse.psycopg.connect → 返回 (被调用时透传的 FakeConn)。"""
+    import app.browse as browse_mod
+    conn = FakeConn(rows)
+    monkeypatch.setattr(browse_mod.psycopg, "connect", lambda *a, **k: conn)
+    return conn
+
+
+class TestFundList:
+    """基金列表三段式查询（对齐股票列表：fund_basic 小表分页 + 当页聚合
+    fund_nav + count——用 QueueConn 按调用序弹出结果）。"""
+
+    def _fetch(self, monkeypatch, **kw):
+        import app.browse as browse_mod
+        conn = QueueConn(
+            fetchall_queue=[[(FUND_PAGE_ROW[0], FUND_PAGE_ROW[1])],
+                            [FUND_PAGE_ROW]],
+            fetchone_queue=[(1,)])
+        monkeypatch.setattr(browse_mod.psycopg, "connect",
+                            lambda *a, **k: conn)
+        return browse_mod.fetch_fund_list("postgresql://fake", **kw), conn
+
+    def test_two_phase_queries_shape_and_rounding(self, monkeypatch):
+        body, conn = self._fetch(monkeypatch, q="华夏")
+        ids_sql, ids_params = conn.executed[0]
+        page_sql, page_params = conn.executed[1]
+        cnt_sql, cnt_params = conn.executed[2]
+        assert "FROM fund_basic" in ids_sql and "ILIKE" in ids_sql
+        assert ids_params == ("华夏", "%华夏%", "%华夏%", 50, 0)
+        assert "fund_nav" in page_sql and "LATERAL" in page_sql
+        assert page_params == (["000001"],)       # 只聚合当页代码
+        assert "fund_basic" in cnt_sql and "ILIKE" in cnt_sql
+        assert cnt_params == ("华夏", "%华夏%", "%华夏%")
+        row = body["funds"][0]
+        assert row["code"] == "000001"
+        assert row["fund_type"] == "混合型-灵活"
+        assert row["unit_nav"] == 1.046           # round 4 位
+        assert row["pct_chg"] == 2.05             # round 2 位
+        assert row["navs"] == 6029
+        assert row["last_date"] == "2026-10-23"
+        assert row["first_date"] == "2001-12-18"
+
+    def test_default_no_search_params(self, monkeypatch):
+        _, conn = self._fetch(monkeypatch)
+        ids_params = conn.executed[0][1]
+        assert ids_params == ("", "%%", "%%", 50, 0)
+
+
+class TestFundNavs:
+    def test_sql_shape_and_ascending_output(self, monkeypatch):
+        """SQL 倒序取页、输出升序（对齐 bars 约定：图升序、表自行倒序）。"""
+        conn = _with_fake_conn(monkeypatch, [FUND_NAV_NEW, FUND_NAV_OLD])
+        import app.browse as browse_mod
+        body = browse_mod.fetch_fund_navs("postgresql://fake", "000001",
+                                          limit=50, offset=0)
+        sql, params = conn.cursor_obj.executed[0]
+        assert "FROM fund_nav" in sql and "source" in sql
+        assert params == ("000001", 50, 0)
+        assert [n["date"] for n in body["navs"]] == ["2026-10-22", "2026-10-23"]
+        nav = body["navs"][-1]
+        assert nav["unit_nav"] == 1.046 and nav["accum_nav"] == 3.619
+        assert nav["pct_chg"] == 2.05 and nav["unit_money"] == "0.018"
+        assert nav["source"] == "fund_em"
+        assert body["count"] == 2 and body["code"] == "000001"
+
+    def test_empty_navs(self, monkeypatch):
+        _with_fake_conn(monkeypatch, [])
+        import app.browse as browse_mod
+        body = browse_mod.fetch_fund_navs("postgresql://fake", "000001")
+        assert body["status"] == "up" and body["navs"] == []
+
+
+class TestFundsRoutes:
+    def test_list_down_degrades_gracefully(self, client, monkeypatch):
+        """PG 不可达：仍 200，status=down 空列表（同 /api/stocks 降级约定）。"""
+        monkeypatch.setattr(
+            "app.config.DATABASE_URL", "postgresql://nobody:x@127.0.0.1:59999/none")
+        resp = client.get("/api/funds")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "down" and body["funds"] == [] and body["total"] == 0
+
+    def test_list_param_clamping(self, client):
+        resp = client.get("/api/funds", params={"limit": 99999, "offset": -5})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["limit"] == 200 and body["offset"] == 0
+
+    def test_navs_down_degrades_gracefully(self, client, monkeypatch):
+        monkeypatch.setattr(
+            "app.config.DATABASE_URL", "postgresql://nobody:x@127.0.0.1:59999/none")
+        resp = client.get("/api/funds/000001/navs")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "down" and body["code"] == "000001"
+        assert body["navs"] == []

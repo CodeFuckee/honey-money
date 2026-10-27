@@ -29,8 +29,8 @@ const activeNav = ref('dash')                 // dash | data | src-sina | src-ef
 // 均有 SPA 回退，深链接刷新可用。页面切换 pushState，参数变化 replaceState。
 const ROUTE_BY_NAV = {
   dash: '/', data: '/data', 'src-sina': '/data/sina',
-  'src-ef': '/data/eastmoney', tasks: '/tasks', backtest: '/backtest',
-  learn: '/learn', stock: '/stock',
+  'src-ef': '/data/eastmoney', funds: '/data/funds', tasks: '/tasks',
+  backtest: '/backtest', learn: '/learn', stock: '/stock', fund: '/fund',
 }
 const NAV_BY_PATH = Object.fromEntries(
   Object.entries(ROUTE_BY_NAV).map(([nav, path]) => [path, nav]))
@@ -60,9 +60,14 @@ function buildQuery() {
     if (stock.value?.code) q.set('code', stock.value.code)
     if (stockAdjust.value) q.set('adjust', stockAdjust.value)
     if (stock.value?.source) q.set('source', stock.value.source)
+  } else if (nav === 'fund') {
+    if (fund.value?.code) q.set('code', fund.value.code)
   } else if (nav === 'data' || nav === 'src-sina' || nav === 'src-ef') {
     if (browseQuery.value) q.set('q', browseQuery.value)
     if (browsePage.value) q.set('page', browsePage.value)
+  } else if (nav === 'funds') {
+    if (fundsQuery.value) q.set('q', fundsQuery.value)
+    if (fundsPage.value) q.set('page', fundsPage.value)
   }
   return q
 }
@@ -132,12 +137,24 @@ function applyUrl() {
     stockAdjust.value = q.get('adjust') || ''
     detailPage.value = 0
   }
+  // 基金净值详情
+  if (NAV_BY_PATH[u.pathname] === 'fund' && q.get('code')) {
+    fund.value = { code: q.get('code'), name: q.get('code'), fund_type: '' }
+    fundDetailPage.value = 0
+  }
   // 数据浏览
   if (['data', 'src-sina', 'src-ef'].includes(NAV_BY_PATH[u.pathname]) &&
       (q.get('q') != null || q.get('page'))) {
     browseQuery.value = q.get('q') ?? ''
     browsePage.value = +q.get('page') || 0
     loadBrowse()
+  }
+  // 基金列表
+  if (NAV_BY_PATH[u.pathname] === 'funds' &&
+      (q.get('q') != null || q.get('page'))) {
+    fundsQuery.value = q.get('q') ?? ''
+    fundsPage.value = +q.get('page') || 0
+    loadFunds()
   }
 }
 
@@ -250,6 +267,133 @@ async function loadBrowse() {
   }
 }
 function browseSearch() { browsePage.value = 0; loadBrowse() }
+
+// ===== 基金净值浏览（数据子页：/api/funds 列表 + /api/funds/{code}/navs 详情） =====
+const funds = ref({ status: 'loading', total: 0, funds: [] })
+const fundsQuery = ref('')
+const fundsPage = ref(0)                  // 0 起
+const fundsLoading = ref(false)
+const FUNDS_PAGE_SIZE = 50
+const fundsTotalPages = computed(() =>
+  Math.max(1, Math.ceil((funds.value.total || 0) / FUNDS_PAGE_SIZE)))
+
+async function loadFunds() {
+  fundsLoading.value = true
+  try {
+    const q = encodeURIComponent(fundsQuery.value.trim())
+    const off = fundsPage.value * FUNDS_PAGE_SIZE
+    const r = await fetch(`/api/funds?q=${q}&limit=${FUNDS_PAGE_SIZE}&offset=${off}`)
+    funds.value = await r.json()
+  } catch (e) {
+    funds.value = { status: 'down', total: 0, funds: [] }
+  } finally {
+    fundsLoading.value = false
+  }
+}
+function fundsSearch() { fundsPage.value = 0; loadFunds() }
+function onFundsPage(e) { fundsPage.value = e.page; loadFunds() }
+
+// 基金净值详情（对齐个股详情形态：单位+累计净值双线走势图 + 分页明细表）
+const fund = ref(null)                    // { code, name, fund_type }
+const fundNav = ref('funds')              // 详情页返回目标
+const fundChart = ref({ status: 'loading', navs: [] })
+const fundRows = ref({ status: 'loading', rows: [] })
+const fundDetailPage = ref(0)             // 0 起
+const FUND_CHART_POINTS = 2500            // 图取近 2500 个净值日（约 10 年）
+const FUND_DETAIL_PAGE_SIZE = 50
+const fundChartEl = ref(null)
+let fundChartInstance = null
+
+function openFund(e) {
+  // PrimeVue DataTable row-click 参数为 { originalEvent, data, index }
+  const data = e.data ?? e
+  fund.value = { code: data.code, name: data.name, fund_type: data.fund_type || '' }
+  fundDetailPage.value = 0
+  fundNav.value = activeNav.value
+  setNav('fund')
+}
+function backToFunds() { setNav(fundNav.value || 'funds') }
+
+async function loadFundChart() {
+  fundChart.value = { status: 'loading', navs: [] }
+  try {
+    const r = await fetch(`/api/funds/${fund.value.code}/navs?limit=${FUND_CHART_POINTS}&offset=0`)
+    const body = await r.json()
+    fundChart.value = { status: body.status, detail: body.detail, navs: body.navs || [] }
+  } catch (e) {
+    fundChart.value = { status: 'down', detail: String(e), navs: [] }
+  }
+  await nextTick()
+  renderFundChart()
+}
+
+function renderFundChart() {
+  if (fundChartInstance) { fundChartInstance.dispose(); fundChartInstance = null }
+  const navs = fundChart.value.navs
+  if (!fundChartEl.value || fundChart.value.status !== 'up' || !navs.length) return
+  fundChartInstance = echarts.init(fundChartEl.value)
+  const dates = navs.map(n => n.date)
+  fundChartInstance.setOption({
+    animation: false,
+    tooltip: { trigger: 'axis' },
+    legend: { data: ['单位净值', '累计净值'], top: 0 },
+    grid: { left: 72, right: 24, top: 32, bottom: 56 },
+    xAxis: { type: 'category', data: dates, boundary: false, axisLabel: { fontSize: 10 } },
+    yAxis: { scale: true, splitLine: { lineStyle: { color: '#eee' } } },
+    dataZoom: [
+      { type: 'inside', start: 0, end: 100 },
+      { type: 'slider', top: '92%', height: 18, start: 0, end: 100 },
+    ],
+    series: [
+      { name: '单位净值', type: 'line', data: navs.map(n => n.unit_nav),
+        showSymbol: false, lineStyle: { width: 1.4, color: '#0f62fe' } },
+      { name: '累计净值', type: 'line', data: navs.map(n => n.accum_nav),
+        showSymbol: false, lineStyle: { width: 1.2, color: '#ee538b' } },
+    ],
+  })
+}
+
+async function loadFundDetail() {
+  fundRows.value = { status: 'loading', rows: [] }
+  const offset = fundDetailPage.value * FUND_DETAIL_PAGE_SIZE
+  try {
+    const r = await fetch(`/api/funds/${fund.value.code}/navs?limit=${FUND_DETAIL_PAGE_SIZE}&offset=${offset}`)
+    const body = await r.json()
+    if (body.status !== 'up') {
+      fundRows.value = { status: body.status, detail: body.detail, rows: [] }
+      return
+    }
+    const rows = body.navs || []
+    // 明细表最新日期在上（API 为图表返回升序，表格独立倒序展示）
+    const tableRows = [...rows].reverse()
+    const total = rows.length === FUND_DETAIL_PAGE_SIZE
+      ? offset + rows.length + 1 : offset + rows.length
+    fundRows.value = { status: 'up', rows: tableRows, total }
+  } catch (e) {
+    fundRows.value = { status: 'down', detail: String(e), rows: [] }
+  }
+}
+const fundDetailTotal = computed(() =>
+  fundRows.value.total ?? (fundRows.value.rows?.length || 0))
+
+function onFundDetailPage(e) {
+  fundDetailPage.value = e.page
+  loadFundDetail()
+}
+
+function disposeFundChart() {
+  if (fundChartInstance) { fundChartInstance.dispose(); fundChartInstance = null }
+}
+const _onFundResize = () => fundChartInstance && fundChartInstance.resize()
+
+watch(activeNav, (nav, prev) => {
+  if (nav === 'funds') loadFunds()
+  if (nav === 'fund' && fund.value) {
+    loadFundChart()
+    loadFundDetail()
+  }
+  if (prev === 'fund' && nav !== 'fund') disposeFundChart()
+})
 
 // ===== 东财 Cookie：状态 / 粘贴保存 / 验证 =====
 const emCookie = ref({ configured: false, valid: false, masked: '', reason: '' })
@@ -403,7 +547,8 @@ const serverClock = computed(() => {
   } catch { return s }
 })
 function nextRunText(t) {
-  if (!t.next_run_at) return '已禁用'
+  if (!t.enabled) return '已禁用'
+  if (!t.next_run_at) return '手动'          // 启用的纯手动任务（无调度时刻）
   return fmtNext(t.next_run_at)
 }
 function fmtNext(iso) {
@@ -1338,6 +1483,7 @@ if (typeof window !== 'undefined') {
 onMounted(() => {
   window.addEventListener('resize', _onResize)
   window.addEventListener('resize', _onDelistResize)
+  window.addEventListener('resize', _onFundResize)
 })
 
 watch(activeNav, (nav, prev) => {
@@ -1408,7 +1554,7 @@ watch(
               { id: 'tasks', label: '任务' },
               { id: 'backtest', label: '回测' }, { id: 'learn', label: '教学' }]"
             :key="n.id" class="nav-item"
-            :class="{ active: activeNav === n.id, 'sub-active': (activeNav.startsWith('src-') || activeNav === 'stock') && n.id === 'data' }"
+            :class="{ active: activeNav === n.id, 'sub-active': (activeNav.startsWith('src-') || activeNav === 'stock' || activeNav === 'funds' || activeNav === 'fund') && n.id === 'data' }"
             @click="setNav(n.id)">
             <svg v-if="n.id === 'dash'" class="nav-icon" viewBox="0 0 20 20" fill="none">
               <rect x="2.5" y="2.5" width="6.5" height="6.5" rx="1.2" stroke="currentColor" stroke-width="1.5"/>
@@ -1440,6 +1586,8 @@ watch(
             {{ s.label }}<span v-if="s.field === 'eastmoney'" class="src-dot"
               :class="emCookie.valid ? 'ok' : 'bad'" :title="emCookie.valid ? 'Cookie 有效' : '东财 Cookie 未配置/无效'"></span>
           </button>
+          <button class="src-item" :class="{ active: activeNav === 'funds' }"
+            @click="setNav('funds')">基金净值</button>
           <div class="sidebar-foot">v0.1.0 · 工程骨架</div>
         </aside>
 
@@ -1682,6 +1830,63 @@ watch(
             <p class="note">数据源：本地 PG（新浪/东财）· 点击行查看个股历史行情（K线图 + 全字段明细）· 图表：ECharts（按需引入）</p>
           </template>
 
+          <!-- ===== 基金净值浏览（数据子页，行点击进净值详情） ===== -->
+          <template v-else-if="activeNav === 'funds'">
+            <div class="toolbar">
+              <div>
+                <h2 class="h1">基金净值</h2>
+                <p class="sub">已入库公募基金净值一览 · 东财全集（含已清盘与 A/C 份额）· 任务「基金历史净值」爬取入库</p>
+              </div>
+            </div>
+            <div class="ph-search">
+              <span class="p-inputtext-icon-wrap"><i class="pi pi-search"></i></span>
+              <InputText v-model="fundsQuery" placeholder="搜索基金代码 / 名称，如 000001 或 华夏成长"
+                class="browse-input" @keydown.enter="fundsSearch" />
+              <Button label="搜索" size="small" severity="secondary" outlined @click="fundsSearch" />
+            </div>
+            <div class="browse-pv">
+              <DataTable :value="funds.funds || []" lazy paginator :rows="50"
+                :first="fundsPage * 50"
+                :totalRecords="funds.total || 0" :loading="fundsLoading"
+                dataKey="code" stripedRows size="small"
+                @page="onFundsPage" @row-click="openFund">
+                <template #empty>
+                  <div class="browse-empty">
+                    {{ funds.status === 'down' ? '数据库不可达：' + (funds.detail || '')
+                      : '暂无基金数据（运行任务「基金历史净值」爬取入库后在此展示）' }}
+                  </div>
+                </template>
+                <Column field="code" header="代码" style="width: 100px">
+                  <template #body="{ data }"><span class="mono">{{ data.code }}</span></template>
+                </Column>
+                <Column field="name" header="名称" />
+                <Column field="fund_type" header="类型" style="width: 140px">
+                  <template #body="{ data }">{{ data.fund_type || '—' }}</template>
+                </Column>
+                <Column field="unit_nav" header="最新单位净值" style="width: 120px" bodyClass="num-col">
+                  <template #body="{ data }">{{ data.unit_nav ?? '—' }}</template>
+                </Column>
+                <Column field="pct_chg" header="日增长率" style="width: 100px">
+                  <template #body="{ data }">
+                    <span v-if="data.pct_chg != null" :class="data.pct_chg >= 0 ? 'chg-up' : 'chg-down'">
+                      {{ (data.pct_chg >= 0 ? '+' : '') + data.pct_chg + '%' }}</span>
+                    <span v-else>—</span>
+                  </template>
+                </Column>
+                <Column field="navs" header="净值条数" style="width: 100px">
+                  <template #body="{ data }">{{ data.navs || 0 }}</template>
+                </Column>
+                <Column field="last_date" header="最新净值日" style="width: 120px">
+                  <template #body="{ data }">{{ data.last_date || '—' }}</template>
+                </Column>
+                <Column field="first_date" header="最早净值日" style="width: 120px">
+                  <template #body="{ data }">{{ data.first_date || '—' }}</template>
+                </Column>
+              </DataTable>
+            </div>
+            <p class="note">来源：本地 PG（fund_basic / fund_nav，任务源 fund）· 点击行查看基金净值走势与明细 · 货币基金无净值走势不在此列</p>
+          </template>
+
           <!-- ===== 个股历史行情详情（数据页行点击进入） ===== -->
           <template v-else-if="activeNav === 'stock' && stock">
             <div class="toolbar">
@@ -1774,6 +1979,69 @@ watch(
             <p class="note">数据来源：{{ sourceLabel(stock.source) }}源 · 主键 (code, trade_date, source)，与列表页来源 Tab 语义一致 · 点击「← 返回列表」或侧栏「数据」返回（搜索/分页状态保留）</p>
           </template>
 
+          <!-- ===== 基金净值详情（基金列表行点击进入） ===== -->
+          <template v-else-if="activeNav === 'fund' && fund">
+            <div class="toolbar">
+              <div>
+                <h2 class="h1"><span class="mono">{{ fund.code }}</span> {{ fund.name }}</h2>
+                <p class="sub">基金净值历史 · {{ fund.fund_type || '类型未知' }} · 单位净值/累计净值双线 · 图为近 {{ Math.round(FUND_CHART_POINTS / 100) / 10 }} 万个净值日内</p>
+              </div>
+              <div class="toolbar-right">
+                <button class="btn" @click="backToFunds">← 返回列表</button>
+              </div>
+            </div>
+
+            <!-- 净值走势图（单位/累计双线，可缩放平移） -->
+            <div class="card chart-card">
+              <div v-if="fundChart.status === 'down'" class="chart-note">
+                净值数据不可用：{{ fundChart.detail || '数据库连接失败' }}
+              </div>
+              <div v-else-if="!fundChart.navs.length" class="chart-note">
+                {{ fundChart.status === 'loading' ? '净值加载中…' : '该基金暂无净值数据' }}
+              </div>
+              <div v-show="fundChart.status === 'up' && fundChart.navs.length"
+                ref="fundChartEl" class="kchart"></div>
+            </div>
+
+            <!-- 净值明细表（独立分页，可翻更早历史） -->
+            <div class="card detail-table-card">
+              <DataTable :value="fundRows.rows" lazy paginator :rows="FUND_DETAIL_PAGE_SIZE"
+                :first="fundDetailPage * FUND_DETAIL_PAGE_SIZE"
+                :totalRecords="fundDetailTotal" :loading="fundRows.status === 'loading'"
+                dataKey="date" stripedRows size="small" @page="onFundDetailPage">
+                <template #empty>
+                  <div class="browse-empty">
+                    {{ fundRows.status === 'down' ? '数据库不可达：' + (fundRows.detail || '')
+                      : fundRows.status === 'loading' ? '加载中…' : '该基金暂无净值数据' }}
+                  </div>
+                </template>
+                <Column field="date" header="日期" style="width: 110px">
+                  <template #body="{ data }"><span class="mono">{{ data.date }}</span></template>
+                </Column>
+                <Column field="unit_nav" header="单位净值" style="width: 110px" bodyClass="num-col">
+                  <template #body="{ data }">{{ data.unit_nav ?? '—' }}</template>
+                </Column>
+                <Column field="accum_nav" header="累计净值" style="width: 110px" bodyClass="num-col">
+                  <template #body="{ data }">{{ data.accum_nav ?? '—' }}</template>
+                </Column>
+                <Column field="pct_chg" header="日增长率" style="width: 100px">
+                  <template #body="{ data }">
+                    <span v-if="data.pct_chg != null" :class="data.pct_chg >= 0 ? 'chg-up' : 'chg-down'">
+                      {{ (data.pct_chg >= 0 ? '+' : '') + data.pct_chg + '%' }}</span>
+                    <span v-else>—</span>
+                  </template>
+                </Column>
+                <Column field="unit_money" header="分红" style="width: 120px">
+                  <template #body="{ data }">{{ data.unit_money || '—' }}</template>
+                </Column>
+                <Column field="source" header="来源" style="width: 90px">
+                  <template #body="{ data }"><span class="src-txt">{{ data.source || '—' }}</span></template>
+                </Column>
+              </DataTable>
+            </div>
+            <p class="note">数据来源：本地 PG fund_nav（任务源 fund）· 主键 (code, nav_date, source) · 累计净值含分红再投口径但不等于复权净值（回测口径换算见回测侧） · 点击「← 返回列表」返回（搜索/分页状态保留）</p>
+          </template>
+
           <!-- ===== 爬虫任务管理（每日数据更新调度） ===== -->
           <template v-else-if="activeNav === 'tasks'">
             <div class="toolbar">
@@ -1828,6 +2096,8 @@ watch(
                   <span>下次执行：<b>{{ nextRunText(t) }}</b></span>
                   <span v-if="t.last_run">上次：{{ taskLastRunText(t.last_run) }}</span>
                 </div>
+                <div v-if="t.last_error" class="task-lasterr"
+                  :title="'后端日志关键词：[task] #' + t.id">上次失败：{{ t.last_error }}</div>
                 <div v-if="riskNote(t)" class="task-risk">{{ riskNote(t) }}</div>
 
                 <div class="task-actions">
@@ -2884,6 +3154,11 @@ body {
 .task-risk {
   margin-top: 10px; padding: 8px 12px; font-size: 12px;
   background: var(--ph-tag-bg); color: var(--ph-tag-fg); border-left: 3px solid var(--dot-warn);
+}
+.task-lasterr {
+  margin-top: 10px; padding: 8px 12px; font-size: 12px;
+  background: var(--error-bg); color: var(--dot-down); border-left: 3px solid var(--dot-down);
+  word-break: break-all;
 }
 .task-actions { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
 .task-actions .btn { font-size: 13px; padding: 6px 14px; }

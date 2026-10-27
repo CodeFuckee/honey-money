@@ -61,6 +61,47 @@ FROM daily_bar WHERE code = %s {src_clause}
 ORDER BY trade_date DESC LIMIT %s OFFSET %s
 """
 
+# 基金列表：与股票列表同款两段式（fund_basic 小表分页 → 只对当页聚合
+# fund_nav 大表——爬满后 fund_nav 可达数千万行，LATERAL 必须作用于分页后）
+_FUND_LIST_IDS_SQL = """
+SELECT code, name FROM fund_basic
+WHERE (%s = '' OR code ILIKE %s OR name ILIKE %s)
+ORDER BY code
+LIMIT %s OFFSET %s
+"""
+
+_FUND_LIST_SQL = """
+SELECT b.code, b.name, b.fund_type,
+       p.unit_nav, p.pct_chg, p.nav_date,
+       COALESCE(s.navs, 0) AS navs,
+       COALESCE(s.first_date, p.nav_date) AS first_date
+FROM fund_basic b
+LEFT JOIN LATERAL (
+    SELECT unit_nav, pct_chg, nav_date
+    FROM fund_nav f
+    WHERE f.code = b.code
+    ORDER BY nav_date DESC LIMIT 1
+) p ON true
+LEFT JOIN LATERAL (
+    SELECT count(*) AS navs, min(nav_date) AS first_date
+    FROM fund_nav f2
+    WHERE f2.code = b.code
+) s ON true
+WHERE b.code = ANY(%s)
+ORDER BY b.code
+"""
+
+_FUND_COUNT_SQL = """
+SELECT count(*) FROM fund_basic
+WHERE (%s = '' OR code ILIKE %s OR name ILIKE %s)
+"""
+
+_FUND_NAVS_SQL = """
+SELECT nav_date, unit_nav, accum_nav, pct_chg, unit_money, source
+FROM fund_nav WHERE code = %s
+ORDER BY nav_date DESC LIMIT %s OFFSET %s
+"""
+
 
 def _safe(fn, default):
     """表不存在 → 空默认；其他异常（PG 不可达等）→ down + 原因，保持默认形状。"""
@@ -216,3 +257,61 @@ def fetch_stock_basic(dsn: str) -> dict:
                 "stocks": [{"code": r[0], "name": r[1]} for r in rows]}
     return _safe(run, {"status": "down", "detail": "pg unreachable",
                        "total": 0, "stocks": []})
+
+
+def fetch_fund_list(dsn: str, *, q: str = "", limit: int = 50,
+                    offset: int = 0) -> dict:
+    """基金列表 + 每只净值摘要（最新单位净值/日增长率/净值条数/区间），
+    code/name 模糊搜索。两段式同 fetch_stock_list（见其 docstring 的
+    深分页性能教训）。"""
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+    like = f"%{q}%"
+
+    def run():
+        with psycopg.connect(dsn, connect_timeout=3) as conn:
+            with conn.cursor() as cur:
+                cur.execute(_FUND_LIST_IDS_SQL, (q, like, like, limit, offset))
+                codes = [r[0] for r in cur.fetchall()]
+                funds = []
+                if codes:
+                    cur.execute(_FUND_LIST_SQL, (codes,))
+                    cols = ["code", "name", "fund_type", "unit_nav", "pct_chg",
+                            "last_date", "navs", "first_date"]
+                    by_code = {r[0]: dict(zip(cols, r)) for r in cur.fetchall()}
+                    funds = [by_code[c] for c in codes]   # 保持 code 序
+                cur.execute(_FUND_COUNT_SQL, (q, like, like))
+                total = cur.fetchone()[0]
+        for f in funds:
+            f["unit_nav"] = round(f["unit_nav"], 4) if f["unit_nav"] is not None else None
+            f["pct_chg"] = round(f["pct_chg"], 2) if f["pct_chg"] is not None else None
+            for k in ("last_date", "first_date"):
+                if f[k]:
+                    f[k] = f[k].isoformat()
+        return {"status": "up", "total": total, "limit": limit,
+                "offset": offset, "funds": funds}
+    return _safe(run, {"status": "down", "detail": "pg unreachable",
+                       "total": 0, "limit": limit, "offset": offset, "funds": []})
+
+
+def fetch_fund_navs(dsn: str, code: str, *, limit: int = 250,
+                    offset: int = 0) -> dict:
+    """单只基金净值历史（默认最新 250 个净值日，倒序进正序出，同 bars 约定：
+    图表用升序，明细表自行倒序展示）。"""
+    limit = max(1, min(limit, 5000))
+    offset = max(0, offset)
+
+    def run():
+        with psycopg.connect(dsn, connect_timeout=3) as conn:
+            with conn.cursor() as cur:
+                cur.execute(_FUND_NAVS_SQL, (code, limit, offset))
+                rows = cur.fetchall()
+        out = [
+            {"date": r[0].isoformat(), "unit_nav": r[1], "accum_nav": r[2],
+             "pct_chg": r[3], "unit_money": r[4], "source": r[5]}
+            for r in rows
+        ]
+        out.reverse()
+        return {"status": "up", "code": code, "count": len(out), "navs": out}
+    return _safe(run, {"status": "down", "detail": "pg unreachable",
+                       "code": code, "count": 0, "navs": []})

@@ -13,11 +13,11 @@ from playwright.sync_api import expect
 
 SERVER_TIME = "2026-10-09T12:00:00+08:00"
 
-# 预置任务（禁用 · 空闲 · 有历史）
+# 预置任务（禁用 · 空闲 · 有历史；禁用任务真实后端不返回 next_run_at）
 PRESET_TASK = {
     "id": 1, "name": "新浪每日增量", "source": "sina", "mode": "incremental",
     "schedule_time": "18:00", "enabled": False, "phase": "idle",
-    "next_run_at": "2026-10-10T18:00:00+08:00", "progress": None,
+    "next_run_at": None, "progress": None,
     "last_run": {"started_at": "2026-10-08T18:00:05+08:00",
                  "finished_at": "2026-10-08T18:41:00+08:00",
                  "mode": "incremental", "source": "sina", "ok_stocks": 5560,
@@ -115,7 +115,7 @@ class TestTaskList:
         expect(p).to_contain_text("增量续爬")
         expect(p).to_contain_text("每日 18:00")
         expect(p).to_contain_text("空闲")
-        expect(p).to_contain_text("10/10 18:00")   # 当天已跑 → 显示明天（mock 时刻）
+        expect(p).to_contain_text("已禁用")   # 禁用任务真实后端不返回 next_run_at
         expect(p).to_contain_text("成 5,560 / 败 2")
 
         # 运行中：进度条 + 已完成数 + 停止按钮（E2E-105 可见性部分）
@@ -266,3 +266,37 @@ class TestActions:
         card(page, "新浪每日增量").get_by_role("button", name="删除").click()
         assert any(m == "DELETE" and u.endswith("/api/tasks/1")
                    for m, u, _ in api_calls)
+
+
+class TestNextRunLabelAndLastError:
+    def _mock_tasks(self, page, *rows):
+        page.route("**/api/tasks", lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body=json.dumps({"status": "up", "server_time": SERVER_TIME,
+                             "tasks": list(rows), "queue": [],
+                             "running": None})))
+
+    def test_enabled_manual_task_shows_manual(self, servers, page):
+        """E2E-111：启用的手动任务（无调度时刻）下次执行显示「手动」，
+        不再误标「已禁用」（退市股补爬线上误标回归）。"""
+        _, frontend_port = servers
+        self._mock_tasks(page, {**PRESET_TASK, "id": 9,
+                                "name": "退市股历史补爬", "source": "delisted",
+                                "mode": "full", "enabled": True,
+                                "schedule_time": None, "next_run_at": None})
+        open_tasks(page, frontend_port)
+        c = card(page, "退市股历史补爬")
+        expect(c.locator(".task-meta")).to_contain_text("手动")
+
+    def test_last_error_shown_on_card(self, servers, page):
+        """E2E-112：执行体失败原因透出到任务卡（crawl_run 无记录时排查入口）。"""
+        _, frontend_port = servers
+        self._mock_tasks(page, {**PRESET_TASK, "id": 9,
+                                "name": "基金历史净值", "source": "fund",
+                                "mode": "full", "enabled": False,
+                                "next_run_at": None,
+                                "last_error": "UndefinedTable: relation "
+                                              "\"fund_basic\" does not exist"})
+        open_tasks(page, frontend_port)
+        expect(card(page, "基金历史净值").locator(".task-lasterr")
+               ).to_contain_text("fund_basic")

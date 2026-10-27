@@ -22,7 +22,7 @@ from . import backtest_full
 from . import em_cookie
 from .backtest_api import register_backtest_routes
 from .backtest_full_api import register_full_backtest_routes
-from .browse import fetch_stock_bars, fetch_stock_basic, fetch_stock_list
+from .browse import fetch_fund_list, fetch_fund_navs, fetch_stock_bars, fetch_stock_basic, fetch_stock_list
 from .crawler.fund_store import FundStore
 from .crawler.store import Store
 from .crawl_stats import fetch_crawl_stats
@@ -130,8 +130,22 @@ def create_app(*, scheduler: TaskScheduler | None = None,
         （因子懒加载，失败降级不复权并在 adjust_applied 表达）。
         """
         return fetch_stock_bars(config.DATABASE_URL, code, limit=limit,
-                                offset=offset, source=source.strip().lower(),
+                                offset=offset, source=source,
                                 adjust=adjust.strip().lower())
+
+    @app.get("/api/funds")
+    def funds(q: str = "", limit: int = 50, offset: int = 0):
+        """基金列表（净值摘要：最新单位净值/日增长率/净值条数/区间）。
+
+        语义与 /api/stocks 一致：始终 200，PG 不可达在 status=down 表达。
+        """
+        return fetch_fund_list(config.DATABASE_URL, q=q, limit=limit, offset=offset)
+
+    @app.get("/api/funds/{code}/navs")
+    def fund_navs(code: str, limit: int = 250, offset: int = 0):
+        """单只基金净值历史（升序返回，供图表/明细分页，同 bars 约定）。"""
+        return fetch_fund_navs(config.DATABASE_URL, code, limit=limit,
+                               offset=offset)
 
     @app.get("/api/cookies/em")
     def em_cookie_status():

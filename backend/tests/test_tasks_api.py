@@ -22,8 +22,9 @@ TASK_ROW = {"id": 1, "name": "新浪每日增量", "source": "sina",
 class FakeScheduler:
     """调度器假件：只维护运行态内存与操作调用记录。"""
 
-    def __init__(self, phases=None):
+    def __init__(self, phases=None, last_results=None):
         self.phases = dict(phases or {})
+        self.last_results = dict(last_results or {})
         self.calls: list[tuple] = []
 
     def runtime_state(self):
@@ -117,11 +118,11 @@ class FakeTaskStore:
         return []
 
 
-def make_client(*, tasks=(), phases=None, ran=(), connect=None):
+def make_client(*, tasks=(), phases=None, ran=(), connect=None, last_results=None):
     """构建注入假件的测试 app：返回 (client, store, scheduler)。"""
     store = FakeTaskStore(tasks)
     store.ran.update(ran)
-    sched = FakeScheduler(phases=phases)
+    sched = FakeScheduler(phases=phases, last_results=last_results)
     app = create_app(scheduler=sched, task_store=store,
                      connect=connect or (lambda *a, **k: FakeTaskConn(store)))
     return TestClient(app), store, sched
@@ -172,10 +173,29 @@ class TestGetTasks:
         assert body["tasks"][0]["next_run_at"] is None
 
     def test_disabled_task_next_run_none(self):
+        """禁用任务 next_run_at null。"""
         row = {**TASK_ROW, "enabled": False}
         client, _, _ = make_client(tasks=[row])
         t = client.get("/api/tasks").json()["tasks"][0]
         assert t["next_run_at"] is None
+
+    def test_last_error_surfaced_when_executor_failed(self):
+        """执行体异常原因透出到任务行（crawl_run 无记录时历史的空白补充——
+        建表缺失类事故的排查入口）。"""
+        row = {**TASK_ROW, "enabled": False}
+        client, _, _ = make_client(tasks=[row], last_results={
+            1: {"error": True, "detail": "UndefinedTable: relation "
+                                        "\"fund_basic\" does not exist"}})
+        t = client.get("/api/tasks").json()["tasks"][0]
+        assert "fund_basic" in t["last_error"]
+
+    def test_no_last_error_when_ok_or_never_ran(self):
+        """正常结束/从未跑过：last_error 为 None（不误报）。"""
+        row = {**TASK_ROW, "enabled": False}
+        client, _, _ = make_client(tasks=[row], last_results={
+            1: {"error": False, "ok": 5560}})
+        t = client.get("/api/tasks").json()["tasks"][0]
+        assert t["last_error"] is None
 
 
 class TestCreateTask:
