@@ -161,6 +161,8 @@ docker exec honey-money-backend-1 python -m app.crawler --source delisted   # �
                                                                             #  无成交额/换手率置 NULL；与主爬虫共用限速通道）
 docker exec honey-money-backend-1 python -m app.crawler --source fund       # 基金历史净值全量（2.8 万只，约 8 小时；
                                                                             #  单请求全史 upsert 幂等，落 fund_nav 表）
+docker exec honey-money-backend-1 python -m app.crawler --source fund --mode incremental  # 基金快照增量
+                                                                            #  （当日净值列表一次拉全市场，约 5 分钟）
 
 # 常用参数
 #   --source sina|eastmoney|delisted|fund  默认 sina（delisted/fund 见上）
@@ -189,13 +191,22 @@ docker exec honey-money-backend-1 python -m app.crawler --source fund       # �
 自动升速）约 1~2 小时；此后每日增量数分钟。
 
 **基金历史净值（source=fund，2026-10 新增）**：爬全部公募基金（东财全集
-28,169 只，含已清盘与 A/C 份额——全量爬取避免回测幸存者偏差）的全史净值入
-`fund_basic`（代码/名称/类型）与 `fund_nav`（净值日，主键 `(code, nav_date,
-source)`：单位净值/累计净值/日增长率/分红原始串）。数据通道为天天基金
-`pingzhongdata/{code}.js` 单请求全史（lsjz 分页接口单页上限 20 条不可用作
-爬虫通道，实测结论见 docs 与知识库）；免 Cookie、带 Referer 即可；货币基金
-无净值走势按跳过处理。任务页预置手动任务「基金历史净值」（默认禁用，立即
-执行或开启定时才开始爬），全量约 8 小时。
+28,169 只，含已清盘与 A/C 份额——全量爬取避免回测幸存者偏差）入
+`fund_basic`（代码/名称/类型/退市标记）与 `fund_nav`（净值日，主键
+`(code, nav_date, source)`：单位净值/累计净值/日增长率/分红原始串）。
+两种模式：
+- **full 全量**：天天基金 `pingzhongdata/{code}.js` 单请求全史逐只爬
+  （约 8 小时；lsjz 分页接口单页上限 20 条不可用作爬虫通道）；预置手动
+  任务「基金历史净值」默认禁用。清盘基金历史保留、照常入库（防幸存者
+  偏差）；源上无数据的份额代码（301/404，如后端收费份额）记 0 行跳过。
+- **incremental 增量**：Fund_JJJZ_Data 当日净值列表 243 页一次拉全市场
+  最新已披露净值（实测 22,404 只/223 秒/2QPS），日期按槽位日历对齐解析
+  （今日未发布自动落到昨日真实日期；QDII 滞后双空自动跳过不落错行）；
+  预置任务「基金每日增量」每日 21:00 默认禁用，建议晚间净值发布后运行
+  （白天跑当日行缺增长率，由全量任务补）。
+退市标记口径：在市=当日列表（t=1 净值 ∪ t=7 货币）并集，与全集差集=
+清盘/终止；数据页基金列表可按 全部/仅在市/仅退市 过滤。免 Cookie、带
+Referer 即可；货币基金无单位净值走势按跳过处理。
 
 ## 每日数据更新调度（进程内自治，无需外部计划任务）
 
