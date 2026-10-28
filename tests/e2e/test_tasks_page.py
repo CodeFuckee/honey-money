@@ -217,10 +217,14 @@ class TestCreateAndEdit:
         expect(page.locator(".dialog")).to_be_visible()
 
         src = page.locator(".dialog-field", has_text="数据源").locator("select")
+        mode = page.locator(".dialog-field", has_text="模式").locator("select")
         opts = src.locator("option").all_text_contents()
         assert "基金净值" in opts, f"数据源下拉应含基金净值，实际 {opts}"
         src.select_option("fund")
-        expect(page.locator(".dialog .task-risk")).to_contain_text("基金源")
+        # 基金源默认增量 → 快照提示；切全量 → 8 小时回补提示
+        expect(page.locator(".dialog .task-risk")).to_contain_text("基金增量")
+        mode.select_option("full")
+        expect(page.locator(".dialog .task-risk")).to_contain_text("全量回补约 8 小时")
         page.locator(".dialog-actions").get_by_role("button", name="取消").click()
 
 
@@ -300,3 +304,20 @@ class TestNextRunLabelAndLastError:
         open_tasks(page, frontend_port)
         expect(card(page, "基金历史净值").locator(".task-lasterr")
                ).to_contain_text("fund_basic")
+
+
+class TestFundIncrementalRisk:
+    def test_fund_incremental_risk_note(self, servers, page, api_calls):
+        """E2E-113：基金源+增量模式显示「基金增量」快照提示（与全量 8 小时
+        文案区分）。"""
+        _, frontend_port = servers
+        open_tasks(page, frontend_port)
+        page.get_by_role("button", name="＋ 新建任务").click()
+        expect(page.locator(".dialog")).to_be_visible()
+        src = page.locator(".dialog-field", has_text="数据源").locator("select")
+        mode = page.locator(".dialog-field", has_text="模式").locator("select")
+        src.select_option("fund")
+        mode.select_option("incremental")
+        expect(page.locator(".dialog .task-risk")).to_contain_text("基金增量")
+        expect(page.locator(".dialog .task-risk")).not_to_contain_text("8 小时")
+        page.locator(".dialog-actions").get_by_role("button", name="取消").click()

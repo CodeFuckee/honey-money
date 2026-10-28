@@ -540,3 +540,38 @@ class TestFundsRoutes:
         body = resp.json()
         assert body["status"] == "down" and body["code"] == "000001"
         assert body["navs"] == []
+
+
+class TestFundListDelistedFilter:
+    """基金列表退市过滤：对齐股票页 delisted 三态（'' 全部/false 在市/true 退市）。"""
+
+    ROW = ("000001", "华夏成长混合", "混合型-灵活", 1.046, 2.05,
+           dt.date(2026, 10, 23), 6029, dt.date(2001, 12, 18))
+
+    def _fetch(self, monkeypatch, delisted):
+        import app.browse as browse_mod
+        conn = QueueConn(
+            fetchall_queue=[[(self.ROW[0], self.ROW[1])], [self.ROW]],
+            fetchone_queue=[(1,)])
+        monkeypatch.setattr(browse_mod.psycopg, "connect",
+                            lambda *a, **k: conn)
+        return browse_mod.fetch_fund_list("postgresql://fake",
+                                          delisted=delisted), conn
+
+    def test_clause_appended_when_true(self, monkeypatch):
+        body, conn = self._fetch(monkeypatch, "true")
+        ids_sql = conn.executed[0][0]
+        cnt_sql = conn.executed[2][0]
+        assert "fund_basic.delisted = TRUE" in ids_sql
+        assert "fund_basic.delisted = TRUE" in cnt_sql
+        assert body["status"] == "up"
+
+    def test_clause_false_and_default(self, monkeypatch):
+        _, conn = self._fetch(monkeypatch, "false")
+        assert "fund_basic.delisted = FALSE" in conn.executed[0][0]
+        _, conn2 = self._fetch(monkeypatch, "")
+        assert "delisted = " not in conn2.executed[0][0]
+
+    def test_invalid_value_treated_as_all(self, monkeypatch):
+        _, conn = self._fetch(monkeypatch, "yes")
+        assert "delisted = " not in conn.executed[0][0]

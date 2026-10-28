@@ -165,3 +165,31 @@ class TestFundBrowse:
         expect(page.locator(".detail-table-card")).to_contain_text("0.018")
         page.get_by_role("button", name="← 返回列表").click()
         expect(page.get_by_role("heading", name="基金净值")).to_be_visible()
+
+
+class TestFundDelistedFilter:
+    def test_filter_switch_sends_param(self, servers, page):
+        """E2E-313：基金子页退市过滤切「仅在市」→ delisted=false、
+        「仅退市」→ delisted=true（请求参数与股票页同款三态）。"""
+        _, frontend_port = servers
+        calls = []
+        page.route("**/api/funds**", lambda route: (
+            calls.append(route.request.url),
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps(FUNDS_BODY))) and None)
+        page.goto(f"http://127.0.0.1:{frontend_port}/")
+        page.get_by_role("button", name="基金净值").click()
+        expect(page.get_by_role("heading", name="基金净值")).to_be_visible()
+        assert calls and all("delisted=" not in u for u in calls)
+
+        page.locator(".delisted-select").click()
+        page.locator(".p-select-overlay .p-select-option",
+                     has_text="仅在市").click()
+        page.wait_for_timeout(500)
+        assert any("delisted=false" in u for u in calls), calls
+
+        page.locator(".delisted-select").click()
+        page.locator(".p-select-overlay .p-select-option",
+                     has_text="仅退市").click()
+        page.wait_for_timeout(500)
+        assert any("delisted=true" in u for u in calls), calls

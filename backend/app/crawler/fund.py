@@ -18,6 +18,7 @@ x 时间戳为北京时间零点锚点（毫秒），涨跌幅 equityReturn 可�
 import datetime as dt
 import json
 import re
+import time
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -29,6 +30,27 @@ SH_TZ = ZoneInfo("Asia/Shanghai")
 
 FUND_LIST_URL = "https://fund.eastmoney.com/js/fundcode_search.js"
 PINGZHONG_URL = "https://fund.eastmoney.com/pingzhongdata/{code}.js"
+_JJJZ_URL = "https://fund.eastmoney.com/Data/Fund_JJJZ_Data.aspx"
+
+# 在市集合接口（Fund_JJJZ_Data 当前列表）：出现在列表=仍在披露（在市），
+# 全集差集=清盘/终止/不再披露（退市）。**必须两列表取并集**——t=1 净值
+# 列表只含发布单位净值的基金，传统摊余成本法货币基金（发布万份收益）
+# 只在 t=7 货币列表（000009 误标教训 2026-10-27）；l 单页实测上限 100，
+# 按 pages 翻页。
+_JJJZ_LIVE_TYPES = (1, 7)
+_JJJZ_PARAMS = {"l": 100, "st": "dq", "isdesc": 0}
+_JJJZ_CODE_RE = re.compile(r'\[\s*"(\d{6})",')
+_JJJZ_PAGES_RE = re.compile(r'pages:"(\d+)"')
+_JJJZ_MAX_PAGES_PER_TYPE = 500              # 安全阀（24k 量级约 243 页）
+
+# 快照（增量模式）：行前 9 字段 = 代码/名称/拼音/今日单位/今日累计/
+# 昨日单位/昨日累计/今日增长值/今日增长率%；showday 与槽位日历对齐
+_SNAP_ROW_RE = re.compile(
+    r'\["(\d{6})","([^"]*)","[^"]*",'
+    r'"([^"]*)","([^"]*)","([^"]*)","([^"]*)",'
+    r'"([^"]*)","([^"]*)"')
+_SNAP_SHOWDAY_RE = re.compile(r'showday:\["([^"]+)","([^"]+)"\]')
+_SNAP_RECORD_RE = re.compile(r'record:"(\d+)"')
 
 _NET_WORTH_RE = re.compile(r"Data_netWorthTrend\s*=\s*(\[.*?\])\s*;", re.S)
 _ACC_WORTH_RE = re.compile(r"Data_ACWorthTrend\s*=\s*(\[.*?\])\s*;", re.S)
@@ -115,6 +137,43 @@ def parse_pingzhongdata(text: str, code: str) -> DailyBars:
                      dktotal=len(rows), rows=rows, source="fund_em")
 
 
+def parse_jjjz_codes(text: str) -> set:
+    """Fund_JJJZ_Data 单页响应 → 代码集合。"""
+    return set(_JJJZ_CODE_RE.findall(text))
+
+
+def parse_jjjz_snapshot(text: str) -> tuple:
+    """当前净值列表页 → (nav_rows, pages, record)。
+
+    日期规则（槽位与日历对齐，实测未发布时段全市场今日槽为空、QDII 滞后
+    基金双槽皆空）：今日槽有值 → showday[0]；否则昨日槽 → showday[1]；
+    双空跳过——绝不落错误日期的行。日增长率字段只随今日槽。
+    """
+    m = _SNAP_SHOWDAY_RE.search(text)
+    if not m:
+        raise FundError("快照响应缺 showday（可能被拦截）")
+    d_today, d_prev = m.group(1), m.group(2)
+    rows = []
+    for found in _SNAP_ROW_RE.findall(text):
+        code, name, u_t, a_t, u_p, a_p, _g, pct_t = found
+        try:
+            if u_t:
+                rows.append({"code": code, "name": name,
+                             "unit_nav": float(u_t), "accum_nav": float(a_t),
+                             "pct_chg": _num_or_none(pct_t),
+                             "nav_date": d_today})
+            elif u_p:
+                rows.append({"code": code, "name": name,
+                             "unit_nav": float(u_p), "accum_nav": float(a_p),
+                             "pct_chg": None, "nav_date": d_prev})
+        except (TypeError, ValueError):
+            continue                        # 坏数值行跳过，不拖垮整页
+    pages = _JJJZ_PAGES_RE.search(text)
+    record = _SNAP_RECORD_RE.search(text)
+    return rows, (int(pages.group(1)) if pages else 0), \
+        (int(record.group(1)) if record else 0)
+
+
 class FundClient:
     """与 SinaClient/DelistedClient 同构：fetch_stock_list / fetch_daily_bars。"""
 
@@ -123,6 +182,78 @@ class FundClient:
         self._rate = rate
         self._http = http
         self._fetch_timeout = fetch_timeout
+
+    async def fetch_live_codes(self) -> set | None:
+        """在市基金代码集合（Fund_JJJZ_Data t=1 净值列表 ∪ t=7 货币列表，
+        按 pages 翻页收齐）。
+
+        任一页失败 → 返回 None（调用方跳过退市标记，保守不误杀）；
+        该接口仅辅助清单标记，绝不因它阻塞爬取主流程。
+        """
+        key = self._rate.channel_key(_JJJZ_URL)
+        codes: set = set()
+        try:
+            for t in _JJJZ_LIVE_TYPES:
+                for page in range(1, _JJJZ_MAX_PAGES_PER_TYPE + 1):
+                    await self._rate.acquire(key)
+                    try:
+                        resp = await self._http.get(
+                            _JJJZ_URL,
+                            params={**_JJJZ_PARAMS, "t": t, "page": page},
+                            headers={"User-Agent": UA,
+                                     "Referer": "https://fund.eastmoney.com/"},
+                            timeout=self._fetch_timeout)
+                        resp.raise_for_status()
+                        new = parse_jjjz_codes(resp.text)
+                    except Exception as exc:
+                        self._rate.report(key, False)
+                        raise FundError(f"在市清单获取失败(t={t}, "
+                                        f"page={page}): {exc}") from exc
+                    self._rate.report(key, True)
+                    if page == 1:
+                        m = _JJJZ_PAGES_RE.search(resp.text)
+                        pages = int(m.group(1)) if m else 0
+                    if not new:
+                        break
+                    codes |= new
+                    if pages and page >= pages:
+                        break
+            return codes
+        except FundError:
+            return None
+
+    async def iter_nav_snapshot(self):
+        """当日净值快照（t=1 当前净值列表）分页迭代。
+
+        yield {"rows": 解析后净值行, "page", "pages", "record"}；
+        空页即止。FundError 最终失败由调用方处置。
+        """
+        key = self._rate.channel_key(_JJJZ_URL)
+        page = 1
+        pages = None
+        while page <= _JJJZ_MAX_PAGES_PER_TYPE:
+            await self._rate.acquire(key)
+            try:
+                resp = await self._http.get(
+                    _JJJZ_URL,
+                    params={**_JJJZ_PARAMS, "t": 1, "page": page},
+                    headers={"User-Agent": UA,
+                             "Referer": "https://fund.eastmoney.com/"},
+                    timeout=self._fetch_timeout)
+                resp.raise_for_status()
+                rows, pages_p, record = parse_jjjz_snapshot(resp.text)
+            except Exception as exc:
+                self._rate.report(key, False)
+                raise FundError(f"净值快照获取失败(page={page}): {exc}") \
+                    from exc
+            self._rate.report(key, True)
+            if pages is None:
+                pages = pages_p
+            yield {"rows": rows, "page": page, "pages": pages,
+                   "record": record}
+            if not rows or (pages and page >= pages):
+                return
+            page += 1
 
     async def fetch_stock_list(self) -> list[dict]:
         key = self._rate.channel_key(FUND_LIST_URL)
@@ -142,6 +273,15 @@ class FundClient:
             self._rate.report(key, False)
             raise FundError(f"基金清单获取失败: {exc}") from exc
         self._rate.report(key, True)
+        # 退市标记：在市集合（当前净值列表）与全集差集=清盘/退市。
+        # 标记失败跳过（保持 FALSE），清单照常返回。
+        try:
+            live = await self.fetch_live_codes()
+        except Exception:
+            live = None
+        if live:
+            for f in funds:
+                f["delisted"] = f["code"] not in live
         return funds
 
     async def fetch_daily_bars(self, market: int, code: str, *,
@@ -157,6 +297,13 @@ class FundClient:
                          "Referer": "https://fund.eastmoney.com/"},
                 timeout=self._fetch_timeout)
             resp.raise_for_status()
+            if resp.status_code in (301, 302, 404):
+                # 源上无该基金数据文件（后端收费份额等从未披露净值的代码，
+                # 抽样实锤：301 且 lsjz TotalCount=0）——0 行记成功跳过，
+                # 不算失败（真实失败与"源上无数据"在汇总里保持可分）
+                self._rate.report(key, True)
+                return DailyBars(code=code, name="", dktotal=0, rows=[],
+                                 source="fund_em")
             bars = parse_pingzhongdata(resp.text, code)
         except FundError:
             self._rate.report(key, False)
@@ -166,3 +313,56 @@ class FundClient:
             raise FundError(f"基金净值获取失败({code}): {exc}") from exc
         self._rate.report(key, True)
         return bars
+
+
+async def crawl_nav_snapshot(client, store, conn, *, mode, source,
+                             task_id=None, trigger="manual", progress=None,
+                             on_batch=None) -> dict:
+    """基金当日净值快照增量编排（fund 源 + incremental 模式专用执行体）。
+
+    t=1 当前净值列表分页拉取 → 逐页批量 upsert（fund_basic 保全型：快照
+    无类型信息传 None 由 COALESCE 保留库内值、快照码必在市 delisted=False；
+    fund_nav 新增行，冲突时 COALESCE 保留库内非空值）→ 批级提交。
+    清盘/滞后基金当日无行自动跳过（由全量任务补齐）；退市标记不在此刷新
+    （快照不含货币列表，差集会误杀货基——全量任务负责）。
+    返回与 CrawlSummary 字段同构的 dict。
+    """
+    run_id = store.start_run(conn, mode=mode, source=source,
+                             task_id=task_id, trigger=trigger)
+    started = time.perf_counter()
+    ok = bars = done_rows = 0
+
+    async def _run_pages():
+        nonlocal ok, bars, done_rows
+        async for batch in client.iter_nav_snapshot():
+            rows = batch["rows"]
+            if not rows:
+                continue
+            store.upsert_fund_basic(conn, [
+                {"code": r["code"], "name": r["name"], "delisted": False}
+                for r in rows])
+            bars += store.upsert_fund_nav_rows(conn, rows, source="fund_em")
+            ok += len(rows)
+            done_rows += len(rows)
+            if progress:
+                record = batch.get("record") or done_rows
+                progress(min(done_rows, record), record)
+            if on_batch:
+                on_batch(done_rows)
+
+    try:
+        await _run_pages()
+    except Exception as exc:
+        store.finish_run(conn, run_id, total_stocks=ok, ok_stocks=ok,
+                         failed_stocks=0, bars_upserted=bars,
+                         failures=[f"{type(exc).__name__}: {exc}"[:80]],
+                         aborted=False)
+        raise
+    if progress:
+        progress(done_rows, done_rows or 1)
+    store.finish_run(conn, run_id, total_stocks=ok, ok_stocks=ok,
+                     failed_stocks=0, bars_upserted=bars, failures=[],
+                     aborted=False)
+    return {"total": ok, "ok": ok, "failed": 0, "bars": bars,
+            "failures": [], "aborted": False, "stopped": False,
+            "elapsed_sec": round(time.perf_counter() - started, 1)}

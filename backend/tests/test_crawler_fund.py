@@ -97,8 +97,9 @@ class TestParsePingzhongdata:
 # ------------------------------------------------------------ 客户端 ----
 
 class FakeResponse:
-    def __init__(self, text):
+    def __init__(self, text, status_code=200):
         self.text = text
+        self.status_code = status_code
 
     def raise_for_status(self):
         pass
@@ -133,6 +134,14 @@ class FakeRate:
 
     def report(self, key, ok):
         self.reports.append((key, ok))
+
+
+class FakeRedirectHttp(FakeHttp):
+    """所有请求返回 301（源上无数据文件的后端份额类代码）。"""
+
+    async def get(self, url, params=None, headers=None, timeout=None):
+        self.requests.append({"url": url, "headers": headers})
+        return FakeResponse("", status_code=301)
 
 
 def run(coro):
@@ -189,12 +198,17 @@ class FakeCursor:
         return False
 
     def execute(self, query, params=None):
+        self.last_query = query
         self.executed.append(query)
 
     def executemany(self, query, params_seq):
         self.executemany_calls.append((query, list(params_seq)))
 
     def fetchone(self):
+        # start_run 的 INSERT...RETURNING id：返回固定 id；其余查询（PK 检查
+        # 等）返回 None 走"无行"分支
+        if "RETURNING id" in self.last_query:
+            return (1,)
         return None
 
     def fetchall(self):
@@ -224,8 +238,8 @@ class TestFundStore:
             {"code": "000001", "name": "华夏成长混合",
              "fund_type": "混合型-灵活"}])
         (sql, rows), = conn.cursor_obj.executemany_calls
-        assert "fund_basic" in sql and rows == [("000001", "华夏成长混合",
-                                                 "混合型-灵活")]
+        assert "fund_basic" in sql
+        assert rows == [("000001", "华夏成长混合", "混合型-灵活", None)]
 
     def test_upsert_fund_navs_params_and_count(self):
         conn = FakeConn()
@@ -345,3 +359,201 @@ class TestFundSourceRegistration:
         args = parse_args(["--source", "fund"])
         assert args.source == "fund"
         assert "fund" in SOURCE_DEFAULTS
+
+
+# ---------------------------------------------------- 在市集合与退市标记 ----
+
+JJJZ_PAGE1 = ('var db={chars:["0","a"],datas:[["000001","华夏成长混合","HXCZHH"],'
+              '["000003","中海可转债债券A","ZHKZZZQA"]],'
+              'record:"2",pages:"1",curpage:"1"};')
+# t=7 货币列表：传统货基只在此列表（在市并集的第二路，000009 误标教训）
+JJJZ_PAGE7 = ('var db={datas:[["000009","易方达天天理财货币A"]],'
+              'record:"1",pages:"1"};')
+
+
+class FakeMultiHttp:
+    """按调用序返回不同响应体（清单 → JJJZ 第1页 → JJJZ 第2页…）。
+
+    params 像 httpx 一样编入 URL（?page=N），供翻页断言。"""
+
+    def __init__(self, bodies):
+        self.bodies = list(bodies)
+        self.requests: list[dict] = []
+
+    async def get(self, url, params=None, headers=None, timeout=None):
+        from urllib.parse import urlencode
+        if params:
+            url = f"{url}?{urlencode(params)}"
+        self.requests.append({"url": url, "headers": headers})
+        return FakeResponse(self.bodies.pop(0))
+
+
+class TestLiveCodesAndDelistedMark:
+    def test_parse_jjjz_codes(self):
+        assert fd.parse_jjjz_codes(JJJZ_PAGE1) == {"000001", "000003"}
+
+    def test_fetch_stock_list_marks_delisted(self):
+        """在集合=在市(False)；全集差集=退市(True)——退市股历史净值仍爬。"""
+        http = FakeMultiHttp([FUND_LIST_JS, JJJZ_PAGE1, JJJZ_PAGE7])
+        rate = FakeRate()
+        client = fd.FundClient(rate=rate, http=http)
+        funds = run(client.fetch_stock_list())
+        by_code = {f["code"]: f["delisted"] for f in funds}
+        # 在集合=在市；全集差集（005827）=清盘/退市——其历史净值仍照爬
+        assert by_code == {"000001": False, "000003": False, "005827": True}
+        # 在市=两列表并集：t=1 净值列表 + t=7 货币列表（货基只在后者）
+        jjjz_urls = [r["url"] for r in http.requests
+                     if "Fund_JJJZ_Data" in r["url"]]
+        assert len(jjjz_urls) == 2
+        assert "t=1" in jjjz_urls[0] and "t=7" in jjjz_urls[1]
+
+    def test_jjjz_failure_falls_back_unmarked(self):
+        """在市集合接口失败：跳过标记（全部不标退市），清单照常返回。"""
+        http = FakeMultiHttp([FUND_LIST_JS, "<html>blocked</html>"])
+        client = fd.FundClient(rate=FakeRate(), http=http)
+        funds = run(client.fetch_stock_list())
+        assert len(funds) == 3
+        # 回退语义：不带 delisted 键 → 存储层 f.get()=None → COALESCE 保库内值
+        assert all("delisted" not in f for f in funds)
+
+
+class TestNoDataRedirect:
+    def test_redirect_means_zero_rows_success(self):
+        """301/404=源上无此基金数据（从未披露净值的份额代码）：0 行记成功
+        跳过，不计入失败（与真实失败在运行汇总里保持可分）。"""
+        http, rate = FakeRedirectHttp(PING_JS), FakeRate()
+        client = fd.FundClient(rate=rate, http=http)
+        bars = run(client.fetch_daily_bars(0, "000002"))
+        assert bars.rows == [] and bars.dktotal == 0
+        assert rate.reports[-1][1] is True          # 源已明确答复，非失败
+
+
+class TestFundStoreDelisted:
+    def test_init_schema_adds_delisted_column(self):
+        """老库补列幂等：ALTER ADD COLUMN IF NOT EXISTS。"""
+        conn = FakeConn()
+        FundStore().init_schema(conn)
+        ddl = "\n".join(conn.cursor_obj.executed)
+        assert "ALTER TABLE fund_basic ADD COLUMN IF NOT EXISTS delisted" in ddl
+
+    def test_upsert_fund_basic_keeps_delisted_when_none(self):
+        """在市集合拉取失败传 None：COALESCE 保留库内已有标记，不误重置。"""
+        conn = FakeConn()
+        FundStore().upsert_fund_basic(conn, [
+            {"code": "000001", "name": "华夏成长混合", "fund_type": "混合型",
+             "delisted": True},
+            {"code": "000003", "name": "中海可转债", "fund_type": "债券型"},
+        ])
+        (sql, rows), = conn.cursor_obj.executemany_calls
+        assert "COALESCE" in sql
+        assert rows[0] == ("000001", "华夏成长混合", "混合型", True)
+        assert rows[1][3] is None
+
+
+# ---------------------------------------------------- 净值快照增量模式 ----
+
+# 快照页：今日槽(007805 已发布)/昨日槽(270007 未发布今日)/双空(QDII 滞后)
+SNAP_PAGE1 = ('var db={chars:["0","a"],datas:['
+              '["007805","华宝浮动净值货币","HBFHDJZHB","108.5867","110.5867",'
+              '"108.5851","110.5851","0.0016","0.00","暂停申购","开放赎回","","1","0","1","","0","0.00%","","",""],'
+              '["270007","广发大盘成长混合","GFDPCZHH","","","1.5654","1.7368","","",'
+              '"开放申购","开放赎回","","1","0","1","","1","0.15%","","",""],'
+              '["206006","鹏华全球中短债(QDII)人民币A","PHQZDZ","","","","","",'
+              '"开放申购","开放赎回","","1","0","1","","0","0.00%","","",""]],'
+              'record:"3",pages:"1",curpage:"1",'
+              'showday:["2026-10-28","2026-10-27"]};')
+
+
+class TestParseJjjzSnapshot:
+    def test_slot_date_rule_and_laggy_skip(self):
+        """今日槽有值→今日日期；空→昨日槽+昨日日期；双空（QDII 滞后）跳过——
+        绝不落错误日期的行（数据完整性红线）。"""
+        rows, pages, record = fd.parse_jjjz_snapshot(SNAP_PAGE1)
+        assert pages == 1 and record == 3
+        by_code = {r["code"]: r for r in rows}
+        assert set(by_code) == {"007805", "270007"}      # 206006 双空被跳过
+        assert by_code["007805"] == {
+            "code": "007805", "name": "华宝浮动净值货币",
+            "unit_nav": 108.5867, "accum_nav": 110.5867,
+            "pct_chg": 0.0, "nav_date": "2026-10-28"}
+        assert by_code["270007"]["nav_date"] == "2026-10-27"
+        assert by_code["270007"]["unit_nav"] == 1.5654
+        assert by_code["270007"]["pct_chg"] is None      # 增长率只随今日槽
+
+    def test_garbage_raises(self):
+        with pytest.raises(fd.FundError):
+            fd.parse_jjjz_snapshot("<html>blocked</html>")
+
+
+class TestIterNavSnapshot:
+    def test_pagination_yields_per_page_rows(self):
+        p1 = SNAP_PAGE1.replace('pages:"1"', 'pages:"2"')
+        p2 = ('var db={datas:[["000001","华夏成长混合","HXCZHH","1.019",'
+              '"3.592","1.046","3.619","-0.027","-2.58","开放申购","开放赎回"]],'
+              'record:"4",pages:"2",curpage:"2",'
+              'showday:["2026-10-28","2026-10-27"]};')
+        http = FakeMultiHttp([p1, p2])
+        client = fd.FundClient(rate=FakeRate(), http=http)
+
+        async def collect():
+            out = []
+            async for batch in client.iter_nav_snapshot():
+                out.append(batch)
+            return out
+
+        batches = run(collect())
+        assert len(batches) == 2
+        assert [b["page"] for b in batches] == [1, 2]
+        assert batches[1]["rows"][0]["code"] == "000001"
+        assert "page=1" in http.requests[0]["url"]
+        assert "page=2" in http.requests[1]["url"]
+
+
+class TestCrawlNavSnapshot:
+    """增量编排：分页快照 → 基本信息保全型 upsert + 净值批量落库 + run 簿记。"""
+
+    def _run(self, bodies):
+        conn = FakeConn()
+        store = FundStore()
+        http = FakeMultiHttp(bodies)
+        client = fd.FundClient(rate=FakeRate(), http=http)
+        summary = run(fd.crawl_nav_snapshot(
+            client, store, conn, mode="incremental", source="fund",
+            task_id=9, trigger="manual"))
+        return summary, store, conn
+
+    def test_summary_basic_and_nav_upserts(self):
+        p1 = SNAP_PAGE1.replace('pages:"1"', 'pages:"2"')
+        p2 = ('var db={datas:[["000001","华夏成长混合","HXCZHH","1.019",'
+              '"3.592","1.046","3.619","-0.027","-2.58","开放申购","开放赎回"]],'
+              'record:"4",pages:"2",curpage:"2",'
+              'showday:["2026-10-28","2026-10-27"]};')
+        summary, store, conn = self._run([p1, p2])
+        assert summary["total"] == 3 and summary["ok"] == 3
+        assert summary["failed"] == 0 and summary["bars"] == 3
+        # fund_basic：快照码保全型 upsert（fund_type 不给 → COALESCE 保旧）
+        basic_calls = [c for c in conn.cursor_obj.executemany_calls
+                       if "fund_basic" in c[0]]
+        assert basic_calls, "应 upsert fund_basic"
+        codes = {r[0] for call in basic_calls for r in call[1]}
+        assert codes == {"007805", "270007", "000001"}
+        assert all(r[3] is False for call in basic_calls for r in call[1])
+        # fund_nav：批量行落库（code, date, unit, accum, pct, None, source）
+        nav_calls = [c for c in conn.cursor_obj.executemany_calls
+                     if "fund_nav" in c[0]]
+        nav_rows = [r for call in nav_calls for r in call[1]]
+        assert ("007805", "2026-10-28", 108.5867, 110.5867, 0.0, None,
+                "fund_em") in nav_rows
+        assert ("000001", "2026-10-28", 1.019, 3.592, -2.58, None,
+                "fund_em") in nav_rows
+        # run 簿记：INSERT RETURNING + finish 更新
+        assert any("RETURNING id" in q for q in conn.cursor_obj.executed)
+        assert any("UPDATE crawl_run" in q for q in conn.cursor_obj.executed)
+
+    def test_failure_finishes_run_and_raises(self):
+        summary_or_exc = None
+        try:
+            self._run([FUND_LIST_JS])          # 第一个响应不是快照 → 解析失败
+        except fd.FundError:
+            summary_or_exc = "raised"
+        assert summary_or_exc == "raised"

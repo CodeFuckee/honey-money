@@ -134,12 +134,16 @@ def create_app(*, scheduler: TaskScheduler | None = None,
                                 adjust=adjust.strip().lower())
 
     @app.get("/api/funds")
-    def funds(q: str = "", limit: int = 50, offset: int = 0):
+    def funds(q: str = "", limit: int = 50, offset: int = 0,
+              delisted: str = ""):
         """基金列表（净值摘要：最新单位净值/日增长率/净值条数/区间）。
 
-        语义与 /api/stocks 一致：始终 200，PG 不可达在 status=down 表达。
+        语义与 /api/stocks 一致：始终 200，PG 不可达在 status=down 表达；
+        delisted 三态过滤同 /api/stocks。
         """
-        return fetch_fund_list(config.DATABASE_URL, q=q, limit=limit, offset=offset)
+        return fetch_fund_list(config.DATABASE_URL, q=q, limit=limit,
+                               offset=offset,
+                               delisted=delisted.strip().lower())
 
     @app.get("/api/funds/{code}/navs")
     def fund_navs(code: str, limit: int = 250, offset: int = 0):

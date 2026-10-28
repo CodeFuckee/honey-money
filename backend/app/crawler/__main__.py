@@ -130,6 +130,18 @@ async def amain(args) -> int:
         client = EastmoneyClient(rate=rate, proxy_broker=broker, http=direct,
                                  max_proxy_retries=args.proxy_retries,
                                  proxy_mode=args.proxy_mode, cookie=cookie)
+    if args.source == "fund" and args.mode == "incremental":
+        # 快照增量：当日净值列表一次拉全市场最新已披露净值（约 5 分钟）
+        from .fund import crawl_nav_snapshot
+        with psycopg.connect(config.DATABASE_URL) as conn:
+            store.init_schema(conn)
+            summary = await crawl_nav_snapshot(
+                client, store, conn, mode="incremental", source="fund",
+                on_batch=lambda _done: conn.commit())
+        print(f"[done] 基金快照增量 入净值行={summary['bars']} "
+              f"基金数={summary['ok']} 耗时={summary['elapsed_sec']}s")
+        print(f"[rate] {rate.stats()}")
+        return 0
     try:
         stocks = await client.fetch_stock_list()
         if args.only:

@@ -68,6 +68,7 @@ function buildQuery() {
   } else if (nav === 'funds') {
     if (fundsQuery.value) q.set('q', fundsQuery.value)
     if (fundsPage.value) q.set('page', fundsPage.value)
+    if (fundsDelisted.value) q.set('delisted', fundsDelisted.value)
   }
   return q
 }
@@ -151,9 +152,10 @@ function applyUrl() {
   }
   // 基金列表
   if (NAV_BY_PATH[u.pathname] === 'funds' &&
-      (q.get('q') != null || q.get('page'))) {
+      (q.get('q') != null || q.get('page') || q.get('delisted'))) {
     fundsQuery.value = q.get('q') ?? ''
     fundsPage.value = +q.get('page') || 0
+    fundsDelisted.value = q.get('delisted') ?? ''
     loadFunds()
   }
 }
@@ -272,6 +274,9 @@ function browseSearch() { browsePage.value = 0; loadBrowse() }
 const funds = ref({ status: 'loading', total: 0, funds: [] })
 const fundsQuery = ref('')
 const fundsPage = ref(0)                  // 0 起
+// 退市过滤：'' 全部 / 'false' 仅在市 / 'true' 仅退市（fund_basic.delisted，
+// 爬虫按天天基金当前净值列表与全集差集标记——差集=清盘/终止/不再披露）
+const fundsDelisted = ref('')
 const fundsLoading = ref(false)
 const FUNDS_PAGE_SIZE = 50
 const fundsTotalPages = computed(() =>
@@ -282,7 +287,8 @@ async function loadFunds() {
   try {
     const q = encodeURIComponent(fundsQuery.value.trim())
     const off = fundsPage.value * FUNDS_PAGE_SIZE
-    const r = await fetch(`/api/funds?q=${q}&limit=${FUNDS_PAGE_SIZE}&offset=${off}`)
+    const dl = fundsDelisted.value ? `&delisted=${fundsDelisted.value}` : ''
+    const r = await fetch(`/api/funds?q=${q}&limit=${FUNDS_PAGE_SIZE}&offset=${off}${dl}`)
     funds.value = await r.json()
   } catch (e) {
     funds.value = { status: 'down', total: 0, funds: [] }
@@ -571,8 +577,10 @@ function taskLastRunText(r) {
 function riskNote(t) {
   if (t.source === 'eastmoney')
     return '东财源 drip 模式：每 30 秒 1 请求（出口 IP 曾被封），全市场一轮约需 40+ 小时，仅作解封后校验/补数用'
+  if (t.source === 'fund' && t.mode === 'incremental')
+    return '基金增量：当日净值快照（全市场最新已披露净值一次拉齐），约 5 分钟；清盘/滞后基金由全量任务补齐'
   if (t.source === 'fund')
-    return '基金源：全部 2.8 万只、1 QPS 自适应限速，全量回补约 8 小时；货币基金无净值走势，记为跳过'
+    return '基金源全量：全部 2.8 万只、1 QPS 自适应限速，全量回补约 8 小时；货币基金无净值走势，记为跳过'
   if (t.mode === 'full')
     return '全量重爬：每轮 5200+ 请求、约 1~2 小时，确认需要重建数据时再开启'
   return ''
@@ -582,8 +590,10 @@ const dialogRisk = computed(() => {
   if (!d) return ''
   if (d.source === 'eastmoney')
     return '东财源 drip 模式：每 30 秒 1 请求（出口 IP 曾被封），全市场一轮约 40+ 小时，仅作解封后校验/补数用'
+  if (d.source === 'fund' && d.taskMode === 'incremental')
+    return '基金增量：当日净值快照（全市场最新已披露净值一次拉齐），约 5 分钟；清盘/滞后基金由全量任务补齐'
   if (d.source === 'fund')
-    return '基金源：全部 2.8 万只、1 QPS 自适应限速，全量回补约 8 小时；货币基金无净值走势，记为跳过'
+    return '基金源全量：全部 2.8 万只、1 QPS 自适应限速，全量回补约 8 小时；货币基金无净值走势，记为跳过'
   if (d.taskMode === 'full')
     return '全量重爬：每轮 5200+ 请求、约 1~2 小时，确认需要重建数据时再开启'
   return ''
@@ -1843,6 +1853,10 @@ watch(
               <InputText v-model="fundsQuery" placeholder="搜索基金代码 / 名称，如 000001 或 华夏成长"
                 class="browse-input" @keydown.enter="fundsSearch" />
               <Button label="搜索" size="small" severity="secondary" outlined @click="fundsSearch" />
+              <Select v-model="fundsDelisted" :options="DELISTED_FILTERS"
+                optionLabel="label" optionValue="value" size="small"
+                class="delisted-select" aria-label="按清盘/退市状态过滤"
+                @change="fundsSearch" />
             </div>
             <div class="browse-pv">
               <DataTable :value="funds.funds || []" lazy paginator :rows="50"

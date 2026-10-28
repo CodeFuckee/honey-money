@@ -86,6 +86,13 @@ class TaskStore:
                 " SELECT '基金历史净值', 'fund', 'full', NULL::time, FALSE"
                 " WHERE NOT EXISTS (SELECT 1 FROM crawl_task"
                 "                    WHERE name = '基金历史净值')")
+            # 基金每日增量：当日净值快照（约 5 分钟），预置 21:00 默认禁用
+            # ——开开关即每日自动更新最新净值
+            cur.execute(
+                "INSERT INTO crawl_task (name, source, mode, schedule_time, enabled)"
+                " SELECT '基金每日增量', 'fund', 'incremental', '21:00'::time, FALSE"
+                " WHERE NOT EXISTS (SELECT 1 FROM crawl_task"
+                "                    WHERE name = '基金每日增量')")
     def list_tasks(self, conn) -> list[dict]:
         with conn.cursor() as cur:
             cur.execute(f"SELECT {_TASK_COLS} FROM crawl_task ORDER BY id")

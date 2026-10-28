@@ -148,6 +148,23 @@ def build_crawl_executor(dsn: str, proxy_pool_url: str):
                                      http=direct, proxy_mode="direct",
                                      cookie=cookie)
         try:
+            if task["source"] == "fund" and task["mode"] == "incremental":
+                # 快照增量：当日净值列表（t=1）一次拉全市场最新已披露净值，
+                # 约 250 页/5 分钟（对比 full 逐只全史 8 小时）。快照不含
+                # 货币列表，退市标记不在增量刷新（full 负责）
+                from .crawler.fund import crawl_nav_snapshot
+                with psycopg.connect(dsn) as conn:
+                    summary = await crawl_nav_snapshot(
+                        client, store, conn, mode="incremental",
+                        source="fund", task_id=task["id"],
+                        trigger=task.get("_trigger", "manual"),
+                        progress=progress,
+                        on_batch=lambda _done: conn.commit())
+                return {"total": summary["total"], "ok": summary["ok"],
+                        "failed": summary["failed"], "bars": summary["bars"],
+                        "failures": summary["failures"][:50],
+                        "aborted": False, "stopped": summary["stopped"],
+                        "error": False}
             stocks = await client.fetch_stock_list()
             with psycopg.connect(dsn) as conn:
                 if task["source"] == "fund":

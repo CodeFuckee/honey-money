@@ -66,6 +66,7 @@ ORDER BY trade_date DESC LIMIT %s OFFSET %s
 _FUND_LIST_IDS_SQL = """
 SELECT code, name FROM fund_basic
 WHERE (%s = '' OR code ILIKE %s OR name ILIKE %s)
+  AND {delist_clause}
 ORDER BY code
 LIMIT %s OFFSET %s
 """
@@ -94,6 +95,7 @@ ORDER BY b.code
 _FUND_COUNT_SQL = """
 SELECT count(*) FROM fund_basic
 WHERE (%s = '' OR code ILIKE %s OR name ILIKE %s)
+  AND {delist_clause}
 """
 
 _FUND_NAVS_SQL = """
@@ -260,18 +262,27 @@ def fetch_stock_basic(dsn: str) -> dict:
 
 
 def fetch_fund_list(dsn: str, *, q: str = "", limit: int = 50,
-                    offset: int = 0) -> dict:
+                    offset: int = 0, delisted: str = "") -> dict:
     """基金列表 + 每只净值摘要（最新单位净值/日增长率/净值条数/区间），
     code/name 模糊搜索。两段式同 fetch_stock_list（见其 docstring 的
-    深分页性能教训）。"""
+    深分页性能教训）。
+
+    delisted="false"/"true" 仅在市/仅退市（fund_basic.delisted 由爬虫按
+    在市集合差集标记），其余值（含空串）不过滤；谓词用全表名（两段 SQL
+    的 fund_basic 无别名，b. 前缀会 42P01 被 _safe 吞成 down）。
+    """
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
     like = f"%{q}%"
+    delist_clause = (f"fund_basic.delisted = {delisted.upper()}"
+                     if delisted in ("true", "false") else "true")
+    sql_ids = _FUND_LIST_IDS_SQL.replace("{delist_clause}", delist_clause)
+    count_sql = _FUND_COUNT_SQL.replace("{delist_clause}", delist_clause)
 
     def run():
         with psycopg.connect(dsn, connect_timeout=3) as conn:
             with conn.cursor() as cur:
-                cur.execute(_FUND_LIST_IDS_SQL, (q, like, like, limit, offset))
+                cur.execute(sql_ids, (q, like, like, limit, offset))
                 codes = [r[0] for r in cur.fetchall()]
                 funds = []
                 if codes:
@@ -280,7 +291,7 @@ def fetch_fund_list(dsn: str, *, q: str = "", limit: int = 50,
                             "last_date", "navs", "first_date"]
                     by_code = {r[0]: dict(zip(cols, r)) for r in cur.fetchall()}
                     funds = [by_code[c] for c in codes]   # 保持 code 序
-                cur.execute(_FUND_COUNT_SQL, (q, like, like))
+                cur.execute(count_sql, (q, like, like))
                 total = cur.fetchone()[0]
         for f in funds:
             f["unit_nav"] = round(f["unit_nav"], 4) if f["unit_nav"] is not None else None
