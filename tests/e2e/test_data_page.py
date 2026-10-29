@@ -208,17 +208,22 @@ class TestFundBackendToggle:
         page.goto(f"http://127.0.0.1:{frontend_port}/")
         page.get_by_role("button", name="基金净值").click()
         expect(page.get_by_role("heading", name="基金净值")).to_be_visible()
+        # 退市下拉默认显示占位文案（空串值曾被 PrimeVue 渲染成空白框）
+        expect(page.locator(".funds-search .p-select-label")
+               ).to_have_text("退市：全部")
         assert calls and all("show_backend" not in u for u in calls)
 
-        btn = page.get_by_role("button", name="后端收费：已隐藏")
+        btn = page.get_by_role("button", name="后端份额")
+        assert btn.get_attribute("aria-pressed") == "false"
         btn.click()
         page.wait_for_timeout(500)
         assert any("show_backend=1" in u for u in calls), calls
-        expect(page.get_by_role("button", name="后端收费：显示中")).to_be_visible()
+        assert btn.get_attribute("aria-pressed") == "true"
 
-        page.get_by_role("button", name="后端收费：显示中").click()
+        btn.click()
         page.wait_for_timeout(500)
         assert calls[-1].count("show_backend") == 0, calls[-1]
+        assert btn.get_attribute("aria-pressed") == "false"
 
 
 class TestFundMoneyToggle:
@@ -236,11 +241,14 @@ class TestFundMoneyToggle:
         expect(page.get_by_role("heading", name="基金净值")).to_be_visible()
         assert calls and all("show_money" not in u for u in calls)
 
-        page.get_by_role("button", name="货币基金：已隐藏").click()
+        btn = page.get_by_role("button", name="货币基金")
+        assert btn.get_attribute("aria-pressed") == "false"
+        btn.click()
         page.wait_for_timeout(500)
         assert any("show_money=1" in u for u in calls), calls
-        expect(page.get_by_role("button", name="货币基金：显示中")).to_be_visible()
+        assert btn.get_attribute("aria-pressed") == "true"
 
-        page.get_by_role("button", name="货币基金：显示中").click()
+        btn.click()
         page.wait_for_timeout(500)
         assert calls[-1].count("show_money") == 0, calls[-1]
+        assert btn.get_attribute("aria-pressed") == "false"

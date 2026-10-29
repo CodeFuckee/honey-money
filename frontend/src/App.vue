@@ -1812,8 +1812,8 @@ watch(
               <Button label="搜索" size="small" severity="secondary" outlined @click="browseSearch" />
               <Select v-model="browseDelisted" :options="DELISTED_FILTERS"
                 optionLabel="label" optionValue="value" size="small"
-                class="delisted-select" aria-label="按退市状态过滤"
-                @change="browseSearch" />
+                placeholder="退市：全部" class="delisted-select"
+                aria-label="按退市状态过滤" @change="browseSearch" />
             </div>
             <div class="browse-pv">
               <DataTable :value="browse.stocks || []" lazy paginator :rows="50"
@@ -1869,23 +1869,27 @@ watch(
                 <p class="sub">已入库公募基金净值一览 · 东财全集（含已清盘与 A/C 份额）· 任务「基金历史净值」爬取入库</p>
               </div>
             </div>
-            <div class="ph-search">
+            <div class="ph-search funds-search">
               <span class="p-inputtext-icon-wrap"><i class="pi pi-search"></i></span>
               <InputText v-model="fundsQuery" placeholder="搜索基金代码 / 名称，如 000001 或 华夏成长"
                 class="browse-input" @keydown.enter="fundsSearch" />
               <Button label="搜索" size="small" severity="secondary" outlined @click="fundsSearch" />
               <Select v-model="fundsDelisted" :options="DELISTED_FILTERS"
                 optionLabel="label" optionValue="value" size="small"
-                class="delisted-select" aria-label="按清盘/退市状态过滤"
-                @change="fundsSearch" />
-              <Button size="small" outlined
-                :label="fundsShowBackend ? '后端收费：显示中' : '后端收费：已隐藏'"
-                :severity="fundsShowBackend ? 'primary' : 'secondary'"
-                @click="toggleFundsBackend" />
-              <Button size="small" outlined
-                :label="fundsShowMoney ? '货币基金：显示中' : '货币基金：已隐藏'"
-                :severity="fundsShowMoney ? 'primary' : 'secondary'"
-                @click="toggleFundsMoney" />
+                placeholder="退市：全部" class="delisted-select"
+                aria-label="按清盘/退市状态过滤" @change="fundsSearch" />
+              <button class="filter-chip" :class="{ active: fundsShowBackend }"
+                type="button" :aria-pressed="fundsShowBackend"
+                title="后端收费份额（名称带 (后端) 标注，默认隐藏）"
+                @click="toggleFundsBackend">
+                <span class="chip-dot"></span>后端份额
+              </button>
+              <button class="filter-chip" :class="{ active: fundsShowMoney }"
+                type="button" :aria-pressed="fundsShowMoney"
+                title="货币基金（净值恒 1、无单位净值走势，默认隐藏）"
+                @click="toggleFundsMoney">
+                <span class="chip-dot"></span>货币基金
+              </button>
             </div>
             <div class="browse-pv">
               <DataTable :value="funds.funds || []" lazy paginator :rows="50"
@@ -3203,6 +3207,23 @@ body {
   background: var(--error-bg); color: var(--dot-down); border-left: 3px solid var(--dot-down);
   word-break: break-all;
 }
+/* 基金页过滤 chips：短标签圆角胶囊，状态用圆点+配色；禁换行防挤压竖排 */
+.filter-chip {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 6px 14px; font-size: 13px; line-height: 1;
+  border-radius: 999px; border: 1px solid #c6c6c6; background: #fff;
+  color: var(--fg-2, #525252); white-space: nowrap; cursor: pointer;
+  transition: border-color .15s, color .15s, background .15s;
+}
+.filter-chip:hover { border-color: #0f62fe; color: #0f62fe; }
+.filter-chip .chip-dot { width: 8px; height: 8px; border-radius: 50%;
+  background: #c6c6c6; flex: none; transition: background .15s; }
+.filter-chip.active { border-color: #0f62fe; color: #0f62fe; background: #edf5ff; }
+.filter-chip.active .chip-dot { background: #0f62fe; }
+/* 基金页搜索栏：宽度自适应 + 换行（.ph-search 的 480px 钉死宽度会导致
+   控件挤压竖排溢出——2026-10-29 截图反馈） */
+.funds-search { width: auto; max-width: 100%; flex-wrap: wrap; row-gap: 8px; }
+.funds-search .browse-input { flex: 1 1 200px; min-width: 150px; width: auto; }
 .task-actions { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
 .task-actions .btn { font-size: 13px; padding: 6px 14px; }
 .btn-danger { color: var(--dot-down); border-color: var(--dot-down); }
