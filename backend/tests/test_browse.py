@@ -615,7 +615,7 @@ class TestFundBackendFilter:
         captured = {}
 
         def fake_funds(dsn, *, q="", limit=50, offset=0, delisted="",
-                       show_backend=""):
+                       show_backend="", show_money=""):
             captured["show_backend"] = show_backend
             return {"status": "up", "total": 0, "limit": limit,
                     "offset": offset, "funds": []}
@@ -625,3 +625,50 @@ class TestFundBackendFilter:
         assert captured["show_backend"] == "1"
         client.get("/api/funds")
         assert captured["show_backend"] == ""
+
+
+class TestFundMoneyFilter:
+    """基金列表货币基金过滤：默认隐藏（fund_type 含"货币"），show_money=1 显示。"""
+
+    def _conn(self, monkeypatch):
+        import app.browse as browse_mod
+        conn = QueueConn(
+            fetchall_queue=[[(TestFundListDelistedFilter.ROW[0],
+                              TestFundListDelistedFilter.ROW[1])],
+                            [TestFundListDelistedFilter.ROW]],
+            fetchone_queue=[(1,)])
+        monkeypatch.setattr(browse_mod.psycopg, "connect",
+                            lambda *a, **k: conn)
+        return conn
+
+    def test_money_hidden_by_default(self, monkeypatch):
+        import app.browse as browse_mod
+        conn = self._conn(monkeypatch)
+        body = browse_mod.fetch_fund_list("postgresql://fake")
+        clause = "COALESCE(position('货币' in fund_basic.fund_type), 0) = 0"
+        assert clause in conn.executed[0][0]        # NULL 类型不受影响
+        assert clause in conn.executed[2][0]
+        assert body["status"] == "up"
+
+    def test_show_money_removes_clause(self, monkeypatch):
+        import app.browse as browse_mod
+        conn = self._conn(monkeypatch)
+        browse_mod.fetch_fund_list("postgresql://fake", show_money="1")
+        assert "position('货币'" not in conn.executed[0][0]
+        assert "position('货币'" not in conn.executed[2][0]
+
+    def test_endpoint_passes_show_money(self, client, monkeypatch):
+        import app.main as main_mod
+        captured = {}
+
+        def fake_funds(dsn, *, q="", limit=50, offset=0, delisted="",
+                       show_backend="", show_money=""):
+            captured["show_money"] = show_money
+            return {"status": "up", "total": 0, "limit": limit,
+                    "offset": offset, "funds": []}
+
+        monkeypatch.setattr(main_mod, "fetch_fund_list", fake_funds)
+        client.get("/api/funds", params={"show_money": "1"})
+        assert captured["show_money"] == "1"
+        client.get("/api/funds")
+        assert captured["show_money"] == ""

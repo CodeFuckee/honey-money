@@ -219,3 +219,28 @@ class TestFundBackendToggle:
         page.get_by_role("button", name="后端收费：显示中").click()
         page.wait_for_timeout(500)
         assert calls[-1].count("show_backend") == 0, calls[-1]
+
+
+class TestFundMoneyToggle:
+    def test_money_toggle_sends_param(self, servers, page):
+        """E2E-315：货币基金默认隐藏（请求无 show_money），按钮打开
+        → show_money=1；再点关闭 → 参数消失。"""
+        _, frontend_port = servers
+        calls = []
+        page.route("**/api/funds**", lambda route: (
+            calls.append(route.request.url),
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps(FUNDS_BODY))) and None)
+        page.goto(f"http://127.0.0.1:{frontend_port}/")
+        page.get_by_role("button", name="基金净值").click()
+        expect(page.get_by_role("heading", name="基金净值")).to_be_visible()
+        assert calls and all("show_money" not in u for u in calls)
+
+        page.get_by_role("button", name="货币基金：已隐藏").click()
+        page.wait_for_timeout(500)
+        assert any("show_money=1" in u for u in calls), calls
+        expect(page.get_by_role("button", name="货币基金：显示中")).to_be_visible()
+
+        page.get_by_role("button", name="货币基金：显示中").click()
+        page.wait_for_timeout(500)
+        assert calls[-1].count("show_money") == 0, calls[-1]

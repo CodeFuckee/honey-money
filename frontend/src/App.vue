@@ -70,6 +70,7 @@ function buildQuery() {
     if (fundsPage.value) q.set('page', fundsPage.value)
     if (fundsDelisted.value) q.set('delisted', fundsDelisted.value)
     if (fundsShowBackend.value) q.set('backend', '1')
+    if (fundsShowMoney.value) q.set('money', '1')
   }
   return q
 }
@@ -154,11 +155,12 @@ function applyUrl() {
   // 基金列表
   if (NAV_BY_PATH[u.pathname] === 'funds' &&
       (q.get('q') != null || q.get('page') || q.get('delisted')
-       || q.get('backend'))) {
+       || q.get('backend') || q.get('money'))) {
     fundsQuery.value = q.get('q') ?? ''
     fundsPage.value = +q.get('page') || 0
     fundsDelisted.value = q.get('delisted') ?? ''
     fundsShowBackend.value = q.get('backend') === '1'
+    fundsShowMoney.value = q.get('money') === '1'
     loadFunds()
   }
 }
@@ -283,6 +285,9 @@ const fundsDelisted = ref('')
 // 后端收费份额显示开关：默认隐藏（东财此类份额名称带"(后端)"、源上普遍
 // 无独立净值数据，列表常驻意义小），按钮打开后全量显示
 const fundsShowBackend = ref(false)
+// 货币基金显示开关：默认隐藏（摊余成本法货基净值恒 1、无单位净值走势，
+// fund_type 含"货币"），按钮打开后显示
+const fundsShowMoney = ref(false)
 const fundsLoading = ref(false)
 const FUNDS_PAGE_SIZE = 50
 const fundsTotalPages = computed(() =>
@@ -295,7 +300,8 @@ async function loadFunds() {
     const off = fundsPage.value * FUNDS_PAGE_SIZE
     const dl = fundsDelisted.value ? `&delisted=${fundsDelisted.value}` : ''
     const be = fundsShowBackend.value ? '&show_backend=1' : ''
-    const r = await fetch(`/api/funds?q=${q}&limit=${FUNDS_PAGE_SIZE}&offset=${off}${dl}${be}`)
+    const mn = fundsShowMoney.value ? '&show_money=1' : ''
+    const r = await fetch(`/api/funds?q=${q}&limit=${FUNDS_PAGE_SIZE}&offset=${off}${dl}${be}${mn}`)
     funds.value = await r.json()
   } catch (e) {
     funds.value = { status: 'down', total: 0, funds: [] }
@@ -306,6 +312,10 @@ async function loadFunds() {
 function fundsSearch() { fundsPage.value = 0; loadFunds() }
 function toggleFundsBackend() {
   fundsShowBackend.value = !fundsShowBackend.value
+  fundsSearch()
+}
+function toggleFundsMoney() {
+  fundsShowMoney.value = !fundsShowMoney.value
   fundsSearch()
 }
 function onFundsPage(e) { fundsPage.value = e.page; loadFunds() }
@@ -1872,6 +1882,10 @@ watch(
                 :label="fundsShowBackend ? '后端收费：显示中' : '后端收费：已隐藏'"
                 :severity="fundsShowBackend ? 'primary' : 'secondary'"
                 @click="toggleFundsBackend" />
+              <Button size="small" outlined
+                :label="fundsShowMoney ? '货币基金：显示中' : '货币基金：已隐藏'"
+                :severity="fundsShowMoney ? 'primary' : 'secondary'"
+                @click="toggleFundsMoney" />
             </div>
             <div class="browse-pv">
               <DataTable :value="funds.funds || []" lazy paginator :rows="50"
