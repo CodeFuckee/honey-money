@@ -69,6 +69,7 @@ WHERE (%s = '' OR code ILIKE %s OR name ILIKE %s)
   AND {delist_clause}
   AND {backend_clause}
   AND {money_clause}
+  AND {qdii_clause}
 ORDER BY code
 LIMIT %s OFFSET %s
 """
@@ -100,6 +101,7 @@ WHERE (%s = '' OR code ILIKE %s OR name ILIKE %s)
   AND {delist_clause}
   AND {backend_clause}
   AND {money_clause}
+  AND {qdii_clause}
 """
 
 _FUND_NAVS_SQL = """
@@ -267,7 +269,8 @@ def fetch_stock_basic(dsn: str) -> dict:
 
 def fetch_fund_list(dsn: str, *, q: str = "", limit: int = 50,
                     offset: int = 0, delisted: str = "",
-                    show_backend: str = "", show_money: str = "") -> dict:
+                    show_backend: str = "", show_money: str = "",
+                    show_qdii: str = "") -> dict:
     """基金列表 + 每只净值摘要（最新单位净值/日增长率/净值条数/区间），
     code/name 模糊搜索。两段式同 fetch_stock_list（见其 docstring 的
     深分页性能教训）。
@@ -278,6 +281,8 @@ def fetch_fund_list(dsn: str, *, q: str = "", limit: int = 50,
     名称固定带"(后端)"标注（全集 190 只，源上普遍无独立净值数据）。
     show_money 非 "1"/"true"（默认）隐藏货币基金（fund_type 含"货币"——
     摊余成本法货基净值恒为 1、无单位净值走势，列表常驻意义小）。
+    show_qdii 非 "1"/"true"（默认）隐藏 QDII 基金（fund_type 含"QDII"，
+    净值披露 T+1/T+2 滞后）。
     谓词用 position() 而非 LIKE '%..%'：psycopg3 会对带参 SQL 里的字面量
     % 做 %-格式化，中文首字节撞上直接 UnicodeDecodeError（真库实测）
     ——内联片段禁用裸 %，与全表名教训同源；COALESCE 使 NULL 类型
@@ -292,14 +297,18 @@ def fetch_fund_list(dsn: str, *, q: str = "", limit: int = 50,
                       else "position('后端' in fund_basic.name) = 0")
     money_clause = ("true" if show_money in ("1", "true")
                     else "COALESCE(position('货币' in fund_basic.fund_type), 0) = 0")
+    qdii_clause = ("true" if show_qdii in ("1", "true")
+                   else "COALESCE(position('QDII' in fund_basic.fund_type), 0) = 0")
     sql_ids = (_FUND_LIST_IDS_SQL
                .replace("{delist_clause}", delist_clause)
                .replace("{backend_clause}", backend_clause)
-               .replace("{money_clause}", money_clause))
+               .replace("{money_clause}", money_clause)
+               .replace("{qdii_clause}", qdii_clause))
     count_sql = (_FUND_COUNT_SQL
                  .replace("{delist_clause}", delist_clause)
                  .replace("{backend_clause}", backend_clause)
-                 .replace("{money_clause}", money_clause))
+                 .replace("{money_clause}", money_clause)
+                 .replace("{qdii_clause}", qdii_clause))
 
     def run():
         with psycopg.connect(dsn, connect_timeout=3) as conn:

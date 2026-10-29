@@ -71,6 +71,7 @@ function buildQuery() {
     if (fundsDelisted.value) q.set('delisted', fundsDelisted.value)
     if (fundsShowBackend.value) q.set('backend', '1')
     if (fundsShowMoney.value) q.set('money', '1')
+    if (fundsShowQdii.value) q.set('qdii', '1')
   }
   return q
 }
@@ -155,12 +156,13 @@ function applyUrl() {
   // 基金列表
   if (NAV_BY_PATH[u.pathname] === 'funds' &&
       (q.get('q') != null || q.get('page') || q.get('delisted')
-       || q.get('backend') || q.get('money'))) {
+       || q.get('backend') || q.get('money') || q.get('qdii'))) {
     fundsQuery.value = q.get('q') ?? ''
     fundsPage.value = +q.get('page') || 0
     fundsDelisted.value = q.get('delisted') ?? ''
     fundsShowBackend.value = q.get('backend') === '1'
     fundsShowMoney.value = q.get('money') === '1'
+    fundsShowQdii.value = q.get('qdii') === '1'
     loadFunds()
   }
 }
@@ -288,6 +290,8 @@ const fundsShowBackend = ref(false)
 // 货币基金显示开关：默认隐藏（摊余成本法货基净值恒 1、无单位净值走势，
 // fund_type 含"货币"），按钮打开后显示
 const fundsShowMoney = ref(false)
+// QDII 显示开关：默认隐藏（fund_type 含"QDII"，净值披露 T+1/T+2 滞后）
+const fundsShowQdii = ref(false)
 const fundsLoading = ref(false)
 const FUNDS_PAGE_SIZE = 50
 const fundsTotalPages = computed(() =>
@@ -301,7 +305,8 @@ async function loadFunds() {
     const dl = fundsDelisted.value ? `&delisted=${fundsDelisted.value}` : ''
     const be = fundsShowBackend.value ? '&show_backend=1' : ''
     const mn = fundsShowMoney.value ? '&show_money=1' : ''
-    const r = await fetch(`/api/funds?q=${q}&limit=${FUNDS_PAGE_SIZE}&offset=${off}${dl}${be}${mn}`)
+    const qd = fundsShowQdii.value ? '&show_qdii=1' : ''
+    const r = await fetch(`/api/funds?q=${q}&limit=${FUNDS_PAGE_SIZE}&offset=${off}${dl}${be}${mn}${qd}`)
     funds.value = await r.json()
   } catch (e) {
     funds.value = { status: 'down', total: 0, funds: [] }
@@ -316,6 +321,10 @@ function toggleFundsBackend() {
 }
 function toggleFundsMoney() {
   fundsShowMoney.value = !fundsShowMoney.value
+  fundsSearch()
+}
+function toggleFundsQdii() {
+  fundsShowQdii.value = !fundsShowQdii.value
   fundsSearch()
 }
 function onFundsPage(e) { fundsPage.value = e.page; loadFunds() }
@@ -1889,6 +1898,12 @@ watch(
                 title="货币基金（净值恒 1、无单位净值走势，默认隐藏）"
                 @click="toggleFundsMoney">
                 <span class="chip-dot"></span>货币基金
+              </button>
+              <button class="filter-chip" :class="{ active: fundsShowQdii }"
+                type="button" :aria-pressed="fundsShowQdii"
+                title="QDII 基金（净值披露滞后 1~2 日，默认隐藏）"
+                @click="toggleFundsQdii">
+                <span class="chip-dot"></span>QDII
               </button>
             </div>
             <div class="browse-pv">
