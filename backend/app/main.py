@@ -19,6 +19,7 @@ from fastapi import FastAPI
 
 from . import config
 from . import backtest_full
+from . import dca_store
 from . import em_cookie
 from .backtest_api import register_backtest_routes
 from .backtest_full_api import register_full_backtest_routes
@@ -26,6 +27,7 @@ from .browse import fetch_fund_list, fetch_fund_navs, fetch_stock_bars, fetch_st
 from .crawler.fund_store import FundStore
 from .crawler.store import Store
 from .crawl_stats import fetch_crawl_stats
+from .dca_api import register_fund_dca_routes
 from .infra import check_postgres, check_proxy_pool
 from .scheduler import PgAdvisoryLock, TaskScheduler, build_crawl_executor
 from .task_store import TaskStore
@@ -52,7 +54,8 @@ def create_app(*, scheduler: TaskScheduler | None = None,
         for name, init in (("基础表", Store().init_schema),
                            ("任务表", task_store.init_schema),
                            ("基金表", FundStore().init_schema),
-                           ("全量回测表", backtest_full.ensure_schema)):
+                           ("全量回测表", backtest_full.ensure_schema),
+                           ("定投回测表", dca_store.ensure_schema)):
             try:
                 with connect(config.DATABASE_URL) as conn:
                     init(conn)
@@ -193,6 +196,7 @@ def create_app(*, scheduler: TaskScheduler | None = None,
                          connect=connect)
     register_backtest_routes(app)
     register_full_backtest_routes(app)
+    register_fund_dca_routes(app)
 
     return app
 

@@ -22,13 +22,20 @@ backend/            Python 后端（FastAPI）
   app/adjust.py       复权因子（懒加载入库；后/前复权合成；降级不复权）
   app/backtest/       vectorbt 回测引擎（信号/指标纯 pandas，六大经典策略）
   app/backtest_api.py 回测 API（策略/区间/撮合模式/成本，降级 200 约定）
+  app/dca_store.py    定投止盈回测快照存储（fund_dca_result / fund_dca_meta 两表；
+                      python -m app.dca_store <csv> 导入 scripts 离线回测产物，幂等）
+  app/dca_api.py      /api/funds/dca 回测排行 API（搜索/在市过滤/排序白名单/
+                      分页 + 在市全集分位统计 + 口径 meta，降级 200 约定）
   tests/              离线 pytest 用例（API 骨架 + 爬虫 + 任务调度）
 frontend/           Vue3 + Vite 前端
   src/App.vue         服务仪表盘（Carbon 风格）：四状态（加载骨架/空态插画/
                       错误横幅/降级占位）+ 数据·任务·回测·教学页 +
                       数据源子页（新浪/东财来源筛选变体）+ 基金净值子页
                       （列表含类型/最新单位净值/日增长率/净值条数/区间，
-                      点行进净值详情：单位+累计净值双线走势 + 分页明细）；
+                      点行进净值详情：单位+累计净值双线走势 + 分页明细）+
+                      定投止盈回测子页（全市场规模 ≥1 亿基金「月定投+20%
+                      止盈」离线回测排行：7 张统计卡 + 服务端排序表格，
+                      搜索/在市过滤/分页/排序同步 URL；数据链路见 scripts/）；
                       「任务」页管理每日爬虫任务（启停/手动触发/实时进度/
                       历史/上次失败原因展示）；
                       数据页点行进个股详情（ECharts K线近250根 + 全字段
@@ -53,6 +60,12 @@ docker-compose.yml  五服务编排（frontend/backend/postgres/redis/proxy_pool
 .gitlab-ci.yml      main 流水线：backend-test（pytest 全绿才可部署）
 .env.example        环境变量模板（复制为 .env，改密码/端口）
 docs/               调研文档（A 股日线数据源实测等）
+scripts/            离线研究/数据管道脚本（不入 CI）：fund_scale_fetch*.py
+                    （东财规模双通道 gmbd/pingzhongdata）/ fund_nav_backfill.py
+                    （短历史净值回补）/ fund_full_sync_missing.py（fund_basic
+                    全集差集同步——ETF 等）/ fund_dca_backtest.py（定投+止盈
+                    全市场回测 → scripts/data/*.csv，gitignore，经 app.dca_store
+                    导入后页面可见）
 ```
 
 ## MCP server（agent 接入回测与行情）
@@ -163,6 +176,10 @@ docker exec honey-money-backend-1 python -m app.crawler --source fund       # �
                                                                             #  单请求全史 upsert 幂等，落 fund_nav 表）
 docker exec honey-money-backend-1 python -m app.crawler --source fund --mode incremental  # 基金快照增量
                                                                             #  （当日净值列表一次拉全市场，约 5 分钟）
+
+# 定投止盈回测：重跑回测并刷新「定投止盈回测」页数据（本机开发环境，非容器）
+#   .venv/bin/python scripts/fund_dca_backtest.py                                 # 全市场回测 → scripts/data/fund_dca_backtest.csv
+#   cd backend && ../.venv/bin/python -m app.dca_store ../scripts/data/fund_dca_backtest.csv   # 导入快照（幂等，秒级）
 
 # 常用参数
 #   --source sina|eastmoney|delisted|fund  默认 sina（delisted/fund 见上）
