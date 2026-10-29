@@ -193,3 +193,29 @@ class TestFundDelistedFilter:
                      has_text="仅退市").click()
         page.wait_for_timeout(500)
         assert any("delisted=true" in u for u in calls), calls
+
+
+class TestFundBackendToggle:
+    def test_backend_toggle_sends_param(self, servers, page):
+        """E2E-314：后端收费份额默认隐藏（请求无 show_backend），按钮打开
+        → show_backend=1；再点关闭 → 参数消失。"""
+        _, frontend_port = servers
+        calls = []
+        page.route("**/api/funds**", lambda route: (
+            calls.append(route.request.url),
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps(FUNDS_BODY))) and None)
+        page.goto(f"http://127.0.0.1:{frontend_port}/")
+        page.get_by_role("button", name="基金净值").click()
+        expect(page.get_by_role("heading", name="基金净值")).to_be_visible()
+        assert calls and all("show_backend" not in u for u in calls)
+
+        btn = page.get_by_role("button", name="后端收费：已隐藏")
+        btn.click()
+        page.wait_for_timeout(500)
+        assert any("show_backend=1" in u for u in calls), calls
+        expect(page.get_by_role("button", name="后端收费：显示中")).to_be_visible()
+
+        page.get_by_role("button", name="后端收费：显示中").click()
+        page.wait_for_timeout(500)
+        assert calls[-1].count("show_backend") == 0, calls[-1]

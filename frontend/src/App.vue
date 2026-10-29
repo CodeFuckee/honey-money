@@ -69,6 +69,7 @@ function buildQuery() {
     if (fundsQuery.value) q.set('q', fundsQuery.value)
     if (fundsPage.value) q.set('page', fundsPage.value)
     if (fundsDelisted.value) q.set('delisted', fundsDelisted.value)
+    if (fundsShowBackend.value) q.set('backend', '1')
   }
   return q
 }
@@ -152,10 +153,12 @@ function applyUrl() {
   }
   // 基金列表
   if (NAV_BY_PATH[u.pathname] === 'funds' &&
-      (q.get('q') != null || q.get('page') || q.get('delisted'))) {
+      (q.get('q') != null || q.get('page') || q.get('delisted')
+       || q.get('backend'))) {
     fundsQuery.value = q.get('q') ?? ''
     fundsPage.value = +q.get('page') || 0
     fundsDelisted.value = q.get('delisted') ?? ''
+    fundsShowBackend.value = q.get('backend') === '1'
     loadFunds()
   }
 }
@@ -277,6 +280,9 @@ const fundsPage = ref(0)                  // 0 起
 // 退市过滤：'' 全部 / 'false' 仅在市 / 'true' 仅退市（fund_basic.delisted，
 // 爬虫按天天基金当前净值列表与全集差集标记——差集=清盘/终止/不再披露）
 const fundsDelisted = ref('')
+// 后端收费份额显示开关：默认隐藏（东财此类份额名称带"(后端)"、源上普遍
+// 无独立净值数据，列表常驻意义小），按钮打开后全量显示
+const fundsShowBackend = ref(false)
 const fundsLoading = ref(false)
 const FUNDS_PAGE_SIZE = 50
 const fundsTotalPages = computed(() =>
@@ -288,7 +294,8 @@ async function loadFunds() {
     const q = encodeURIComponent(fundsQuery.value.trim())
     const off = fundsPage.value * FUNDS_PAGE_SIZE
     const dl = fundsDelisted.value ? `&delisted=${fundsDelisted.value}` : ''
-    const r = await fetch(`/api/funds?q=${q}&limit=${FUNDS_PAGE_SIZE}&offset=${off}${dl}`)
+    const be = fundsShowBackend.value ? '&show_backend=1' : ''
+    const r = await fetch(`/api/funds?q=${q}&limit=${FUNDS_PAGE_SIZE}&offset=${off}${dl}${be}`)
     funds.value = await r.json()
   } catch (e) {
     funds.value = { status: 'down', total: 0, funds: [] }
@@ -297,6 +304,10 @@ async function loadFunds() {
   }
 }
 function fundsSearch() { fundsPage.value = 0; loadFunds() }
+function toggleFundsBackend() {
+  fundsShowBackend.value = !fundsShowBackend.value
+  fundsSearch()
+}
 function onFundsPage(e) { fundsPage.value = e.page; loadFunds() }
 
 // 基金净值详情（对齐个股详情形态：单位+累计净值双线走势图 + 分页明细表）
@@ -1857,6 +1868,10 @@ watch(
                 optionLabel="label" optionValue="value" size="small"
                 class="delisted-select" aria-label="按清盘/退市状态过滤"
                 @change="fundsSearch" />
+              <Button size="small" outlined
+                :label="fundsShowBackend ? '后端收费：显示中' : '后端收费：已隐藏'"
+                :severity="fundsShowBackend ? 'primary' : 'secondary'"
+                @click="toggleFundsBackend" />
             </div>
             <div class="browse-pv">
               <DataTable :value="funds.funds || []" lazy paginator :rows="50"

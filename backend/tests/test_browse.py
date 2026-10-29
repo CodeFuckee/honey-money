@@ -575,3 +575,53 @@ class TestFundListDelistedFilter:
     def test_invalid_value_treated_as_all(self, monkeypatch):
         _, conn = self._fetch(monkeypatch, "yes")
         assert "delisted = " not in conn.executed[0][0]
+
+
+class TestFundBackendFilter:
+    """基金列表后端收费份额过滤：默认隐藏（名称含"后端"），show_backend=1 显示。"""
+
+    def test_backend_hidden_by_default(self, monkeypatch):
+        import app.browse as browse_mod
+        conn = QueueConn(
+            fetchall_queue=[[(TestFundListDelistedFilter.ROW[0],
+                              TestFundListDelistedFilter.ROW[1])],
+                            [TestFundListDelistedFilter.ROW]],
+            fetchone_queue=[(1,)])
+        monkeypatch.setattr(browse_mod.psycopg, "connect",
+                            lambda *a, **k: conn)
+        body = browse_mod.fetch_fund_list("postgresql://fake")
+        ids_sql = conn.executed[0][0]
+        cnt_sql = conn.executed[2][0]
+        assert "position('后端' in fund_basic.name) = 0" in ids_sql
+        assert "position('后端' in fund_basic.name) = 0" in cnt_sql
+        assert body["status"] == "up"
+
+    def test_show_backend_removes_clause(self, monkeypatch):
+        import app.browse as browse_mod
+        conn = QueueConn(
+            fetchall_queue=[[(TestFundListDelistedFilter.ROW[0],
+                              TestFundListDelistedFilter.ROW[1])],
+                            [TestFundListDelistedFilter.ROW]],
+            fetchone_queue=[(1,)])
+        monkeypatch.setattr(browse_mod.psycopg, "connect",
+                            lambda *a, **k: conn)
+        browse_mod.fetch_fund_list("postgresql://fake", show_backend="1")
+        assert "position('后端'" not in conn.executed[0][0]
+        assert "position('后端'" not in conn.executed[2][0]
+        assert "NOT LIKE" not in conn.executed[0][0]  # 内联片段禁裸 %（psycopg3 格式化坑）
+
+    def test_endpoint_passes_show_backend(self, client, monkeypatch):
+        import app.main as main_mod
+        captured = {}
+
+        def fake_funds(dsn, *, q="", limit=50, offset=0, delisted="",
+                       show_backend=""):
+            captured["show_backend"] = show_backend
+            return {"status": "up", "total": 0, "limit": limit,
+                    "offset": offset, "funds": []}
+
+        monkeypatch.setattr(main_mod, "fetch_fund_list", fake_funds)
+        client.get("/api/funds", params={"show_backend": "1"})
+        assert captured["show_backend"] == "1"
+        client.get("/api/funds")
+        assert captured["show_backend"] == ""
