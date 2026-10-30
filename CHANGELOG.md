@@ -13,6 +13,22 @@
   同款同样中招——补 placeholder）。
 
 ### Added
+- **回测页三维化：全市场宇宙 + 年限/规模筛选 + 可旋转三维散点**（定投止盈
+  回测页第二轮演进）。① 宇宙扩到全市场：回测脚本与导入器支持
+  `--min-scale-yi` / `--min-age-years` 门槛（快照默认全市场 26,484 只，
+  不再写死 ≥1 亿）；② 页面筛选参数化：「运作年限 >N 年」「规模 >N 亿」
+  整数/小数输入框（0 或留空=全部，400ms 防抖即时生效，URL 同步），
+  API 对应 `min_age`/`min_scale`（排序白名单同款防注入，统计卡跟随筛选）；
+  ③ 新增「年限 × 规模 × 年化」**可旋转三维散点**：每只在市基金一个点落在
+  自身坐标（规模对数轴），原生 canvas 自绘引擎（拖拽旋转/滚轮缩放/悬停
+  基金明细，25k 点逐帧重投影 ~5ms）——不用 echarts-gl（与 echarts 6
+  tree-shaking 导入不兼容）；④ 年限段 × 规模段分箱统计矩阵（每基金按自身
+  坐标只计入唯一格子）+ 由分箱自动生成的结论卡。踩坑记录：echarts custom
+  series 缺 `coordinateSystem` 声明会**静默空渲染**（painter 无层、无报错）；
+  CustomChart/GraphicComponent 未进 `echarts.use` 同症状；PrimeVue
+  InputNumber 清空后回车不发 change（对输入值防抖 watch 兜底）。
+  backend +9 至 464 全绿，E2E +5 至 76 全绿；生产库已导入全市场快照。
+
 - **定投止盈回测页（/data/fund-dca）**：全市场资产规模 ≥1 亿公募基金的
   「月定投 + 收益 ≥20% 全仓止盈」离线回测结果展示。链路：根目录 scripts/
   fund_dca_backtest.py 全市场逐基金模拟（复权口径=东财日增长率链乘，实测

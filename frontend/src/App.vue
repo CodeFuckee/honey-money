@@ -3,17 +3,19 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import DataTable from 'primevue/datatable'
 import Column from 'primevue/column'
 import InputText from 'primevue/inputtext'
+import InputNumber from 'primevue/inputnumber'
 import Select from 'primevue/select'
 import Button from 'primevue/button'
 import Paginator from 'primevue/paginator'
 import AutoComplete from 'primevue/autocomplete'
 import * as echarts from 'echarts/core'
 import { CandlestickChart, BarChart, LineChart } from 'echarts/charts'
+import { mountDca3DScatter } from './dca3d'
 import { GridComponent, TooltipComponent, DataZoomComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 
-echarts.use([CandlestickChart, BarChart, LineChart, GridComponent, TooltipComponent,
-  DataZoomComponent, CanvasRenderer])
+echarts.use([CandlestickChart, BarChart, LineChart, GridComponent,
+  TooltipComponent, DataZoomComponent, CanvasRenderer])
 
 // ===== 数据层（沿用原仪表盘逻辑：三接口并发 + 优雅降级）=====
 const backend = ref({ status: 'checking' })   // 后端进程本身
@@ -77,6 +79,8 @@ function buildQuery() {
     if (dcaQuery.value) q.set('q', dcaQuery.value)
     if (dcaPage.value) q.set('page', dcaPage.value)
     if (dcaAlive.value !== 'true') q.set('alive', dcaAlive.value)
+    if (dcaAge.value) q.set('age', dcaAge.value)
+    if (dcaScale.value) q.set('scale', dcaScale.value)
     if (dcaSort.value !== 'w10_xirr') q.set('sort', dcaSort.value)
     if (dcaOrder.value !== 'desc') q.set('order', dcaOrder.value)
   }
@@ -175,10 +179,12 @@ function applyUrl() {
   // 定投止盈回测排行
   if (NAV_BY_PATH[u.pathname] === 'fundDca' &&
       (q.get('q') != null || q.get('page') || q.get('alive') != null
-       || q.get('sort') || q.get('order'))) {
+       || q.get('age') || q.get('scale') || q.get('sort') || q.get('order'))) {
     dcaQuery.value = q.get('q') ?? ''
     dcaPage.value = +q.get('page') || 0
     if (q.get('alive') != null) dcaAlive.value = q.get('alive')
+    if (q.get('age') != null && /^\d+$/.test(q.get('age'))) dcaAge.value = +q.get('age')
+    if (q.get('scale') != null && /^\d+(\.\d+)?$/.test(q.get('scale'))) dcaScale.value = +q.get('scale')
     if (DCA_SORTABLE.includes(q.get('sort'))) dcaSort.value = q.get('sort')
     if (['asc', 'desc'].includes(q.get('order'))) dcaOrder.value = q.get('order')
     loadDca()
@@ -365,13 +371,20 @@ const DCA_ALIVE_FILTERS = [
   { label: '仅清盘/退市', value: 'false' },
   { label: '全部', value: '' },
 ]
+// 运作年限筛选：整数 N → 只看运作 >N 年的基金（首条净值距数据集最新净值日）；
+// 0/留空 = 全部
+const dcaAge = ref(null)
+// 规模筛选：N（亿）→ 只看规模 >N 亿的基金；0/留空 = 全部（含无规模披露）
+const dcaScale = ref(null)
 
 async function loadDca() {
   dcaLoading.value = true
   try {
     const q = encodeURIComponent(dcaQuery.value.trim())
     const off = dcaPage.value * DCA_PAGE_SIZE
-    const r = await fetch(`/api/funds/dca?q=${q}&alive=${dcaAlive.value}`
+    const age = dcaAge.value ? `&min_age=${dcaAge.value}` : ''
+    const sc = dcaScale.value ? `&min_scale=${dcaScale.value}` : ''
+    const r = await fetch(`/api/funds/dca?q=${q}&alive=${dcaAlive.value}${age}${sc}`
       + `&sort=${dcaSort.value}&order=${dcaOrder.value}`
       + `&limit=${DCA_PAGE_SIZE}&offset=${off}`)
     dca.value = await r.json()
@@ -383,6 +396,13 @@ async function loadDca() {
   }
 }
 function dcaSearch() { dcaPage.value = 0; loadDca() }
+// 年限/规模输入即时生效：model 随键入更新，但 InputNumber 在值未再变时回车不发
+// change 事件（清空后回车失灵实测）——对两个输入防抖 400ms 直接触发搜索
+let _dcaFilterTimer = null
+watch([dcaAge, dcaScale], () => {
+  clearTimeout(_dcaFilterTimer)
+  _dcaFilterTimer = setTimeout(() => dcaSearch(), 400)
+})
 function onDcaPage(e) { dcaPage.value = e.page; loadDca() }
 function onDcaSort(e) {
   // PrimeVue lazy 排序：{ sortField, sortOrder(1升/-1降) } → 服务端排序参数
@@ -394,6 +414,64 @@ function onDcaSort(e) {
 const pct1 = v => v == null ? '—' : (v >= 0 ? '+' : '') + (v * 100).toFixed(1) + '%'
 const pctp = v => v == null ? '—' : (v * 100).toFixed(1) + '%'
 const pct0 = v => v == null ? '—' : (v * 100).toFixed(0) + '%'
+
+// ===== 年限 × 规模 三维散点（/api/funds/dca/scatter：每基金一点 + 分箱统计） =====
+const dcaScatter = ref(null)
+const dcaScatterChartEl = ref(null)
+let dcaScatterChart = null
+
+async function loadDcaScatter() {
+  try {
+    const r = await fetch('/api/funds/dca/scatter')
+    dcaScatter.value = await r.json()
+  } catch (e) {
+    dcaScatter.value = { status: 'down', detail: String(e), points: [],
+                         matrix: [] }
+  }
+  await nextTick()
+  renderDcaScatterChart()
+}
+
+function renderDcaScatterChart() {
+  if (dcaScatterChart) { dcaScatterChart.destroy(); dcaScatterChart = null }
+  const sc = dcaScatter.value
+  if (!dcaScatterChartEl.value || !sc || sc.status !== 'up' || !sc.points?.length) return
+  // 原生 canvas 引擎：拖拽旋转 / 滚轮缩放 / 悬停明细（见 dca3d.js）
+  dcaScatterChart = mountDca3DScatter(dcaScatterChartEl.value, sc)
+}
+
+// 数据与图表容器谁先就绪都能画：fetch 瞬间返回时可能早于分支挂载
+// （chartEl 还没绑定）——watch 兜底，避免竞态下静默丢图
+watch(dcaScatterChartEl, el => {
+  if (el && dcaScatter.value?.status === 'up' && dcaScatter.value?.points?.length)
+    renderDcaScatterChart()
+})
+
+function disposeDcaScatterChart() {
+  if (dcaScatterChart) { dcaScatterChart.destroy(); dcaScatterChart = null }
+}
+
+// 结论（数据驱动，分箱口径=每基金只计一次）：年限/规模两维的边际均值 + 最优格子
+const dcaScatterConclusion = computed(() => {
+  const sc = dcaScatter.value
+  if (!sc || sc.status !== 'up' || !sc.matrix?.length) return null
+  const m = sc.matrix                       // matrix[ageIdx][scaleIdx]
+  const ageMean = m.map(row => {
+    const xs = row.flatMap(c => Array(c.count).fill(c.mean_xirr))
+    return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null
+  })
+  const scaleMean = sc.scale_bands.map((_, si) => {
+    const xs = m.flatMap(row => Array(row[si].count).fill(row[si].mean_xirr))
+    return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null
+  })
+  let best = null
+  for (let ai = 0; ai < m.length; ai++)
+    for (let si = 0; si < m[ai].length; si++)
+      if (m[ai][si].count >= 300 && m[ai][si].mean_xirr != null &&
+          (!best || m[ai][si].mean_xirr > best.cell.mean_xirr))
+        best = { cell: m[ai][si], ageIdx: ai, scaleIdx: si }
+  return { ageMean, scaleMean, best }
+})
 
 // 基金净值详情（对齐个股详情形态：单位+累计净值双线走势图 + 分页明细表）
 const fund = ref(null)                    // { code, name, fund_type }
@@ -490,12 +568,13 @@ const _onFundResize = () => fundChartInstance && fundChartInstance.resize()
 
 watch(activeNav, (nav, prev) => {
   if (nav === 'funds') loadFunds()
-  if (nav === 'fundDca') loadDca()
+  if (nav === 'fundDca') { loadDca(); loadDcaScatter() }
   if (nav === 'fund' && fund.value) {
     loadFundChart()
     loadFundDetail()
   }
   if (prev === 'fund' && nav !== 'fund') disposeFundChart()
+  if (prev === 'fundDca' && nav !== 'fundDca') disposeDcaScatterChart()
 })
 
 // ===== 东财 Cookie：状态 / 粘贴保存 / 验证 =====
@@ -1620,7 +1699,7 @@ watch(
   [activeNav, learnStrat, learnMode, learnCodePick, learnRange, learnExec,
    learnCommission, learnSellTax, learnParams, fullFilterSt, fullMinBars,
    fullAdjust, fullIncludeDelisted, stock, stockAdjust, browseQuery,
-   browsePage, dcaQuery, dcaPage, dcaAlive, dcaSort, dcaOrder],
+   browsePage, dcaQuery, dcaPage, dcaAlive, dcaAge, dcaSort, dcaOrder],
   () => scheduleSync(), { deep: true })
 </script>
 
@@ -2023,7 +2102,7 @@ watch(
             <div class="toolbar">
               <div>
                 <h2 class="h1">定投止盈回测</h2>
-                <p class="sub">全市场资产规模 ≥1 亿公募基金 · 月定投 {{ dca.meta?.params?.amount ?? 1000 }} 元 · 收益 ≥{{ (((dca.meta?.params?.take_profit) ?? 0.2) * 100).toFixed(0) }}% 全仓止盈重来 · 年化=XIRR 资金加权<template v-if="dca.meta?.params?.window_end"> · 数据截至 {{ dca.meta.params.window_end }}</template></p>
+                <p class="sub">{{ dca.meta?.params?.scale_min_yi ? `资产规模 ≥${dca.meta.params.scale_min_yi} 亿公募基金` : '全市场公募基金（不限规模）' }} · 月定投 {{ dca.meta?.params?.amount ?? 1000 }} 元 · 收益 ≥{{ (((dca.meta?.params?.take_profit) ?? 0.2) * 100).toFixed(0) }}% 全仓止盈重来<template v-if="dca.meta?.params?.min_age_years"> · 运作 ≥{{ dca.meta.params.min_age_years }} 年</template> · 年化=XIRR 资金加权<template v-if="dca.meta?.params?.window_end"> · 数据截至 {{ dca.meta.params.window_end }}</template></p>
               </div>
             </div>
             <div class="learn-metrics" v-if="dca.stats">
@@ -2044,6 +2123,20 @@ watch(
                 optionLabel="label" optionValue="value" size="small"
                 placeholder="仅在市" class="delisted-select"
                 aria-label="按在市状态过滤" @change="dcaSearch" />
+              <span class="age-wrap" title="只看运作超过 N 年的基金；0 或留空 = 全部">
+                <InputNumber v-model="dcaAge" :min="0" :max="99"
+                  :maxFractionDigits="0" :useGrouping="false" size="small"
+                  inputClass="age-input" inputId="dca-age"
+                  placeholder="年限" aria-label="按运作年限过滤，大于该年数" />
+                <span class="age-suffix">年以上</span>
+              </span>
+              <span class="age-wrap" title="只看规模超过 N 亿的基金；0 或留空 = 全部（含无规模披露）">
+                <InputNumber v-model="dcaScale" :min="0" :max="99999"
+                  :maxFractionDigits="2" :useGrouping="false" size="small"
+                  inputClass="age-input" inputId="dca-scale"
+                  placeholder="规模" aria-label="按资产规模过滤，大于该数值（亿元）" />
+                <span class="age-suffix">亿以上</span>
+              </span>
             </div>
             <div class="browse-pv">
               <DataTable :value="dca.rows || []" lazy paginator :rows="DCA_PAGE_SIZE"
@@ -2065,6 +2158,9 @@ watch(
                 <Column field="name" header="名称" />
                 <Column field="fund_type" header="类型" style="width: 130px">
                   <template #body="{ data }">{{ data.fund_type || '—' }}</template>
+                </Column>
+                <Column field="age_years" sortField="full_start" header="运作年限" style="width: 90px" sortable bodyClass="num-col">
+                  <template #body="{ data }">{{ data.age_years != null ? data.age_years + ' 年' : '—' }}</template>
                 </Column>
                 <Column field="scale_yi" header="规模(亿)" style="width: 95px" sortable bodyClass="num-col">
                   <template #body="{ data }">{{ data.scale_yi != null ? data.scale_yi : '—' }}</template>
@@ -2101,6 +2197,50 @@ watch(
               </DataTable>
             </div>
             <p class="note">口径：每月首个净值日投入固定金额，任一净值日持仓收益达止盈线即全仓赎回并重开新一轮（分红再投、忽略申赎费用）；统计卡为在市全集分位，不随搜索变化 · 新基金（回测窗口 &lt;90 天）年化留空 · 数据为离线回测快照，重跑 scripts/fund_dca_backtest.py 并经 app.dca_store 导入后刷新 · 点击「基金净值」可查单只净值走势</p>
+
+            <!-- ===== 年限 × 规模 三维散点（每基金一点） + 分箱统计 ===== -->
+            <div class="card" style="margin-top: 16px; padding: 14px 16px 18px">
+              <div class="toolbar" style="margin: 0 0 6px">
+                <div>
+                  <h2 class="h1" style="font-size: 18px">年限 × 规模 × 年化 三维散点</h2>
+                  <p class="sub">每只在市基金一个点，落在自己的（运作年限，规模，年化）坐标上，不做任何分组重复计数 · 规模为对数轴 · 悬停点查看基金明细 · 统计截至 {{ dcaScatter?.ref_date || '—' }}</p>
+                </div>
+              </div>
+              <div v-if="dcaScatter?.status === 'down'" class="browse-empty">
+                散点分析不可用：{{ dcaScatter.detail || '数据库连接失败' }}
+              </div>
+              <template v-else-if="dcaScatter?.points?.length">
+                <div ref="dcaScatterChartEl" class="dca-scatter-chart" style="width: 100%; height: 620px"></div>
+
+                <div class="dca-conclusion" v-if="dcaScatterConclusion" style="margin-top: 10px">
+                  <p><b>结论（在市 {{ dcaScatter.points.length }} 只，每基金只计一次）：</b></p>
+                  <p>① 年限维度：运作 &lt;1 年的平均年化 {{ pctp(dcaScatterConclusion.ageMean[0]) }}，之后随年限整体抬升，≥10 年达 {{ pctp(dcaScatterConclusion.ageMean[4]) }}——年限越长、定投止盈的年化越稳越高。</p>
+                  <p>② 规模维度：规模的影响弱于年限——各规模段平均年化 {{ dcaScatter.scale_bands.map((_, i) => pctp(dcaScatterConclusion.scaleMean[i])).join(' → ') }}（&lt;1 亿 → ≥100 亿），差距不大且非单调。</p>
+                  <p v-if="dcaScatterConclusion.best">③ 组合最优格（样本 ≥300）：{{ dcaScatter.age_bands[dcaScatterConclusion.best.ageIdx] }} × {{ dcaScatter.scale_bands[dcaScatterConclusion.best.scaleIdx] }}——平均年化 {{ pctp(dcaScatterConclusion.best.cell.mean_xirr) }}（{{ dcaScatterConclusion.best.cell.count }} 只，中位 {{ pctp(dcaScatterConclusion.best.cell.median_xirr) }}，年化为正 {{ pct0(dcaScatterConclusion.best.cell.positive_share) }}）。</p>
+                </div>
+
+                <p class="sub" style="margin: 10px 0 6px"><b>年限段 × 规模段 分箱统计</b>（每基金按自身坐标计入唯一格子；格内=基金数 / 平均年化）</p>
+                <table class="dca-matrix">
+                  <tr>
+                    <th>规模 \ 年限</th>
+                    <th v-for="ab in dcaScatter.age_bands" :key="ab">{{ ab }}</th>
+                  </tr>
+                  <tr v-for="(sb, si) in dcaScatter.scale_bands" :key="sb">
+                    <th>{{ sb }}</th>
+                    <td v-for="(ab, ai) in dcaScatter.age_bands" :key="ab"
+                        :class="{ 'dca-matrix-best': dcaScatterConclusion?.best && dcaScatterConclusion.best.ageIdx === ai && dcaScatterConclusion.best.scaleIdx === si }">
+                      <template v-if="dcaScatter.matrix[ai][si].count">
+                        {{ dcaScatter.matrix[ai][si].count }} 只<br/>
+                        <span :class="dcaScatter.matrix[ai][si].mean_xirr >= 0 ? 'chg-up' : 'chg-down'">{{ pctp(dcaScatter.matrix[ai][si].mean_xirr) }}</span>
+                      </template>
+                      <template v-else>—</template>
+                    </td>
+                  </tr>
+                </table>
+                <p class="note" style="margin-top: 8px">口径：在市且年化非空的基金 · 年化为定投+20%止盈的 XIRR · 超出轴范围（年化 &lt;-100% / &gt;300%、年限 &gt;25 年）的点截断在边缘 · 结论由分箱统计自动生成</p>
+              </template>
+              <div v-else class="browse-empty">散点数据加载中…</div>
+            </div>
           </template>
 
           <!-- ===== 个股历史行情详情（数据页行点击进入） ===== -->
@@ -3393,6 +3533,17 @@ body {
    控件挤压竖排溢出——2026-10-29 截图反馈） */
 .funds-search { width: auto; max-width: 100%; flex-wrap: wrap; row-gap: 8px; }
 .funds-search .browse-input { flex: 1 1 200px; min-width: 150px; width: auto; }
+.age-wrap { display: inline-flex; align-items: center; gap: 6px; }
+.age-wrap .age-input { width: 76px; text-align: right; }
+.age-suffix { font-size: 12px; opacity: .72; white-space: nowrap; }
+.dca-conclusion { background: #f4f7fb; border: 1px solid #d0e2ff; border-radius: 8px;
+  padding: 10px 14px; margin: 4px 0 10px; font-size: 13px; line-height: 1.7; }
+.dca-conclusion p { margin: 2px 0; }
+.dca-matrix { border-collapse: collapse; font-size: 12px; }
+.dca-matrix th, .dca-matrix td { border: 1px solid #e0e0e0; padding: 6px 10px;
+  text-align: center; white-space: nowrap; }
+.dca-matrix th { background: #f4f4f4; font-weight: 600; }
+.dca-matrix-best { background: #def1c6; font-weight: 600; }
 .task-actions { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
 .task-actions .btn { font-size: 13px; padding: 6px 14px; }
 .btn-danger { color: var(--dot-down); border-color: var(--dot-down); }

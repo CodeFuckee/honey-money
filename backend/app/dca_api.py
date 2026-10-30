@@ -5,6 +5,8 @@
 而不是错误，接口始终 200。
 """
 
+import datetime as dt
+
 import psycopg
 
 from . import config
@@ -13,10 +15,13 @@ _DCA_LIST_SQL = """
 SELECT code, name, fund_type, alive, scale_yi, scale_date,
        w10_start, w10_end, w10_months, w10_rounds,
        w10_invested, w10_final_value, w10_profit_rate, w10_xirr,
-       full_xirr, full_rounds, full_profit_rate, full_months
+       full_xirr, full_rounds, full_profit_rate, full_months,
+       full_start
 FROM fund_dca_result
 WHERE (%s = '' OR code ILIKE %s OR name ILIKE %s)
   AND {alive_clause}
+  AND {age_clause}
+  AND {scale_clause}
 ORDER BY {sort_col} {order_dir} NULLS LAST, code
 LIMIT %s OFFSET %s
 """
@@ -25,9 +30,12 @@ _DCA_COUNT_SQL = """
 SELECT count(*) FROM fund_dca_result
 WHERE (%s = '' OR code ILIKE %s OR name ILIKE %s)
   AND {alive_clause}
+  AND {age_clause}
+  AND {scale_clause}
 """
 
-# 统计卡口径固定为「在市全集」（不受当前搜索词影响，描述宇宙而非当页）
+# 统计卡口径跟随「在市 + 运作年限」筛选（不跟搜索词——描述筛选后的宇宙，
+# 而非当页）；无年限筛选时与旧口径一致
 _DCA_STATS_SQL = """
 SELECT count(*),
        percentile_cont(0.25) WITHIN GROUP (ORDER BY w10_xirr),
@@ -38,16 +46,20 @@ SELECT count(*),
        avg((w10_rounds > 0)::int)::float
 FROM fund_dca_result
 WHERE alive AND w10_xirr IS NOT NULL
+  AND {age_clause}
+  AND {scale_clause}
 """
 
 _DCA_META_SQL = """
 SELECT generated_at, fund_count, params FROM fund_dca_meta
 """
 
+_DCA_REF_SQL = "SELECT max(full_end) FROM fund_dca_result"
+
 # 排序白名单：前端传列名，只允许这些键进 ORDER BY（防注入）
 _SORTABLE = {
     "w10_xirr", "full_xirr", "w10_profit_rate", "full_profit_rate",
-    "w10_rounds", "full_rounds", "scale_yi", "code",
+    "w10_rounds", "full_rounds", "scale_yi", "code", "full_start",
 }
 
 
@@ -65,11 +77,15 @@ def _safe(fn, default):
 
 def fetch_dca_list(dsn: str, *, q: str = "", alive: str = "true",
                    sort: str = "w10_xirr", order: str = "desc",
+                   min_age: float = 0.0, min_scale: float = 0.0,
                    limit: int = 50, offset: int = 0) -> dict:
-    """回测排行：分页 + 搜索 + 在市过滤 + 服务端排序 + 宇宙统计与口径 meta。
+    """回测排行：分页 + 搜索 + 在市/年限过滤 + 服务端排序 + 宇宙统计与口径 meta。
 
     alive="true"（默认）仅近 45 天有净值的在市基金；"false" 仅清盘/退市；
-    其余值（含空串）全部。sort 非白名单回落 w10_xirr。
+    其余值（含空串）全部。min_age>0 只看运作超过 N 年的基金（严格大于：
+    首条净值 < 参考日 - N*365.25 天，参考日=全表 max(full_end)）；
+    min_scale>0 只看规模超过 N 亿的（scale_yi > N，无规模披露的自动排除）。
+    统计卡同步跟随两个筛选。sort 非白名单回落 w10_xirr。
     """
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
@@ -78,23 +94,44 @@ def fetch_dca_list(dsn: str, *, q: str = "", alive: str = "true",
     order_dir = "ASC" if order.lower() == "asc" else "DESC"
     alive_clause = ("true" if alive not in ("true", "false")
                     else f"alive = {alive.upper()}")
-    sql = (_DCA_LIST_SQL.replace("{alive_clause}", alive_clause)
-           .replace("{sort_col}", sort_col).replace("{order_dir}", order_dir))
-    count_sql = _DCA_COUNT_SQL.replace("{alive_clause}", alive_clause)
 
     def run():
         with psycopg.connect(dsn, connect_timeout=3) as conn:
             with conn.cursor() as cur:
-                cur.execute(sql, (q, like, like, limit, offset))
+                cur.execute(_DCA_REF_SQL)
+                ref = cur.fetchone()[0]
+                age_clause, cutoff = "true", None
+                if min_age and ref:
+                    cutoff = ref - dt.timedelta(days=365.25 * min_age)
+                    age_clause = "full_start < %s"   # 严格大于 N 年
+                scale_clause = "scale_yi > %s" if min_scale else "true"
+                scale_param = min_scale if min_scale else None
+                sql = (_DCA_LIST_SQL.replace("{alive_clause}", alive_clause)
+                       .replace("{age_clause}", age_clause)
+                       .replace("{scale_clause}", scale_clause)
+                       .replace("{sort_col}", sort_col)
+                       .replace("{order_dir}", order_dir))
+                count_sql = (_DCA_COUNT_SQL
+                             .replace("{alive_clause}", alive_clause)
+                             .replace("{age_clause}", age_clause)
+                             .replace("{scale_clause}", scale_clause))
+                stats_sql = (_DCA_STATS_SQL
+                             .replace("{age_clause}", age_clause)
+                             .replace("{scale_clause}", scale_clause))
+                base = ([q, like, like] + ([cutoff] if cutoff else [])
+                        + ([scale_param] if scale_param else []))
+                cur.execute(sql, (*base, limit, offset))
                 cols = ["code", "name", "fund_type", "alive", "scale_yi",
                         "scale_date", "w10_start", "w10_end", "w10_months",
                         "w10_rounds", "w10_invested", "w10_final_value",
                         "w10_profit_rate", "w10_xirr", "full_xirr",
-                        "full_rounds", "full_profit_rate", "full_months"]
+                        "full_rounds", "full_profit_rate", "full_months",
+                        "full_start"]
                 rows = [dict(zip(cols, r)) for r in cur.fetchall()]
-                cur.execute(count_sql, (q, like, like))
+                cur.execute(count_sql, base)
                 total = cur.fetchone()[0]
-                cur.execute(_DCA_STATS_SQL)
+                cur.execute(stats_sql, ([cutoff] if cutoff else [])
+                            + ([scale_param] if scale_param else []))
                 s = cur.fetchone()
                 cur.execute(_DCA_META_SQL)
                 m = cur.fetchone()
@@ -103,6 +140,9 @@ def fetch_dca_list(dsn: str, *, q: str = "", alive: str = "true",
                       "full_profit_rate"):
                 r[k] = round(r[k], 4) if r[k] is not None else None
             r["scale_yi"] = round(r["scale_yi"], 2) if r["scale_yi"] is not None else None
+            r["age_years"] = (round((ref - r["full_start"]).days / 365.25, 1)
+                              if ref and r["full_start"] else None)
+            r.pop("full_start", None)
             for k in ("scale_date", "w10_start", "w10_end"):
                 if r[k]:
                     r[k] = r[k].isoformat()
@@ -125,13 +165,122 @@ def fetch_dca_list(dsn: str, *, q: str = "", alive: str = "true",
 def register_fund_dca_routes(app):
     @app.get("/api/funds/dca")
     def funds_dca(q: str = "", alive: str = "true", sort: str = "w10_xirr",
-                  order: str = "desc", limit: int = 50, offset: int = 0):
+                  order: str = "desc", min_age: float = 0.0,
+                  min_scale: float = 0.0, limit: int = 50, offset: int = 0):
         """定投止盈回测排行（快照数据，重跑回测导入后刷新）。
 
         降级约定同 /api/funds：始终 200；alive="true" 默认仅在市；
-        sort 白名单排序；stats 为在市全集分位（不受搜索影响）。
+        min_age>0 只看运作 >N 年；min_scale>0 只看规模 >N 亿；
+        sort 白名单排序；stats 跟随在市+年限+规模筛选（不随搜索词）。
         """
         return fetch_dca_list(config.DATABASE_URL, q=q,
                               alive=alive.strip().lower(), sort=sort,
-                              order=order.strip().lower(), limit=limit,
-                              offset=offset)
+                              order=order.strip().lower(),
+                              min_age=max(0.0, min_age),
+                              min_scale=max(0.0, min_scale),
+                              limit=limit, offset=offset)
+
+    @app.get("/api/funds/dca/scatter")
+    def funds_dca_scatter():
+        """三维散点：每只在市基金一点 (运作年限, 规模亿, 年化) + 年限段 ×
+        规模段分箱统计（每基金只计入唯一格子）。降级约定同 /api/funds/dca。
+        """
+        return fetch_dca_scatter(config.DATABASE_URL)
+
+
+
+# ===== 三维散点（每基金一点）+ 年限段 × 规模段 分箱统计 =====
+AGE_BANDS = [(0, 1), (1, 3), (3, 5), (5, 10), (10, None)]     # 运作年限段（年）
+SCALE_BANDS = [(0, 1), (1, 10), (10, 100), (100, None)]       # 规模段（亿元）
+
+_SCATTER_ROWS_SQL = """
+SELECT code, name, fund_type, scale_yi, full_start, w10_xirr, w10_rounds
+FROM fund_dca_result
+WHERE alive AND w10_xirr IS NOT NULL AND full_start IS NOT NULL
+  AND scale_yi IS NOT NULL
+"""
+
+
+def _pct(sorted_vals, p):
+    """线性插值分位数（sorted_vals 非空）。"""
+    if not sorted_vals:
+        return None
+    k = (len(sorted_vals) - 1) * p
+    f = int(k)
+    c = min(f + 1, len(sorted_vals) - 1)
+    return sorted_vals[f] + (sorted_vals[c] - sorted_vals[f]) * (k - f)
+
+
+def age_band_label(lo, hi):
+    return f"{lo}-{hi} 年" if hi else f"≥{lo} 年"
+
+
+def scale_band_label(lo, hi):
+    if hi is None:
+        return f"≥{lo} 亿"
+    return f"<{hi} 亿" if lo == 0 else f"{lo}-{hi} 亿"
+
+
+def compute_bands(rows, ref):
+    """rows=[(scale, full_start, xirr, rounds)] → 年限段 × 规模段 分箱矩阵。
+
+    每只基金按 (运作年限, 规模) 落入唯一一格；格统计只数/平均年化/中位/
+    年化为正占比。
+    """
+    matrix = [[{"age_band": age_band_label(lo, hi if hi else None),
+                "scale_band": scale_band_label(slo, shi if shi else None),
+                "count": 0, "xirrs": [], "positive": 0}
+               for (slo, shi) in SCALE_BANDS] for (lo, hi) in AGE_BANDS]
+    for scale, full_start, xirr, rounds in rows:
+        age = (ref - full_start).days / 365.25
+        ai = next((i for i, (lo, hi) in enumerate(AGE_BANDS)
+                   if age >= lo and (hi is None or age < hi)), None)
+        si = next((i for i, (lo, hi) in enumerate(SCALE_BANDS)
+                   if scale >= lo and (hi is None or scale < hi)), None)
+        if ai is None or si is None:
+            continue
+        cell = matrix[ai][si]
+        cell["count"] += 1
+        cell["xirrs"].append(xirr)
+        cell["positive"] += 1 if xirr > 0 else 0
+    for row in matrix:
+        for cell in row:
+            n = cell.pop("count")
+            xs = sorted(cell.pop("xirrs"))
+            cell["count"] = n
+            cell["mean_xirr"] = round(sum(xs) / n, 4) if n else None
+            cell["median_xirr"] = round(_pct(xs, 0.5), 4) if n else None
+            cell["positive_share"] = round(cell.pop("positive") / n, 4) if n else None
+    return {
+        "age_bands": [age_band_label(lo, hi) for lo, hi in AGE_BANDS],
+        "scale_bands": [scale_band_label(lo, hi) for lo, hi in SCALE_BANDS],
+        "matrix": matrix,
+    }
+
+
+def fetch_dca_scatter(dsn: str) -> dict:
+    """三维散点数据：每只在市基金一点 (运作年限, 规模亿, 年化) + 分箱统计。
+
+    点数组 [age, scale, xirr, code, name, fund_type]，规模取对数轴定位
+    由前端处理；降级约定同 /api/funds/dca。
+    """
+    def run():
+        with psycopg.connect(dsn, connect_timeout=3) as conn:
+            with conn.cursor() as cur:
+                cur.execute(_DCA_REF_SQL)
+                ref = cur.fetchone()[0]
+                cur.execute(_SCATTER_ROWS_SQL)
+                rows = cur.fetchall()
+        points = [
+            [round((ref - full_start).days / 365.25, 2), scale, xirr,
+             code, name, fund_type]
+            for code, name, fund_type, scale, full_start, xirr, rounds in rows
+        ]
+        bands = compute_bands(
+            [(scale, full_start, xirr, rounds)
+             for _, _, _, scale, full_start, xirr, rounds in rows], ref)
+        return {"status": "up", "ref_date": ref.isoformat() if ref else None,
+                "points": points, **bands}
+    return _safe(run, {"status": "down", "detail": "pg unreachable",
+                       "points": [],
+                       "age_bands": [], "scale_bands": [], "matrix": []})

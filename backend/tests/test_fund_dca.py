@@ -75,7 +75,7 @@ class FakeCursor:
         return self.conn.fetchall_rows
 
     def fetchone(self):
-        return None
+        return self.conn.fetchone_row
 
 
 class FakeConn:
@@ -98,7 +98,8 @@ class FakeConn:
 
 def _fetch_dca(**kw):
     import app.dca_api as dca_mod
-    conn = FakeConn()
+    one = kw.pop("one", (None,))     # fetchone 桩：参考日/count/stats/meta 各取一次
+    conn = FakeConn(one=one)
 
     def fake_connect(*a, **k):
         return conn
@@ -112,45 +113,93 @@ def _fetch_dca(**kw):
 
 
 class TestDcaSqlShapes:
+    # run() 的执行序：[0]=max(full_end) 参考日，[1]=列表，[2]=count，[3]=stats
     def test_default_sort_and_alive(self):
         """缺省：alive 仅在市谓词 + ORDER BY w10_xirr DESC NULLS LAST。"""
         body, conn = _fetch_dca()
-        sql, params = conn.cursor_obj.executed[0]
+        sql, params = conn.cursor_obj.executed[1]
         assert "ORDER BY w10_xirr DESC NULLS LAST" in sql
-        assert "alive" in sql
+        assert "alive = TRUE" in sql
         assert params[-2:] == (50, 0)
 
     def test_sort_whitelist_rejects_injection(self):
         """sort 非白名单值回落 w10_xirr——非法值不得进入 SQL（防注入）。"""
         body, conn = _fetch_dca(sort="w10_xirr; DROP TABLE fund_dca_result")
-        sql, _ = conn.cursor_obj.executed[0]
+        sql, _ = conn.cursor_obj.executed[1]
         assert "DROP TABLE" not in sql
         assert "ORDER BY w10_xirr DESC" in sql
 
     def test_sort_and_order_mapping(self):
         """sort=full_xirr & order=asc → ORDER BY full_xirr ASC。"""
         body, conn = _fetch_dca(sort="full_xirr", order="asc")
-        sql, _ = conn.cursor_obj.executed[0]
+        sql, _ = conn.cursor_obj.executed[1]
         assert "ORDER BY full_xirr ASC NULLS LAST" in sql
 
     def test_alive_empty_means_no_filter(self):
         """alive=''：全部（含清盘），WHERE 不含 alive 谓词（列名除外）。"""
         body, conn = _fetch_dca(alive="")
-        sql, _ = conn.cursor_obj.executed[0]
+        sql, _ = conn.cursor_obj.executed[1]
         assert "alive = TRUE" not in sql and "alive = FALSE" not in sql
 
     def test_search_params_include_like(self):
         """q 搜索：参数含两侧 % 通配（参数化 LIKE，无内联 %——psycopg3 坑）。"""
         body, conn = _fetch_dca(q="白酒")
-        sql, params = conn.cursor_obj.executed[0]
+        sql, params = conn.cursor_obj.executed[1]
         assert params[0] == "白酒"
         assert params[1] == "%白酒%"
 
     def test_offset_clamped_and_limit_capped(self):
         """limit>200 钳到 200、offset<0 钳到 0。"""
         body, conn = _fetch_dca(limit=5000, offset=-9)
-        _, params = conn.cursor_obj.executed[0]
+        _, params = conn.cursor_obj.executed[1]
         assert params[-2:] == (200, 0)
+
+    def test_no_min_age_no_age_clause(self):
+        """缺省不限年限：列表 SQL 无年限谓词，参数恰 5 个（q/like/like/limit/offset）。"""
+        body, conn = _fetch_dca()
+        sql, params = conn.cursor_obj.executed[1]
+        assert "full_start <" not in sql
+        assert len(params) == 5
+
+    def test_min_age_strictly_greater_and_stats_follows(self):
+        """min_age=3：列表与 stats 都加 full_start < 参考日-3年 截止参数（严格大于）。"""
+        ref = dt.date(2026, 10, 29)
+        body, conn = _fetch_dca(min_age=3, one=(ref,))
+        sql, params = conn.cursor_obj.executed[1]
+        assert "full_start < %s" in sql
+        assert params[3] == ref - dt.timedelta(days=365.25 * 3)  # LIKE 之后、LIMIT 之前
+        assert params[-2:] == (50, 0)
+        stats_sql, stats_params = conn.cursor_obj.executed[3]
+        assert "full_start < %s" in stats_sql
+        assert stats_params == [params[3]]
+
+    def test_min_age_zero_means_no_filter(self):
+        """min_age=0：等同不限年限（0 即「全部」）。"""
+        ref = dt.date(2026, 10, 29)
+        body, conn = _fetch_dca(min_age=0, one=(ref,))
+        sql, params = conn.cursor_obj.executed[1]
+        assert "full_start <" not in sql
+        assert len(params) == 5
+
+    def test_min_scale_adds_clause_and_stats_follows(self):
+        """min_scale=2：列表与 stats 都加 scale_yi > %s，参数在年龄截止之后。"""
+        ref = dt.date(2026, 10, 29)
+        body, conn = _fetch_dca(min_age=3, min_scale=2, one=(ref,))
+        sql, params = conn.cursor_obj.executed[1]
+        assert "scale_yi > %s" in sql
+        assert params[3] == ref - dt.timedelta(days=365.25 * 3)   # 年龄截止
+        assert params[4] == 2                                     # 规模
+        assert params[-2:] == (50, 0)
+        stats_sql, stats_params = conn.cursor_obj.executed[3]
+        assert "scale_yi > %s" in stats_sql
+        assert stats_params == [params[3], 2]
+
+    def test_min_scale_zero_no_clause(self):
+        """min_scale=0（默认）：无规模谓词，参数不含规模。"""
+        body, conn = _fetch_dca(min_scale=0)
+        sql, params = conn.cursor_obj.executed[1]
+        assert "scale_yi >" not in sql
+        assert len(params) == 5
 
 
 class TestDcaImporter:
@@ -231,3 +280,60 @@ class TestDcaImporter:
             seqs.append((len(conn.cursor_obj.executed),
                          len(conn.cursor_obj.batch[0][1])))
         assert seqs[0] == seqs[1]
+
+
+class TestDcaScatter:
+    """三维散点 + 年限段 × 规模段分箱：纯函数统计 + 路由降级。"""
+
+    def _rows_and_ref(self):
+        ref = dt.date(2026, 10, 29)
+        # (scale, first_nav, xirr, rounds)
+        rows = [
+            (5.0, ref - dt.timedelta(days=365.25 * 11), 0.20, 3),   # ≥10年, 1-10亿
+            (0.5, ref - dt.timedelta(days=365.25 * 11), 0.02, 1),   # ≥10年, <1亿
+            (2.0, ref - dt.timedelta(days=365.25 * 1), 0.50, 2),    # 0-1年, 1-10亿
+            (0.3, ref - dt.timedelta(days=365.25 * 2), -0.10, 0),   # 1-3年, <1亿
+            (1.0, ref - dt.timedelta(days=365.25 * 4), 0.05, 1),    # 3-5年, 1-10亿
+        ]
+        return rows, ref
+
+    def test_each_fund_in_exactly_one_band(self):
+        """每基金只计入唯一格子：全矩阵 count 之和 = 基金数。"""
+        from app.dca_api import compute_bands
+        rows, ref = self._rows_and_ref()
+        b = compute_bands(rows, ref)
+        total = sum(c["count"] for row in b["matrix"] for c in row)
+        assert total == len(rows) == 5
+        assert b["age_bands"] == ["0-1 年", "1-3 年", "3-5 年", "5-10 年", "≥10 年"]
+        assert b["scale_bands"] == ["<1 亿", "1-10 亿", "10-100 亿", "≥100 亿"]
+
+    def test_band_values(self):
+        from app.dca_api import compute_bands
+        rows, ref = self._rows_and_ref()
+        b = compute_bands(rows, ref)
+        # ≥10年 × <1亿：仅 0.5 亿那只
+        c = b["matrix"][4][0]
+        assert c["count"] == 1 and c["mean_xirr"] == pytest.approx(0.02)
+        # 0-1年 × 1-10亿：2 亿新基金，离群 0.50
+        c = b["matrix"][0][1]
+        assert c["count"] == 1 and c["mean_xirr"] == pytest.approx(0.50)
+        # 1-10亿 列合计 = 3 只（5亿/2亿/1亿）
+        col = sum(b["matrix"][ai][1]["count"] for ai in range(5))
+        assert col == 3
+        # 正占比：≥10年 × <1亿 = 100%
+        assert b["matrix"][4][0]["positive_share"] == 1.0
+
+    def test_empty_cells_have_none_stats(self):
+        from app.dca_api import compute_bands
+        rows, ref = self._rows_and_ref()
+        b = compute_bands(rows, ref)
+        c = b["matrix"][0][3]          # 0-1年 × ≥100亿：空格
+        assert c["count"] == 0
+        assert c["mean_xirr"] is None and c["positive_share"] is None
+
+    def test_route_down_degrades(self, client, monkeypatch):
+        monkeypatch.setattr("app.config.DATABASE_URL", DEAD_DSN)
+        resp = client.get("/api/funds/dca/scatter")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "down" and body["points"] == []

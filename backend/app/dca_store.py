@@ -129,12 +129,17 @@ def main():
                      "postgresql://honey_money:honey_money@host.docker.internal:5433/honey_money"))
     ap.add_argument("--amount", type=float, default=1000.0, help="月定投金额（元）")
     ap.add_argument("--take-profit", type=float, default=0.20, help="止盈线（0.2=20%%）")
+    ap.add_argument("--min-age-years", type=float, default=0.0,
+                    help="运作年限门槛（年，0=不过滤；仅写入 meta 供页面展示口径）")
+    ap.add_argument("--min-scale-yi", type=float, default=None,
+                    help="规模下限（亿元；不传=全市场，仅写入 meta 供页面展示口径）")
     args = ap.parse_args()
 
     rows = parse_csv(args.csv)
     latest = max((r["full_end"] for r in rows if r["full_end"]), default=None)
     params = {"amount": args.amount, "take_profit": args.take_profit,
-              "scale_min_yi": 1.0, "frequency": "monthly",
+              "scale_min_yi": args.min_scale_yi, "frequency": "monthly",
+              "min_age_years": args.min_age_years or None,
               "window_end": latest.isoformat() if latest else None,
               "source": "scripts/fund_dca_backtest.py"}
     with psycopg.connect(args.dsn, connect_timeout=10) as conn:

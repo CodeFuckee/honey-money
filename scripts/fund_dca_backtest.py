@@ -156,10 +156,26 @@ COLS_FULL = ["start", "end", "months", "rounds", "invested", "final_value",
 
 
 def main():
+    import argparse
+    ap = argparse.ArgumentParser(description="全市场基金「定投+20%止盈」回测")
+    ap.add_argument("--min-age-years", type=float, default=0.0,
+                    help="仅回测运作 ≥N 年的基金（首条净值距数据集最新净值日，"
+                         "成立日期的可用代理；0=不过滤）")
+    ap.add_argument("--min-scale-yi", type=float, default=0.0,
+                    help="仅回测资产规模 ≥N 亿的基金（0=全市场不限规模，"
+                         "含无规模披露的基金）")
+    args = ap.parse_args()
+    min_age_years = args.min_age_years
+    min_scale_yi = args.min_scale_yi
+
     scale = pd.read_csv(SCALE_CSV, dtype={"code": str})
-    scale = scale.dropna(subset=["scale_yi"])
-    selected = scale[scale["scale_yi"] >= 1.0]["code"].tolist()
-    print(f"规模≥1亿基金：{len(selected)} 只")
+    if min_scale_yi > 0:
+        scale = scale.dropna(subset=["scale_yi"])
+        selected = scale[scale["scale_yi"] >= min_scale_yi]["code"].tolist()
+        print(f"规模 ≥{min_scale_yi:g} 亿基金：{len(selected)} 只")
+    else:
+        selected = scale["code"].tolist()
+        print(f"全市场（不限规模）：{len(selected)} 只")
 
     with psycopg.connect(DB_URL, connect_timeout=10) as conn:
         basic = pd.read_sql(
@@ -176,7 +192,7 @@ def main():
                 for chunk in cp:
                     buf.write(chunk)
     buf.seek(0)
-    nav = pd.read_csv(buf, dtype={"code": str}, parse_dates=["nav_date"])
+    nav = pd.read_csv(buf, dtype={"code": "category"}, parse_dates=["nav_date"])
     print(f"净值行：{len(nav):,}")
 
     basic = basic.set_index("code")
@@ -184,8 +200,16 @@ def main():
     end_ts = pd.Timestamp(nav["nav_date"].max())
 
     rows = []
+    skipped_age = 0
     for code, g in nav.groupby("code", sort=True):
         g = g.sort_values("nav_date")
+        if min_age_years:
+            # 运作年限：首条净值距数据集最新净值日（fund_basic 无成立日期列，
+            # 首次净值披露是其可靠代理）；不足门槛整体剔除
+            first = pd.Timestamp(g["nav_date"].iloc[0])
+            if (end_ts - first).days < min_age_years * 365.25:
+                skipped_age += 1
+                continue
         full = run_window(g, None)
         w10 = run_window(g, end_ts - WINDOW_10Y)
         if full is None and w10 is None:
@@ -208,7 +232,9 @@ def main():
     out = pd.DataFrame(rows)
     out = out.sort_values("w10_xirr", ascending=False, na_position="last")
     out.to_csv(OUT_CSV, index=False)
-    print(f"写入 {OUT_CSV}：{len(out)} 只")
+    print(f"写入 {OUT_CSV}：{len(out)} 只"
+          + (f"（运作 ≥{min_age_years:g} 年门槛剔除 {skipped_age} 只）"
+             if min_age_years else ""))
 
     # 在市判定用净值新鲜度：fund_basic.delisted 按快照渠道差集计算，
     # 场内 ETF 不在该渠道会被误标（以 max(nav_date) 近 45 天为准）
