@@ -16,7 +16,7 @@ SELECT code, name, fund_type, alive, scale_yi, scale_date,
        w10_start, w10_end, w10_months, w10_rounds,
        w10_invested, w10_final_value, w10_profit_rate, w10_xirr,
        full_xirr, full_rounds, full_profit_rate, full_months,
-       full_start
+       full_start, gap_avg_days
 FROM fund_dca_result
 WHERE (%s = '' OR code ILIKE %s OR name ILIKE %s)
   AND {alive_clause}
@@ -60,6 +60,7 @@ _DCA_REF_SQL = "SELECT max(full_end) FROM fund_dca_result"
 _SORTABLE = {
     "w10_xirr", "full_xirr", "w10_profit_rate", "full_profit_rate",
     "w10_rounds", "full_rounds", "scale_yi", "code", "full_start",
+    "gap_avg_days",
 }
 
 
@@ -126,7 +127,7 @@ def fetch_dca_list(dsn: str, *, q: str = "", alive: str = "true",
                         "w10_rounds", "w10_invested", "w10_final_value",
                         "w10_profit_rate", "w10_xirr", "full_xirr",
                         "full_rounds", "full_profit_rate", "full_months",
-                        "full_start"]
+                        "full_start", "gap_avg_days"]
                 rows = [dict(zip(cols, r)) for r in cur.fetchall()]
                 cur.execute(count_sql, base)
                 total = cur.fetchone()[0]
@@ -162,6 +163,27 @@ def fetch_dca_list(dsn: str, *, q: str = "", alive: str = "true",
                        "rows": [], "stats": None, "meta": None})
 
 
+_ROUNDS_SQL = """
+SELECT seq, tp_date, round_days, gap_days, profit
+FROM fund_dca_rounds WHERE code = %s ORDER BY seq
+"""
+
+
+def fetch_dca_rounds(dsn: str, code: str) -> dict:
+    def run():
+        with psycopg.connect(dsn, connect_timeout=3) as conn:
+            with conn.cursor() as cur:
+                cur.execute(_ROUNDS_SQL, (code,))
+                rows = cur.fetchall()
+        out = [{"seq": r[0], "tp_date": r[1].isoformat() if r[1] else None,
+                "round_days": r[2], "gap_days": r[3],
+                "profit": round(r[4], 4) if r[4] is not None else None}
+               for r in rows]
+        return {"status": "up", "code": code, "rounds": out}
+    return _safe(run, {"status": "down", "detail": "pg unreachable",
+                       "code": code, "rounds": []})
+
+
 def register_fund_dca_routes(app):
     @app.get("/api/funds/dca")
     def funds_dca(q: str = "", alive: str = "true", sort: str = "w10_xirr",
@@ -179,6 +201,12 @@ def register_fund_dca_routes(app):
                               min_age=max(0.0, min_age),
                               min_scale=max(0.0, min_scale),
                               limit=limit, offset=offset)
+
+    @app.get("/api/funds/dca/{code}/rounds")
+    def funds_dca_rounds(code: str):
+        """单基金每次止盈明细：止盈日 / 距上次止盈天数 / 本轮持有天数 /
+        实际止盈收益率（≥20%，含跳空越过）。降级约定同 /api/funds/dca。"""
+        return fetch_dca_rounds(config.DATABASE_URL, code)
 
     @app.get("/api/funds/dca/scatter")
     def funds_dca_scatter():

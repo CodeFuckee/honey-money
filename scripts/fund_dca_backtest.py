@@ -95,7 +95,12 @@ def xirr(flows: list[tuple[pd.Timestamp, float]]) -> float | None:
 
 
 def simulate(dates: pd.DatetimeIndex, adj: np.ndarray) -> dict:
-    """单基金单窗口：每月首个净值日买入，日频检查 20% 止盈。"""
+    """单基金单窗口：每月首个净值日买入，日频检查 20% 止盈。
+
+    res["round_events"]：每轮止盈事件 (tp_date, round_days, gap_days,
+    profit)——gap_days=距上次止盈天数（首轮=从首轮首次买入起算），
+    profit=实际止盈收益率（≥20%，含跳空越过部分）。
+    """
     months = dates.to_numpy().astype("datetime64[M]")
     seen_months = set()
     basis_units = 0.0  # Σ 投入额/买入日adj，市值 = basis_units*adj(t)
@@ -103,12 +108,17 @@ def simulate(dates: pd.DatetimeIndex, adj: np.ndarray) -> dict:
     rounds = 0
     realized = 0.0
     flows: list[tuple[pd.Timestamp, float]] = []
+    round_events: list[tuple] = []
+    round_start: pd.Timestamp | None = None
+    last_tp: pd.Timestamp | None = None
 
     for i in range(len(dates)):
         a = adj[i]
         m = months[i]
         if m not in seen_months:
             seen_months.add(m)
+            if basis_units == 0.0:
+                round_start = dates[i]      # 新一轮从本轮首次买入起算
             basis_units += AMOUNT / a
             invested += AMOUNT
             flows.append((dates[i], -AMOUNT))
@@ -117,6 +127,15 @@ def simulate(dates: pd.DatetimeIndex, adj: np.ndarray) -> dict:
             realized += value - invested
             rounds += 1
             flows.append((dates[i], value))
+            gap = (dates[i] - last_tp).days if last_tp is not None else \
+                (dates[i] - round_start).days
+            round_events.append((
+                str(dates[i].date()),
+                (dates[i] - round_start).days if round_start is not None else None,
+                gap,
+                round(value / invested - 1.0, 4),
+            ))
+            last_tp = dates[i]
             basis_units = 0.0
             invested = 0.0
 
@@ -131,6 +150,7 @@ def simulate(dates: pd.DatetimeIndex, adj: np.ndarray) -> dict:
         "end": str(dates[-1].date()),
         "months": len(seen_months),
         "rounds": rounds,
+        "round_events": round_events,
         "invested": round(invested_total, 2),
         "final_value": round(invested_total + profit, 2),
         "profit_rate": profit / invested_total if invested_total > 0 else None,
@@ -200,6 +220,7 @@ def main():
     end_ts = pd.Timestamp(nav["nav_date"].max())
 
     rows = []
+    rounds_rows = []
     skipped_age = 0
     for code, g in nav.groupby("code", sort=True):
         g = g.sort_values("nav_date")
@@ -226,12 +247,19 @@ def main():
             for k in COLS_FULL:
                 row[f"{prefix}_{k}"] = res[k] if res else None
         rows.append(row)
+        if w10:
+            for seq, ev in enumerate(w10["round_events"], 1):
+                rounds_rows.append([code, seq, *ev])
         if len(rows) % 1000 == 0:
             print(f"  已回测 {len(rows)} 只", flush=True)
 
     out = pd.DataFrame(rows)
     out = out.sort_values("w10_xirr", ascending=False, na_position="last")
     out.to_csv(OUT_CSV, index=False)
+    with (DATA / "fund_dca_rounds.csv").open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["code", "seq", "tp_date", "round_days", "gap_days", "profit"])
+        w.writerows(rounds_rows)
     print(f"写入 {OUT_CSV}：{len(out)} 只"
           + (f"（运作 ≥{min_age_years:g} 年门槛剔除 {skipped_age} 只）"
              if min_age_years else ""))

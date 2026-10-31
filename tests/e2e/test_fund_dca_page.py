@@ -23,7 +23,7 @@ LIST_BODY = {
          "age_years": 2.9,
          "w10_start": "2023-11-28", "w10_end": "2026-10-28", "w10_months": 36,
          "w10_rounds": 6, "w10_invested": 36000, "w10_final_value": 42480,
-         "w10_profit_rate": 0.18, "w10_xirr": 1.003,
+         "w10_profit_rate": 0.18, "w10_xirr": 1.003, "gap_avg_days": 95.4,
          "full_xirr": 1.003, "full_rounds": 6, "full_profit_rate": 0.18,
          "full_months": 36},
         {"code": "161725", "name": "招商中证白酒指数(LOF)A", "fund_type": "指数型-股票",
@@ -31,7 +31,7 @@ LIST_BODY = {
          "age_years": 10.4,
          "w10_start": "2016-10-31", "w10_end": "2026-10-28", "w10_months": 121,
          "w10_rounds": 7, "w10_invested": 121000, "w10_final_value": 102850,
-         "w10_profit_rate": -0.15, "w10_xirr": -0.147,
+         "w10_profit_rate": -0.15, "w10_xirr": -0.147, "gap_avg_days": None,
          "full_xirr": -0.133, "full_rounds": 7, "full_profit_rate": -0.15,
          "full_months": 138},
     ],
@@ -81,7 +81,7 @@ def mock_dca(page):
 
     def handler(route):
         url = route.request.url
-        if "/api/funds/dca/scatter" in url:
+        if "/api/funds/dca/scatter" in url or re.search(r"/api/funds/dca/[^/?]+/rounds", url):
             route.continue_()
             return
         calls.append(url)
@@ -117,9 +117,11 @@ class TestFundDcaPage:
         row2 = page.locator(".browse-pv tbody tr", has_text="白酒")
         expect(row2.locator(".chg-down")).to_have_count(3)
         expect(row2).to_contain_text("-14.7%")
-        # 运作年限列渲染（服务端按首条净值计算）
+        # 运作年限列渲染（服务端按首条净值计算）+ 止盈间隔列
         expect(row).to_contain_text("2.9 年")
+        expect(row).to_contain_text("≈3.1 月/次")
         expect(row2).to_contain_text("10.4 年")
+        expect(row2).to_contain_text("—")
         # 口径副标题含运作年限门槛（meta.params.min_age_years 驱动，无则不显示）
         expect(page.locator(".toolbar .sub").first).to_contain_text("运作 ≥3 年")
 
@@ -212,6 +214,31 @@ class TestFundDcaPage:
         # 分箱矩阵表：≥10 年表头（行首+列首）与 900 只格子
         expect(page.locator(".dca-matrix th", has_text="≥10 年")).to_have_count(1)
         expect(page.locator(".dca-matrix td", has_text="900 只")).to_have_count(1)
+
+    def test_rounds_dialog_on_row_click(self, servers, page, mock_dca):
+        """E2E-412：点排行行 → 弹窗展示每次止盈明细（日期/间隔/持有/收益率）。"""
+        calls = []
+        page.on("request", lambda r: print("\n[req]", r.url) if "/rounds" in r.url else None)
+        page.on("response", lambda r: print("\n[resp]", r.url, r.status) if "/rounds" in r.url else None)
+        page.route("**/api/funds/dca/019387/rounds", lambda route: (
+            calls.append(route.request.url),
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({
+                "status": "up", "code": "019387",
+                "rounds": [
+                    {"seq": 1, "tp_date": "2024-02-10", "round_days": 74,
+                     "gap_days": 74, "profit": 0.213},
+                    {"seq": 2, "tp_date": "2024-05-20", "round_days": 65,
+                     "gap_days": 100, "profit": 0.2001},
+                ]}))))
+        _, frontend_port = servers
+        open_dca(page, frontend_port)
+        page.locator(".browse-pv tbody tr", has_text="中欧时代共赢").click()
+        expect(page.locator(".p-dialog")).to_be_visible()
+        expect(page.locator(".p-dialog")).to_contain_text("每次止盈明细")
+        # 注意：Vue DOM API 建表不会自动插入 tbody，tr 直接挂在 table 下
+        expect(page.locator(".p-dialog table tr")).to_have_count(3)
+        expect(page.locator(".p-dialog")).to_contain_text("74 天（≈2.4 月）")
+        expect(page.locator(".p-dialog")).to_contain_text("21.3%")
 
     def test_sort_column_sends_params(self, servers, page, mock_dca):
         """E2E-404：点「年化·全史」列头 → sort=full_xirr&order=asc。"""

@@ -40,6 +40,21 @@ CREATE TABLE IF NOT EXISTS fund_dca_result (
 CREATE INDEX IF NOT EXISTS idx_fund_dca_alive ON fund_dca_result (alive);
 CREATE INDEX IF NOT EXISTS idx_fund_dca_w10_xirr ON fund_dca_result (w10_xirr);
 
+CREATE TABLE IF NOT EXISTS fund_dca_rounds (
+  code       VARCHAR(10) NOT NULL,
+  seq        INTEGER NOT NULL,
+  tp_date    DATE NOT NULL,
+  round_days INTEGER,
+  gap_days   INTEGER,
+  profit     DOUBLE PRECISION,
+  PRIMARY KEY (code, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_fund_dca_rounds_code ON fund_dca_rounds (code);
+
+ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS gap_avg_days DOUBLE PRECISION;
+ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS gap_min_days INTEGER;
+ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS gap_max_days INTEGER;
+
 CREATE TABLE IF NOT EXISTS fund_dca_meta (
   id           BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
   generated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -108,6 +123,64 @@ def parse_csv(path: str | Path) -> list[dict]:
     return rows
 
 
+_ROUNDS_COLS = ["code", "seq", "tp_date", "round_days", "gap_days", "profit"]
+_ROUNDS_DATE = {"tp_date"}
+_ROUNDS_INT = {"seq", "round_days", "gap_days"}
+_ROUNDS_FLOAT = {"profit"}
+
+_UPSERT_ROUND = f"""
+INSERT INTO fund_dca_rounds ({", ".join(_ROUNDS_COLS)})
+VALUES ({", ".join(["%s"] * len(_ROUNDS_COLS))})
+"""
+
+_RESET_GAP = """
+UPDATE fund_dca_result SET gap_avg_days = NULL, gap_min_days = NULL, gap_max_days = NULL
+"""
+
+_APPLY_GAP = """
+UPDATE fund_dca_result r SET
+  gap_avg_days = t.gap_avg, gap_min_days = t.gap_min, gap_max_days = t.gap_max
+FROM (SELECT code, avg(gap_days) AS gap_avg,
+             min(gap_days) AS gap_min, max(gap_days) AS gap_max
+      FROM fund_dca_rounds GROUP BY code) t
+WHERE r.code = t.code
+"""
+
+
+def parse_rounds_csv(path: str | Path) -> list[tuple]:
+    """fund_dca_rounds.csv → (code, seq, tp_date, round_days, gap_days, profit) 元组列表。"""
+    with open(path, newline="") as f:
+        raw = list(csv.DictReader(f))
+    rows = []
+    for r in raw:
+        vals = []
+        for col in _ROUNDS_COLS:
+            v = (r.get(col) or "").strip()
+            try:
+                if col in _ROUNDS_DATE:
+                    v = dt.date.fromisoformat(v) if v else None
+                elif col in _ROUNDS_INT:
+                    v = int(float(v)) if v else None
+                elif col in _ROUNDS_FLOAT:
+                    v = float(v) if v else None
+            except ValueError:
+                v = None
+            vals.append(v)
+        rows.append(tuple(vals))
+    return rows
+
+
+def import_rounds(conn, rows: list[tuple]) -> int:
+    """整表替换止盈轮次 + 刷新 fund_dca_result 间隔汇总列；事务由调用方提交。"""
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM fund_dca_rounds")
+        if rows:
+            cur.executemany(_UPSERT_ROUND, rows)
+        cur.execute(_RESET_GAP)
+        cur.execute(_APPLY_GAP)
+    return len(rows)
+
+
 def import_rows(conn, rows: list[dict], *, params: dict | None = None) -> int:
     """快照整体替换（DELETE+INSERT）+ meta 单行 upsert；单事务由调用方提交。"""
     with conn.cursor() as cur:
@@ -133,9 +206,14 @@ def main():
                     help="运作年限门槛（年，0=不过滤；仅写入 meta 供页面展示口径）")
     ap.add_argument("--min-scale-yi", type=float, default=None,
                     help="规模下限（亿元；不传=全市场，仅写入 meta 供页面展示口径）")
+    ap.add_argument("--rounds-csv", default=None,
+                    help="止盈轮次 CSV（缺省=结果 CSV 同目录 fund_dca_rounds.csv，无则跳过）")
     args = ap.parse_args()
 
     rows = parse_csv(args.csv)
+    rounds_path = (Path(args.rounds_csv) if args.rounds_csv else
+                   Path(args.csv).parent / "fund_dca_rounds.csv")
+    rounds = parse_rounds_csv(rounds_path) if rounds_path.exists() else []
     latest = max((r["full_end"] for r in rows if r["full_end"]), default=None)
     params = {"amount": args.amount, "take_profit": args.take_profit,
               "scale_min_yi": args.min_scale_yi, "frequency": "monthly",
@@ -145,9 +223,11 @@ def main():
     with psycopg.connect(args.dsn, connect_timeout=10) as conn:
         ensure_schema(conn)                    # 幂等：本地/新库首导直接可用
         n = import_rows(conn, rows, params=params)
+        nr = import_rounds(conn, rounds) if rounds else 0
         conn.commit()
     alive = sum(1 for r in rows if r["alive"])
-    print(f"导入 {n} 行（在市 {alive}）→ fund_dca_result，窗口截至 {latest}")
+    print(f"导入 {n} 行（在市 {alive}）→ fund_dca_result，窗口截至 {latest}；"
+          f"止盈轮次 {nr} 行")
 
 
 if __name__ == "__main__":

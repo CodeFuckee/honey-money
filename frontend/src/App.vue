@@ -5,6 +5,7 @@ import Column from 'primevue/column'
 import InputText from 'primevue/inputtext'
 import InputNumber from 'primevue/inputnumber'
 import Select from 'primevue/select'
+import Dialog from 'primevue/dialog'
 import Button from 'primevue/button'
 import Paginator from 'primevue/paginator'
 import AutoComplete from 'primevue/autocomplete'
@@ -446,6 +447,23 @@ watch(dcaScatterChartEl, el => {
   if (el && dcaScatter.value?.status === 'up' && dcaScatter.value?.points?.length)
     renderDcaScatterChart()
 })
+
+// ---- 每次止盈明细弹窗（点排行行触发，/api/funds/dca/{code}/rounds） ----
+const dcaRoundsVisible = ref(false)
+const dcaRoundsFund = ref(null)          // { code, name }
+const dcaRounds = ref({ status: 'loading', rounds: [] })
+
+function openDcaRounds(e) {
+  const data = e.data ?? e
+  dcaRoundsFund.value = { code: data.code, name: data.name }
+  dcaRounds.value = { status: 'loading', rounds: [] }
+  dcaRoundsVisible.value = true
+  fetch(`/api/funds/dca/${data.code}/rounds`)
+    .then(r => r.json())
+    .then(body => { dcaRounds.value = body })
+    .catch(err => { dcaRounds.value = { status: 'down', detail: String(err), rounds: [] } })
+}
+const gapLabel = d => d == null ? '—' : `${d} 天（≈${(d / 30.44).toFixed(1)} 月）`
 
 function disposeDcaScatterChart() {
   if (dcaScatterChart) { dcaScatterChart.destroy(); dcaScatterChart = null }
@@ -2144,7 +2162,7 @@ watch(
                 :totalRecords="dca.total || 0" :loading="dcaLoading"
                 dataKey="code" stripedRows size="small"
                 :sortField="dcaSort" :sortOrder="dcaOrder === 'asc' ? 1 : -1"
-                @page="onDcaPage" @sort="onDcaSort">
+                @page="onDcaPage" @sort="onDcaSort" @row-click="openDcaRounds">
                 <template #empty>
                   <div class="browse-empty">
                     {{ dca.status === 'down' ? '数据库不可达：' + (dca.detail || '')
@@ -2167,6 +2185,9 @@ watch(
                 </Column>
                 <Column field="w10_rounds" header="止盈次数" style="width: 88px" sortable bodyClass="num-col">
                   <template #body="{ data }">{{ data.w10_rounds ?? '—' }}</template>
+                </Column>
+                <Column field="gap_avg_days" header="止盈间隔" style="width: 100px" sortable bodyClass="num-col">
+                  <template #body="{ data }">{{ data.gap_avg_days != null ? '≈' + (data.gap_avg_days / 30.44).toFixed(1) + ' 月/次' : '—' }}</template>
                 </Column>
                 <Column field="w10_profit_rate" header="总收益率" style="width: 98px" sortable bodyClass="num-col">
                   <template #body="{ data }">
@@ -2241,6 +2262,30 @@ watch(
               </template>
               <div v-else class="browse-empty">散点数据加载中…</div>
             </div>
+
+            <!-- ===== 每次止盈明细弹窗（点排行行触发） ===== -->
+            <Dialog v-model:visible="dcaRoundsVisible" modal
+              :header="dcaRoundsFund ? `${dcaRoundsFund.code} ${dcaRoundsFund.name} · 每次止盈明细` : '每次止盈明细'"
+              :style="{ width: '560px' }">
+              <p class="sub" style="margin: 0 0 8px">
+                统计口径：近 10 年窗口内 · 间隔=距上次止盈天数（首次止盈从本轮首次买入起算）· 实际收益率含跳空越过 20% 的部分
+              </p>
+              <div v-if="dcaRounds.status === 'down'" class="browse-empty">
+                明细不可用：{{ dcaRounds.detail || '数据库连接失败' }}
+              </div>
+              <table v-else-if="dcaRounds.rounds?.length" class="dca-matrix" style="width: 100%">
+                <tr><th>轮次</th><th>止盈日</th><th>距上次止盈</th><th>本轮持有</th><th>实际收益率</th></tr>
+                <tr v-for="r in dcaRounds.rounds" :key="r.seq">
+                  <td>第 {{ r.seq }} 次</td>
+                  <td class="mono">{{ r.tp_date || '—' }}</td>
+                  <td>{{ gapLabel(r.gap_days) }}</td>
+                  <td>{{ r.round_days != null ? r.round_days + ' 天' : '—' }}</td>
+                  <td><span :class="r.profit >= 0 ? 'chg-up' : 'chg-down'">{{ pctp(r.profit) }}</span></td>
+                </tr>
+              </table>
+              <div v-else-if="dcaRounds.status === 'loading'" class="browse-empty">加载中…</div>
+              <div v-else class="browse-empty">该基金在统计窗口内没有止盈记录（从未达到 +20%）</div>
+            </Dialog>
           </template>
 
           <!-- ===== 个股历史行情详情（数据页行点击进入） ===== -->
@@ -3544,6 +3589,7 @@ body {
   text-align: center; white-space: nowrap; }
 .dca-matrix th { background: #f4f4f4; font-weight: 600; }
 .dca-matrix-best { background: #def1c6; font-weight: 600; }
+.browse-pv tbody tr { cursor: pointer; }
 .task-actions { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
 .task-actions .btn { font-size: 13px; padding: 6px 14px; }
 .btn-danger { color: var(--dot-down); border-color: var(--dot-down); }

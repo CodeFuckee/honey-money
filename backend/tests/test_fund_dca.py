@@ -337,3 +337,55 @@ class TestDcaScatter:
         assert resp.status_code == 200
         body = resp.json()
         assert body["status"] == "down" and body["points"] == []
+
+
+class TestDcaRounds:
+    """每次止盈明细：路由降级 + rounds CSV 解析/导入。"""
+
+    def test_route_down_degrades(self, client, monkeypatch):
+        monkeypatch.setattr("app.config.DATABASE_URL", DEAD_DSN)
+        resp = client.get("/api/funds/dca/019387/rounds")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "down" and body["rounds"] == []
+        assert body["code"] == "019387"
+
+    def test_list_rows_include_gap_avg(self):
+        """列表行携带 gap_avg_days（前端「止盈间隔」列数据源）。"""
+        body, conn = _fetch_dca(one=(None,))
+        sql, _ = conn.cursor_obj.executed[1]
+        assert "gap_avg_days" in sql
+
+    def test_parse_rounds_csv(self, tmp_path):
+        from app.dca_store import parse_rounds_csv
+        import datetime as dt
+        p = tmp_path / "rounds.csv"
+        p.write_text(
+            "code,seq,tp_date,round_days,gap_days,profit\n"
+            "019387,1,2024-02-10,74,74,0.213\n"
+            "019387,2,2024-05-20,65,100,0.2001\n"
+            "161725,1,2017-03-15,,150,0.2500\n")
+        rows = parse_rounds_csv(p)
+        assert len(rows) == 3
+        assert rows[0] == ("019387", 1, dt.date(2024, 2, 10), 74, 74, 0.213)
+        assert rows[2][3] is None and rows[2][2] == dt.date(2017, 3, 15)  # round_days 空串→None
+
+    def test_import_rounds_sequence_and_aggregates(self, tmp_path):
+        from app.dca_store import import_rounds, parse_rounds_csv
+        p = tmp_path / "rounds.csv"
+        p.write_text(
+            "code,seq,tp_date,round_days,gap_days,profit\n"
+            "019387,1,2024-02-10,74,74,0.213\n"
+            "019387,2,2024-05-20,65,100,0.2001\n")
+        rows = parse_rounds_csv(p)
+        conn = FakeConn()
+        import_rounds(conn, rows)
+        sqls = [sql for sql, _ in conn.cursor_obj.executed]
+        assert sqls[0] == "DELETE FROM fund_dca_rounds"
+        assert any("RESET" not in x and "SET gap_avg_days" not in x.upper()
+                   or "DELETE" in x for x in sqls) is not None
+        # 汇总重置 + 回填两条 UPDATE
+        assert sum(1 for sql in sqls if "fund_dca_result" in sql) == 2
+        assert len(conn.cursor_obj.batch) == 1            # executemany 一次
+        sql, seq_rows = conn.cursor_obj.batch[0]
+        assert "INSERT INTO fund_dca_rounds" in sql and len(seq_rows) == 2
