@@ -1,0 +1,10 @@
+# 根目录构建上下文白名单（backend/Dockerfile.test 以仓库根为上下文构建，
+# 见 .gitlab-ci.yml 的 backend-test job）。白名单外一律不入上下文：
+# 排除 .git/.venv/node_modules 等大目录与无关文件，保证上下文极小。
+*
+!backend
+!backend/**
+!scripts
+!scripts/fund_dca_backtest.py
+**/__pycache__
+**/*.pyc

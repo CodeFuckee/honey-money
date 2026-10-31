@@ -41,7 +41,8 @@ backend-test:
   script:
     - *mirror-fetch
     - fetch_base python:3.12-slim docker.1panel.live docker.1ms.run docker.m.daocloud.io
-    - docker build --progress=plain -t honey-money-backend-test -f backend/Dockerfile.test backend
+    # 上下文=仓库根（配合根 .dockerignore 白名单），镜像内含 scripts/ 供费用单测
+    - docker build --progress=plain -t honey-money-backend-test -f backend/Dockerfile.test .
     - docker run --rm honey-money-backend-test
 
 deploy-nas:

@@ -1,10 +1,14 @@
 # 测试专用镜像：与生产 Dockerfile 同源，但额外打入 tests/（生产镜像刻意排除）。
 # 由 CI 在 NAS runner 上构建运行——不依赖 runner 宿主的 Python/OS，环境完全确定。
+# 构建上下文是仓库根（CI 里 `docker build -f backend/Dockerfile.test .`），
+# 配合根目录 .dockerignore 白名单（只放行 backend 与回测脚本）控制上下文体积；
+# scripts/ 打到 /scripts 供 test_fund_dca_fees.py 以 parents[2]/scripts 定位——
+# 与本地仓库布局（repo_root/scripts）同一相对路径。
 FROM python:3.12-slim
 
 WORKDIR /srv
 
-COPY requirements.txt .
+COPY backend/requirements.txt .
 # pypi.org 官方 CDN 本网络实测 ~14KB/s 不可用，固定阿里源（Dockerfile.test 同）
 RUN pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ -r requirements.txt
 # vectorbt 单独装：其元数据声明 pandas>=3.0.3 与我们锁定的 pandas 2.x 冲突
@@ -12,8 +16,9 @@ RUN pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ -r req
 # 运行时依赖已在上一行显式列出
 RUN pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ --no-deps vectorbt==1.1.1
 
-COPY app/ app/
-COPY tests/ tests/
+COPY backend/app/ app/
+COPY backend/tests/ tests/
+COPY scripts/ /scripts/
 
 # 容器内工作目录就是 /srv，pytest.ini 在仓库根（挂不进来），故直接指定路径与参数
 CMD ["pytest", "tests", "-q"]
