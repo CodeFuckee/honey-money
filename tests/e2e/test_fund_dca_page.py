@@ -220,6 +220,17 @@ class TestFundDcaPage:
         calls = []
         page.on("request", lambda r: print("\n[req]", r.url) if "/rounds" in r.url else None)
         page.on("response", lambda r: print("\n[resp]", r.url, r.status) if "/rounds" in r.url else None)
+        # 净值曲线 mock（弹窗图表数据源）
+        page.route("**/api/funds/019387/navs*", lambda route: route.fulfill(
+            status=200, content_type="application/json", body=json.dumps({
+                "status": "up", "code": "019387", "navs": [
+                    {"date": "2023-11-28", "unit_nav": 1.0, "accum_nav": 1.0,
+                     "pct_chg": 0, "unit_money": None, "source": "fund_em"},
+                    {"date": "2024-02-10", "unit_nav": 1.21, "accum_nav": 1.21,
+                     "pct_chg": 3.1, "unit_money": None, "source": "fund_em"},
+                    {"date": "2024-05-20", "unit_nav": 1.45, "accum_nav": 1.45,
+                     "pct_chg": 2.0, "unit_money": None, "source": "fund_em"},
+                ]})))
         page.route("**/api/funds/dca/019387/rounds", lambda route: (
             calls.append(route.request.url),
             route.fulfill(status=200, content_type="application/json", body=json.dumps({
@@ -237,6 +248,8 @@ class TestFundDcaPage:
         expect(page.locator(".p-dialog")).to_contain_text("每次止盈明细")
         # 注意：Vue DOM API 建表不会自动插入 tbody，tr 直接挂在 table 下
         expect(page.locator(".p-dialog table tr")).to_have_count(3)
+        # 净值曲线 + 止盈点图表渲染
+        expect(page.locator(".p-dialog-content canvas")).to_have_count(1)
         expect(page.locator(".p-dialog")).to_contain_text("74 天（≈2.4 月）")
         expect(page.locator(".p-dialog")).to_contain_text("21.3%")
 
