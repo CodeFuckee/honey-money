@@ -209,11 +209,11 @@ def register_fund_dca_routes(app):
         return fetch_dca_rounds(config.DATABASE_URL, code)
 
     @app.get("/api/funds/dca/scatter")
-    def funds_dca_scatter(fee: str = "disc"):
+    def funds_dca_scatter(fee: str = "nom"):
         """三维散点：每只在市基金一点 (运作年限, 规模亿, 年化) + 年限段 ×
         规模段分箱统计（每基金只计入唯一格子）。fee 选年化口径：
-        gross=不含费 / disc=含费·申购一折（默认）/ nom=含费·申购名义，
-        非白名单值回落 disc。降级约定同 /api/funds/dca。
+        gross=不含费 / disc=含费·申购一折 / nom=含费·申购名义（默认），
+        非白名单值回落 nom。降级约定同 /api/funds/dca。
         """
         return fetch_dca_scatter(config.DATABASE_URL, fee=fee.strip().lower())
 
@@ -285,7 +285,7 @@ def compute_bands(rows, ref):
     }
 
 
-def fetch_dca_scatter(dsn: str, fee: str = "disc") -> dict:
+def fetch_dca_scatter(dsn: str, fee: str = "nom") -> dict:
     """三维散点数据：每只在市基金一点 (运作年限, 规模亿, 年化) + 分箱统计。
 
     fee 选择年化口径：gross=不含费 / disc=含费·申购一折 / nom=含费·申购名义
@@ -293,7 +293,7 @@ def fetch_dca_scatter(dsn: str, fee: str = "disc") -> dict:
     [age, scale, xirr, code, name, fund_type]，规模取对数轴定位由前端处理；
     降级约定同 /api/funds/dca。
     """
-    xirr_col = _FEE_XIRR_COL.get(fee, "w10_xirr_disc")
+    xirr_col = _FEE_XIRR_COL.get(fee, "w10_xirr_nom")
 
     def run():
         with psycopg.connect(dsn, connect_timeout=3) as conn:
@@ -314,7 +314,7 @@ def fetch_dca_scatter(dsn: str, fee: str = "disc") -> dict:
         bands = compute_bands(
             [(scale, full_start, xirr, rounds)
              for _, _, _, scale, full_start, xirr, rounds, _fe in rows], ref)
-        return {"status": "up", "fee": fee if fee in _FEE_XIRR_COL else "disc",
+        return {"status": "up", "fee": fee if fee in _FEE_XIRR_COL else "nom",
                 "ref_date": ref.isoformat() if ref else None,
                 "points": points, **bands}
     return _safe(run, {"status": "down", "detail": "pg unreachable",

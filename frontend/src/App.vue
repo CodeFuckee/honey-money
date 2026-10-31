@@ -422,7 +422,8 @@ const dcaScatterChartEl = ref(null)
 let dcaScatterChart = null
 // 年化口径：gross=不含费 / disc=含费·申购一折 / nom=含费·申购名义
 // （赎回费三口径一致按持有天数阶梯收取；管理/托管/服务费已在净值内）
-const dcaFeeMode = ref('disc')
+// 默认 nom 申购名义——保守上界，用户明确指定（2026-10-31）
+const dcaFeeMode = ref('nom')
 const dcaFeeLoading = ref(false)
 let dcaFeeReqSeq = 0                       // 竞态防护：只采纳最后一次请求的响应
 const DCA_FEE_OPTIONS = [
@@ -585,6 +586,21 @@ const dcaScatterConclusion = computed(() => {
           (!best || m[ai][si].mean_xirr > best.cell.mean_xirr))
         best = { cell: m[ai][si], ageIdx: ai, scaleIdx: si }
   return { ageMean, scaleMean, best }
+})
+
+// 中位口径的组合最优格（与均值口径同一 ≥300 样本门槛），供中位分箱表高亮
+const dcaMedianBest = computed(() => {
+  const sc = dcaScatter.value
+  if (!sc || sc.status !== 'up' || !sc.matrix?.length) return null
+  let best = null
+  for (let ai = 0; ai < sc.matrix.length; ai++)
+    for (let si = 0; si < sc.matrix[ai].length; si++) {
+      const c = sc.matrix[ai][si]
+      if (c.count >= 300 && c.median_xirr != null &&
+          (!best || c.median_xirr > best.cell.median_xirr))
+        best = { cell: c, ageIdx: ai, scaleIdx: si }
+    }
+  return best
 })
 
 // 基金净值详情（对齐个股详情形态：单位+累计净值双线走势图 + 分页明细表）
@@ -2366,7 +2382,7 @@ watch(
                   </div>
                   <div class="dca-matrix-wrap">
                     <div class="dc-head">
-                      <b>年限段 × 规模段 分箱统计</b>
+                      <b>年限段 × 规模段 分箱统计（均值）</b>
                       <span class="dc-badge">格内 = 基金数 / 平均年化</span>
                     </div>
                     <table class="dca-matrix">
@@ -2381,6 +2397,27 @@ watch(
                           <template v-if="dcaScatter.matrix[ai][si].count">
                             {{ dcaScatter.matrix[ai][si].count }} 只<br/>
                             <span :class="dcaScatter.matrix[ai][si].mean_xirr >= 0 ? 'chg-up' : 'chg-down'">{{ pctp(dcaScatter.matrix[ai][si].mean_xirr) }}</span>
+                          </template>
+                          <template v-else>—</template>
+                        </td>
+                      </tr>
+                    </table>
+                    <div class="dc-head" style="margin-top: 16px">
+                      <b>年限段 × 规模段 分箱统计（中位）</b>
+                      <span class="dc-badge">格内 = 基金数 / 中位年化 · 中位不受极端值拉扯</span>
+                    </div>
+                    <table class="dca-matrix dca-median">
+                      <tr>
+                        <th>规模 \ 年限</th>
+                        <th v-for="ab in dcaScatter.age_bands" :key="ab">{{ ab }}</th>
+                      </tr>
+                      <tr v-for="(sb, si) in dcaScatter.scale_bands" :key="sb">
+                        <th>{{ sb }}</th>
+                        <td v-for="(ab, ai) in dcaScatter.age_bands" :key="ab"
+                            :class="{ 'dca-matrix-best': dcaMedianBest && dcaMedianBest.ageIdx === ai && dcaMedianBest.scaleIdx === si }">
+                          <template v-if="dcaScatter.matrix[ai][si].count">
+                            {{ dcaScatter.matrix[ai][si].count }} 只<br/>
+                            <span :class="dcaScatter.matrix[ai][si].median_xirr >= 0 ? 'chg-up' : 'chg-down'">{{ pctp(dcaScatter.matrix[ai][si].median_xirr) }}</span>
                           </template>
                           <template v-else>—</template>
                         </td>
@@ -3750,6 +3787,7 @@ body {
 /* 散点区块内的矩阵拉伸撑满（基础 12px 版留给止盈明细弹窗） */
 .dca-matrix-wrap .dca-matrix { width: 100%; min-width: 620px; font-size: 13px; }
 .dca-matrix-wrap .dca-matrix th, .dca-matrix-wrap .dca-matrix td { padding: 9px 14px; }
+.dca-matrix.dca-median { margin-top: 14px; }
 .browse-pv tbody tr { cursor: pointer; }
 .task-actions { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
 .task-actions .btn { font-size: 13px; padding: 6px 14px; }

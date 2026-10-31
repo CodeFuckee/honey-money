@@ -443,11 +443,11 @@ def _fetch_scatter(**kw):
 
 class TestDcaScatterFee:
     # run() 的执行序：[0]=max(full_end) 参考日，[1]=散点行
-    def test_default_fee_is_disc(self):
+    def test_default_fee_is_nom(self):
         body, conn = _fetch_scatter()
         sql, _ = conn.cursor_obj.executed[1]
-        assert "w10_xirr_disc" in sql
-        assert body["fee"] == "disc"
+        assert "w10_xirr_nom" in sql
+        assert body["fee"] == "nom"
 
     def test_fee_nom_switches_column(self):
         body, conn = _fetch_scatter(fee="nom")
@@ -462,10 +462,10 @@ class TestDcaScatterFee:
         assert "w10_xirr IS NOT NULL" in sql
         assert body["fee"] == "gross"
 
-    def test_fee_invalid_falls_back_to_disc(self):
-        """非白名单值（含注入串）回落 disc，不得进入 SQL。"""
+    def test_fee_invalid_falls_back_to_nom(self):
+        """非白名单值（含注入串）回落 nom，不得进入 SQL。"""
         body, conn = _fetch_scatter(fee="w10_xirr; DROP TABLE fund_dca_result")
         sql, _ = conn.cursor_obj.executed[1]
         assert "DROP" not in sql
-        assert "w10_xirr_disc" in sql
-        assert body["fee"] == "disc"
+        assert "w10_xirr_nom" in sql
+        assert body["fee"] == "nom"

@@ -102,9 +102,13 @@ def _scatter_body_for(fee: str) -> dict:
     b = copy.deepcopy(SCATTER_BODY)
     factor = {"gross": 1.10, "nom": 0.92}.get(fee, 1.0)
     for row in b["matrix"]:
-        for cell in row:
+        # 逐格换新字典：SCATTER_BODY 行内是 [dict]*4 共享引用，
+        # deepcopy 保留别名，就地改会一格缩放四次
+        for i, cell in enumerate(row):
             if cell["count"] and cell["mean_xirr"] is not None:
-                cell["mean_xirr"] = round(cell["mean_xirr"] * factor, 4)
+                row[i] = {**cell,
+                          "mean_xirr": round(cell["mean_xirr"] * factor, 4),
+                          "median_xirr": round(cell["median_xirr"] * factor, 4)}
     return b
 
 
@@ -232,9 +236,18 @@ class TestFundDcaPage:
             "≥10 年 × <1 亿")
         # 伪 3D 散点 canvas 渲染
         expect(page.locator(".dca-scatter-chart canvas")).to_have_count(1)
-        # 分箱矩阵表：≥10 年表头（行首+列首）与 900 只格子
-        expect(page.locator(".dca-matrix th", has_text="≥10 年")).to_have_count(1)
-        expect(page.locator(".dca-matrix td", has_text="900 只")).to_have_count(1)
+        # 均值分箱表：≥10 年表头与 900 只格子（:not 排除中位表——两表同格数）
+        expect(page.locator(".dca-matrix:not(.dca-median) th",
+              has_text="≥10 年")).to_have_count(1)
+        expect(page.locator(".dca-matrix:not(.dca-median) td",
+              has_text="900 只")).to_have_count(1)
+        # 中位分箱表：同格数、中位值与均值不同；默认名义口径（×0.92）下
+        # mock ≥10年×<1亿 均值 0.076→7.0%、中位 0.065→6.0%
+        expect(page.locator(".dca-median th", has_text="≥10 年")).to_have_count(1)
+        expect(page.locator(".dca-median td", has_text="900 只")).to_have_count(1)
+        expect(page.locator(".dca-matrix:not(.dca-median) td",
+              has_text="7.0%")).to_have_count(1)
+        expect(page.locator(".dca-median td", has_text="6.0%")).to_have_count(1)
 
     def test_fee_mode_toggle_switches_data(self, servers, page, mock_dca):
         """E2E-413：年化口径切换（不含费/含费·一折/含费·名义）——
@@ -243,19 +256,19 @@ class TestFundDcaPage:
         _, frontend_port = servers
         open_dca(page, frontend_port)
         concl = page.locator(".dca-conclusion")
-        # 默认 含费·申购一折：徽标 + ≥10 年均值 7.4%
-        expect(page.locator(".src-seg-btn.active", has_text="含费·申购一折")
+        # 默认 含费·申购名义（保守上界）：徽标 + ≥10 年均值 6.8%
+        expect(page.locator(".src-seg-btn.active", has_text="含费·申购名义")
               ).to_have_count(1)
-        expect(concl).to_contain_text("含费·申购一折 · 在市 3 只")
-        expect(concl).to_contain_text("≥10 年 7.4%")
+        expect(concl).to_contain_text("含费·申购名义 · 在市 3 只")
+        expect(concl).to_contain_text("≥10 年 6.8%")
         # 切到 不含费：数值抬升
         page.locator("button[data-fee='gross']").click()
         expect(concl).to_contain_text("不含费 · 在市 3 只")
         expect(concl).to_contain_text("≥10 年 8.2%")
-        # 切到 含费·申购名义：数值压低
-        page.locator("button[data-fee='nom']").click()
-        expect(concl).to_contain_text("含费·申购名义 · 在市 3 只")
-        expect(concl).to_contain_text("≥10 年 6.8%")
+        # 切到 含费·申购一折：介于两者
+        page.locator("button[data-fee='disc']").click()
+        expect(concl).to_contain_text("含费·申购一折 · 在市 3 只")
+        expect(concl).to_contain_text("≥10 年 7.4%")
 
     def test_fee_toggle_stale_response_guard(self, servers, page, mock_dca):
         """E2E-414：快速连点竞态防护——扣住慢的 gross 响应，nom 先返回；
