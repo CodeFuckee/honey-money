@@ -22,3 +22,6 @@ live/
 .zcode/config.json
 data/
 **/em_cookie.txt
+
+# 含账号密码的本地运维文档，禁止入库
+docs/*账号*.md
