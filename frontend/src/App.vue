@@ -10,13 +10,13 @@ import Button from 'primevue/button'
 import Paginator from 'primevue/paginator'
 import AutoComplete from 'primevue/autocomplete'
 import * as echarts from 'echarts/core'
-import { CandlestickChart, BarChart, LineChart } from 'echarts/charts'
+import { CandlestickChart, BarChart, LineChart, ScatterChart } from 'echarts/charts'
 import { mountDca3DScatter } from './dca3d'
-import { GridComponent, TooltipComponent, DataZoomComponent } from 'echarts/components'
+import { GridComponent, TooltipComponent, DataZoomComponent, LegendComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 
-echarts.use([CandlestickChart, BarChart, LineChart, GridComponent,
-  TooltipComponent, DataZoomComponent, CanvasRenderer])
+echarts.use([CandlestickChart, BarChart, LineChart, ScatterChart, GridComponent,
+  TooltipComponent, DataZoomComponent, LegendComponent, CanvasRenderer])
 
 // ===== 数据层（沿用原仪表盘逻辑：三接口并发 + 优雅降级）=====
 const backend = ref({ status: 'checking' })   // 后端进程本身
@@ -453,15 +453,92 @@ const dcaRoundsVisible = ref(false)
 const dcaRoundsFund = ref(null)          // { code, name }
 const dcaRounds = ref({ status: 'loading', rounds: [] })
 
+const dcaRoundsNavs = ref([])            // 弹窗净值曲线（复权，起点=1）
+let dcaRoundsChart = null
+const dcaRoundsChartEl = ref(null)
+
+function disposeDcaRoundsChart() {
+  if (dcaRoundsChart) { dcaRoundsChart.dispose(); dcaRoundsChart = null }
+}
+
 function openDcaRounds(e) {
   const data = e.data ?? e
   dcaRoundsFund.value = { code: data.code, name: data.name }
   dcaRounds.value = { status: 'loading', rounds: [] }
+  dcaRoundsNavs.value = []
+  disposeDcaRoundsChart()
   dcaRoundsVisible.value = true
   fetch(`/api/funds/dca/${data.code}/rounds`)
     .then(r => r.json())
-    .then(body => { dcaRounds.value = body })
+    .then(body => {
+      dcaRounds.value = body
+      if (body.rounds?.length && dcaRoundsNavs.value.length) {
+        nextTick(() => renderDcaRoundsChart())
+      }
+    })
     .catch(err => { dcaRounds.value = { status: 'down', detail: String(err), rounds: [] } })
+  // 净值曲线（近 2600 个净值日 ≈ 覆盖 10 年窗口），与轮次到齐后渲染
+  fetch(`/api/funds/${data.code}/navs?limit=2600`)
+    .then(r => r.json())
+    .then(body => {
+      dcaRoundsNavs.value = body.status === 'up' ? (body.navs || []) : []
+      if (dcaRounds.value.rounds?.length) {
+        nextTick(() => renderDcaRoundsChart())
+      }
+    })
+    .catch(() => { dcaRoundsNavs.value = [] })
+}
+
+// 复权净值链（与回测同口径：pct_chg 已是分红再投；缺失用单位净值比兜底）
+function buildDcaRoundsChart() {
+  const navs = dcaRoundsNavs.value
+  if (navs.length < 2) return null
+  let v = 1
+  const dates = [], adj = []
+  navs.forEach((n, i) => {
+    if (i > 0) {
+      const g = n.pct_chg != null ? n.pct_chg / 100
+        : (n.unit_nav && navs[i - 1].unit_nav ? n.unit_nav / navs[i - 1].unit_nav - 1 : 0)
+      v *= 1 + g
+    }
+    dates.push(n.date)
+    adj.push(v)
+  })
+  const tpMap = new Map(dates.map((d, i) => [d, adj[i]]))
+  const tpPts = (dcaRounds.value.rounds || [])
+    .filter(r => r.tp_date && tpMap.has(r.tp_date))
+    .map(r => ({ value: [r.tp_date, tpMap.get(r.tp_date)],
+                 profit: r.profit, seq: r.seq, gap: r.gap_days }))
+  return {
+    animation: false,
+    tooltip: { trigger: 'axis' },
+    legend: { data: ['复权净值', '止盈点'], top: 0 },
+    grid: { left: 56, right: 16, top: 30, bottom: 46 },
+    dataZoom: [{ type: 'inside' }],
+    xAxis: { type: 'category', data: dates, boundary: false,
+             axisLabel: { fontSize: 10 } },
+    yAxis: { type: 'value', scale: true, splitLine: { lineStyle: { color: '#eee' } } },
+    series: [
+      { name: '复权净值', type: 'line', data: adj, showSymbol: false,
+        lineStyle: { width: 1.3, color: '#0f62fe' } },
+      { name: '止盈点', type: 'scatter', data: tpPts, symbol: 'triangle',
+        symbolSize: 11, itemStyle: { color: '#da1e28' },
+        tooltip: { formatter: (p) => {
+          const d = p.data
+          return `<b>第 ${d.seq} 次止盈</b><br/>${d.value[0]}<br/>` +
+            `实际收益率：${(d.profit * 100).toFixed(1)}%` +
+            (d.gap != null ? `<br/>距上次止盈：${d.gap} 天` : '')
+        } } },
+    ],
+  }
+}
+
+function renderDcaRoundsChart() {
+  disposeDcaRoundsChart()
+  const opt = buildDcaRoundsChart()
+  if (!opt || !dcaRoundsChartEl.value) return
+  dcaRoundsChart = echarts.init(dcaRoundsChartEl.value)
+  dcaRoundsChart.setOption(opt)
 }
 const gapLabel = d => d == null ? '—' : `${d} 天（≈${(d / 30.44).toFixed(1)} 月）`
 
@@ -2266,9 +2343,14 @@ watch(
             <!-- ===== 每次止盈明细弹窗（点排行行触发） ===== -->
             <Dialog v-model:visible="dcaRoundsVisible" modal
               :header="dcaRoundsFund ? `${dcaRoundsFund.code} ${dcaRoundsFund.name} · 每次止盈明细` : '每次止盈明细'"
-              :style="{ width: '560px' }">
+              :style="{ width: '780px' }" @hide="disposeDcaRoundsChart">
               <p class="sub" style="margin: 0 0 8px">
                 统计口径：近 10 年窗口内 · 间隔=距上次止盈天数（首次止盈从本轮首次买入起算）· 实际收益率含跳空越过 20% 的部分
+              </p>
+              <div v-show="dcaRounds.rounds?.length" ref="dcaRoundsChartEl"
+                style="width: 100%; height: 300px; margin-bottom: 10px"></div>
+              <p class="note" style="margin: 0 0 8px" v-if="dcaRounds.rounds?.length">
+                ▲ = 每轮止盈卖点 · 曲线为复权净值（分红再投，窗口起点=1，与回测同口径）
               </p>
               <div v-if="dcaRounds.status === 'down'" class="browse-empty">
                 明细不可用：{{ dcaRounds.detail || '数据库连接失败' }}
