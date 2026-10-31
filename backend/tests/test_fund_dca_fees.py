@@ -216,3 +216,32 @@ class TestSimulateAccounting:
         dates, adj = _daily_adj(30, {29: 0.20})
         res = mod.simulate(dates, adj)
         assert res["xirr"] is None
+
+
+class TestRoundEventFields:
+    def test_round_event_fields_with_fees(self, monkeypatch):
+        """轮次事件 9 元组：止盈净值/投入/申购费/赎回费/净收益数值正确。"""
+        monkeypatch.setattr(mod, "MIN_SPAN_DAYS", 0)
+        dates, adj = _daily_adj(46, {45: 0.25})
+        fee = mod.FeeSchedule(sub_rate=0.015, redeem_tiers=mod.REDEEM_EQUITY)
+        res = mod.simulate(dates, adj, fee)
+        assert res["rounds"] == 1
+        ev = res["round_events"][0]
+        assert ev[0] == str(dates[45].date())
+        assert ev[1] == 45 and ev[2] == 45
+        # 市值口径收益率（脚本按 4 位小数舍入）：含费份额更少
+        assert ev[3] == round(2 * (1000 / 1.015) * 1.25 / 2000 - 1, 4)
+        assert ev[4] == pytest.approx(1.25, abs=1e-3)     # 止盈日复权净值
+        assert ev[5] == 2000.0                            # 本轮投入
+        assert ev[6] == pytest.approx(2 * (1000 - 1000 / 1.015), abs=0.01)
+        gross_v = 2 * (1000 / 1.015) * 1.25
+        assert ev[7] == pytest.approx(gross_v * 0.005, abs=0.01)  # 赎回费 0.5%
+        assert ev[8] == pytest.approx(gross_v * 0.995 - 2000, abs=0.01)
+
+    def test_round_event_fields_gross_zero_fees(self):
+        """无费场景：两项费用为 0，净收益 = 市值 - 投入。"""
+        dates, adj = _daily_adj(46, {45: 0.20})
+        res = mod.simulate(dates, adj)
+        ev = res["round_events"][0]
+        assert ev[6] == 0.0 and ev[7] == 0.0
+        assert ev[8] == pytest.approx(400.0)

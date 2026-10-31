@@ -317,27 +317,92 @@ class TestFundDcaPage:
                     {"date": "2024-05-20", "unit_nav": 1.45, "accum_nav": 1.45,
                      "pct_chg": 2.0, "unit_money": None, "source": "fund_em"},
                 ]})))
-        page.route("**/api/funds/dca/019387/rounds", lambda route: (
+        page.route("**/api/funds/dca/019387/rounds*", lambda route: (
             calls.append(route.request.url),
             route.fulfill(status=200, content_type="application/json", body=json.dumps({
-                "status": "up", "code": "019387",
+                "status": "up", "code": "019387", "fee": "nom",
                 "rounds": [
                     {"seq": 1, "tp_date": "2024-02-10", "round_days": 74,
-                     "gap_days": 74, "profit": 0.213},
+                     "gap_days": 74, "profit": 0.213, "tp_nav": 1.213,
+                     "invested": 5000, "sub_fee": 36.9, "redeem_fee": 12.8,
+                     "net_profit": 1050.3},
                     {"seq": 2, "tp_date": "2024-05-20", "round_days": 65,
-                     "gap_days": 100, "profit": 0.2001},
-                ]}))))
+                     "gap_days": 100, "profit": 0.2001, "tp_nav": 1.351,
+                     "invested": 4000, "sub_fee": 29.6, "redeem_fee": 10.1,
+                     "net_profit": 800.2},
+                ],
+                "totals": {"rounds": 2, "invested": 9000, "net_profit": 1850.5,
+                           "sub_fee": 66.5, "redeem_fee": 22.9},
+            }))))
         _, frontend_port = servers
         open_dca(page, frontend_port)
         page.locator(".browse-pv tbody tr", has_text="中欧时代共赢").click()
         expect(page.locator(".p-dialog")).to_be_visible()
         expect(page.locator(".p-dialog")).to_contain_text("每次止盈明细")
+        # 请求带费用口径（默认含费·申购名义）
+        assert any("fee=nom" in u for u in calls), calls
+        # 口径徽标 + totals 汇总卡
+        expect(page.locator(".p-dialog")).to_contain_text("含费·申购名义")
+        expect(page.locator(".p-dialog")).to_contain_text("2 轮")
+        expect(page.locator(".p-dialog")).to_contain_text("9,000")
+        expect(page.locator(".p-dialog")).to_contain_text("1,850.5")
         # 注意：Vue DOM API 建表不会自动插入 tbody，tr 直接挂在 table 下
         expect(page.locator(".p-dialog table tr")).to_have_count(3)
+        # 新列：止盈净值 / 申购费 / 赎回费 / 累计净收益（1,050.3 → 1,850.5）
+        expect(page.locator(".p-dialog")).to_contain_text("1.2130")
+        expect(page.locator(".p-dialog")).to_contain_text("36.9")
+        expect(page.locator(".p-dialog")).to_contain_text("12.8")
+        expect(page.locator(".p-dialog")).to_contain_text("1,850.5")
         # 净值曲线 + 止盈点图表渲染
         expect(page.locator(".p-dialog-content canvas")).to_have_count(1)
         expect(page.locator(".p-dialog")).to_contain_text("74 天（≈2.4 月）")
         expect(page.locator(".p-dialog")).to_contain_text("21.3%")
+
+    def test_detail_button_opens_dialog(self, servers, page, mock_dca):
+        """E2E-415：排行行「详情」按钮 → 打开同款止盈明细弹窗（不触发行点击两次）。"""
+        calls = []
+        page.route("**/api/funds/dca/019387/rounds*", lambda route: (
+            calls.append(route.request.url),
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({
+                "status": "up", "code": "019387", "fee": "nom", "rounds": [],
+                "totals": {"rounds": 0, "invested": 0, "net_profit": 0,
+                           "sub_fee": 0, "redeem_fee": 0}}))))
+        page.route("**/api/funds/019387/navs*", lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body=json.dumps({"status": "up", "code": "019387", "navs": []})))
+        _, frontend_port = servers
+        open_dca(page, frontend_port)
+        row = page.locator(".browse-pv tbody tr", has_text="中欧时代共赢")
+        row.locator("button.detail-btn").click()
+        expect(page.locator(".p-dialog")).to_be_visible()
+        expect(page.locator(".p-dialog")).to_contain_text("没有止盈记录")
+        assert len(calls) == 1, calls
+
+    def test_matrix_cell_click_lists_funds(self, servers, page, mock_dca):
+        """E2E-416：点击分箱格 → 格内基金清单（client 端过滤散点点集）；
+        清单内「明细」再开该基金止盈明细弹窗。"""
+        mock_scatter(page)
+        page.route("**/api/funds/dca/019387/rounds*", lambda route: route.fulfill(
+            status=200, content_type="application/json", body=json.dumps({
+                "status": "up", "code": "019387", "fee": "nom", "rounds": [],
+                "totals": {"rounds": 0, "invested": 0, "net_profit": 0,
+                           "sub_fee": 0, "redeem_fee": 0}})))
+        _, frontend_port = servers
+        open_dca(page, frontend_port)
+        # mock 散点 3 点中仅中欧时代共赢（age 2.9, scale 1.2）落在 1-3 年 × 1-10 亿
+        # 均值表：行 = 表头/<1亿/1-10亿/...，列 = 0-1年/1-3年/... → tr.nth(2).td.nth(1)
+        cell = page.locator(".dca-matrix:not(.dca-median) tr").nth(2) \
+            .locator("td").nth(1)
+        cell.click()
+        dlg = page.locator(".p-dialog", has_text="基金清单")
+        expect(dlg).to_be_visible()
+        expect(dlg).to_contain_text("运作年限 1-3 年 × 规模 1-10 亿 · 基金清单（1 只）")
+        expect(dlg).to_contain_text("019387")
+        expect(dlg).to_contain_text("中欧时代共赢")
+        expect(dlg).to_contain_text("2.9 年")
+        # 清单内「明细」→ 止盈明细弹窗
+        dlg.locator("button.detail-btn").click()
+        expect(page.locator(".p-dialog", has_text="每次止盈明细")).to_be_visible()
 
     def test_sort_column_sends_params(self, servers, page, mock_dca):
         """E2E-404：点「年化·全史」列头 → sort=full_xirr&order=asc。"""

@@ -361,22 +361,27 @@ class TestDcaRounds:
         import datetime as dt
         p = tmp_path / "rounds.csv"
         p.write_text(
-            "code,seq,tp_date,round_days,gap_days,profit\n"
-            "019387,1,2024-02-10,74,74,0.213\n"
-            "019387,2,2024-05-20,65,100,0.2001\n"
-            "161725,1,2017-03-15,,150,0.2500\n")
+            "code,fee,seq,tp_date,round_days,gap_days,profit,tp_nav,"
+            "invested,sub_fee,redeem_fee,net_profit\n"
+            "019387,nom,1,2024-02-10,74,74,0.213,1.213,5000,36.9,12.8,1050.3\n"
+            "019387,nom,2,2024-05-20,65,100,0.2001,1.351,4000,29.6,10.1,800.2\n"
+            "161725,gross,1,2017-03-15,,150,0.25,2.1,3000,0,0,750\n")
         rows = parse_rounds_csv(p)
         assert len(rows) == 3
-        assert rows[0] == ("019387", 1, dt.date(2024, 2, 10), 74, 74, 0.213)
-        assert rows[2][3] is None and rows[2][2] == dt.date(2017, 3, 15)  # round_days 空串→None
+        assert rows[0] == ("019387", "nom", 1, dt.date(2024, 2, 10), 74, 74,
+                           0.213, 1.213, 5000.0, 36.9, 12.8, 1050.3)
+        # round_days 空串→None；gross 场景费用为 0（元组含 fee，索引 +1）
+        assert rows[2][4] is None and rows[2][3] == dt.date(2017, 3, 15)
+        assert rows[2][9] == 0.0 and rows[2][10] == 0.0
 
     def test_import_rounds_sequence_and_aggregates(self, tmp_path):
         from app.dca_store import import_rounds, parse_rounds_csv
         p = tmp_path / "rounds.csv"
         p.write_text(
-            "code,seq,tp_date,round_days,gap_days,profit\n"
-            "019387,1,2024-02-10,74,74,0.213\n"
-            "019387,2,2024-05-20,65,100,0.2001\n")
+            "code,fee,seq,tp_date,round_days,gap_days,profit,tp_nav,"
+            "invested,sub_fee,redeem_fee,net_profit\n"
+            "019387,nom,1,2024-02-10,74,74,0.213,1.213,5000,36.9,12.8,1050.3\n"
+            "019387,nom,2,2024-05-20,65,100,0.2001,1.351,4000,29.6,10.1,800.2\n")
         rows = parse_rounds_csv(p)
         conn = FakeConn()
         import_rounds(conn, rows)
@@ -389,6 +394,10 @@ class TestDcaRounds:
         assert len(conn.cursor_obj.batch) == 1            # executemany 一次
         sql, seq_rows = conn.cursor_obj.batch[0]
         assert "INSERT INTO fund_dca_rounds" in sql and len(seq_rows) == 2
+        # 间隔聚合只统计 gross 口径（三场景入库后不重复计数）
+        apply_sql = [sql for sql in sqls
+                     if "gap_avg_days = t.gap_avg" in sql][0]
+        assert "fee = 'gross'" in apply_sql
 
 
 class TestDcaStoreFeeCols:
@@ -469,3 +478,58 @@ class TestDcaScatterFee:
         assert "DROP" not in sql
         assert "w10_xirr_nom" in sql
         assert body["fee"] == "nom"
+
+
+def _fetch_rounds(**kw):
+    import app.dca_api as dca_mod
+    conn = FakeConn()
+
+    def fake_connect(*a, **k):
+        return conn
+
+    orig = dca_mod.psycopg.connect
+    dca_mod.psycopg.connect = fake_connect
+    try:
+        return dca_mod.fetch_dca_rounds("postgresql://fake", "019387", **kw), conn
+    finally:
+        dca_mod.psycopg.connect = orig
+
+
+class TestDcaRoundsFee:
+    def test_default_fee_nom_param(self):
+        """缺省 fee=nom：SQL 双参数 (code, 'nom')，响应回显。"""
+        body, conn = _fetch_rounds()
+        sql, params = conn.cursor_obj.executed[0]
+        assert "fee = %s" in sql
+        assert params == ("019387", "nom")
+        assert body["fee"] == "nom"
+        assert body["totals"]["rounds"] == 0
+
+    def test_fee_whitelist_and_fallback(self):
+        """gross/disc 直传；非法值回落 nom 不进 SQL 参数。"""
+        body, conn = _fetch_rounds(fee="gross")
+        _, params = conn.cursor_obj.executed[0]
+        assert params == ("019387", "gross") and body["fee"] == "gross"
+        body, conn = _fetch_rounds(fee="1; DROP TABLE fund_dca_rounds")
+        _, params = conn.cursor_obj.executed[0]
+        assert params == ("019387", "nom") and body["fee"] == "nom"
+
+    def test_totals_sum_rounds(self):
+        """totals 汇总：轮数/累计投入/净收益/两费合计。"""
+        import app.dca_api as dca_mod
+        conn = FakeConn(rows=[
+            (1, None, 74, 74, 0.213, 1.213, 5000.0, 36.9, 12.8, 1050.3),
+            (2, None, 65, 100, 0.2001, 1.351, 4000.0, 29.6, 10.1, 800.2)])
+
+        def fake_connect(*a, **k):
+            return conn
+
+        orig = dca_mod.psycopg.connect
+        dca_mod.psycopg.connect = fake_connect
+        try:
+            body = dca_mod.fetch_dca_rounds("postgresql://fake", "019387")
+        finally:
+            dca_mod.psycopg.connect = orig
+        t = body["totals"]
+        assert t == {"rounds": 2, "invested": 9000.0, "net_profit": 1850.5,
+                     "sub_fee": 66.5, "redeem_fee": 22.9}

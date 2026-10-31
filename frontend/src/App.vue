@@ -488,7 +488,7 @@ function openDcaRounds(e) {
   dcaRoundsNavs.value = []
   disposeDcaRoundsChart()
   dcaRoundsVisible.value = true
-  fetch(`/api/funds/dca/${data.code}/rounds`)
+  fetch(`/api/funds/dca/${data.code}/rounds?fee=${dcaFeeMode.value}`)
     .then(r => r.json())
     .then(body => {
       dcaRounds.value = body
@@ -508,6 +508,16 @@ function openDcaRounds(e) {
     })
     .catch(() => { dcaRoundsNavs.value = [] })
 }
+
+// 弹窗轮次行：附加累计净收益（按 seq 累加，已了结轮次口径）
+const dcaRoundsRows = computed(() => {
+  const rounds = dcaRounds.value.rounds || []
+  let acc = 0
+  return rounds.map(r => {
+    acc += (r.net_profit || 0)
+    return { ...r, cum_net_profit: Math.round(acc * 100) / 100 }
+  })
+})
 
 // 复权净值链（与回测同口径：pct_chg 已是分红再投；缺失用单位净值比兜底）
 function buildDcaRoundsChart() {
@@ -602,6 +612,33 @@ const dcaMedianBest = computed(() => {
     }
   return best
 })
+
+// 分箱格点击 → 格内基金清单（client 端从散点点集过滤，与服务端分箱同界；
+// points = [age, scale, xirr, code, name, fund_type]，年化为当前口径）
+const DCA_AGE_BANDS = [[0, 1], [1, 3], [3, 5], [5, 10], [10, null]]
+const DCA_SCALE_BANDS = [[0, 1], [1, 10], [10, 100], [100, null]]
+const dcaCellFundsVisible = ref(false)
+const dcaCellFunds = ref({ title: '', rows: [] })
+
+function openDcaCellFunds(ai, si) {
+  const sc = dcaScatter.value
+  if (!sc || sc.status !== 'up' || !sc.points?.length) return
+  const cell = sc.matrix[ai]?.[si]
+  if (!cell || !cell.count) return
+  const [alo, ahi] = DCA_AGE_BANDS[ai]
+  const [slo, shi] = DCA_SCALE_BANDS[si]
+  const rows = sc.points
+    .filter(pt => pt[0] >= alo && (ahi == null || pt[0] < ahi)
+               && pt[1] >= slo && (shi == null || pt[1] < shi))
+    .map(pt => ({ code: pt[3], name: pt[4], fund_type: pt[5],
+                  age: pt[0], scale: pt[1], xirr: pt[2] }))
+    .sort((a, b) => b.xirr - a.xirr)
+  dcaCellFunds.value = {
+    title: `运作年限 ${sc.age_bands[ai]} × 规模 ${sc.scale_bands[si]}`,
+    rows,
+  }
+  dcaCellFundsVisible.value = true
+}
 
 // 基金净值详情（对齐个股详情形态：单位+累计净值双线走势图 + 分页明细表）
 const fund = ref(null)                    // { code, name, fund_type }
@@ -2327,9 +2364,14 @@ watch(
                     <span class="mono">{{ data.w10_start || '—' }} ~ {{ data.w10_end || '—' }}</span>
                   </template>
                 </Column>
+                <Column header="操作" style="width: 72px">
+                  <template #body="{ data }">
+                    <button class="detail-btn" @click.stop="openDcaRounds(data)">详情</button>
+                  </template>
+                </Column>
               </DataTable>
             </div>
-            <p class="note">口径：每月首个净值日投入固定金额，任一净值日持仓收益达止盈线即全仓赎回并重开新一轮（分红再投、忽略申赎费用）；统计卡为在市全集分位，不随搜索变化 · 新基金（回测窗口 &lt;90 天）年化留空 · 数据为离线回测快照，重跑 scripts/fund_dca_backtest.py 并经 app.dca_store 导入后刷新 · 点击「基金净值」可查单只净值走势</p>
+            <p class="note">口径：每月首个净值日投入固定金额，任一净值日持仓收益达止盈线即全仓赎回并重开新一轮（分红再投）；排行年化为不含费口径，散点区可切含费口径 · 统计卡为在市全集分位，不随搜索变化 · 新基金（回测窗口 &lt;90 天）年化留空 · 数据为离线回测快照，重跑 scripts/fund_dca_backtest.py 并经 app.dca_store 导入后刷新 · 点行或「详情」查看每轮止盈明细</p>
 
             <!-- ===== 年限 × 规模 三维散点（每基金一点） + 分箱统计 ===== -->
             <div class="card" style="margin-top: 16px; padding: 14px 16px 18px">
@@ -2383,7 +2425,7 @@ watch(
                   <div class="dca-matrix-wrap">
                     <div class="dc-head">
                       <b>年限段 × 规模段 分箱统计（均值）</b>
-                      <span class="dc-badge">格内 = 基金数 / 平均年化</span>
+                      <span class="dc-badge">格内 = 基金数 / 平均年化 · 点击格子查看基金清单</span>
                     </div>
                     <table class="dca-matrix">
                       <tr>
@@ -2393,7 +2435,10 @@ watch(
                       <tr v-for="(sb, si) in dcaScatter.scale_bands" :key="sb">
                         <th>{{ sb }}</th>
                         <td v-for="(ab, ai) in dcaScatter.age_bands" :key="ab"
-                            :class="{ 'dca-matrix-best': dcaScatterConclusion?.best && dcaScatterConclusion.best.ageIdx === ai && dcaScatterConclusion.best.scaleIdx === si }">
+                            :class="{ 'dca-matrix-best': dcaScatterConclusion?.best && dcaScatterConclusion.best.ageIdx === ai && dcaScatterConclusion.best.scaleIdx === si,
+                                      'dca-cell-link': dcaScatter.matrix[ai][si].count }"
+                            title="点击查看格内基金清单"
+                            @click="openDcaCellFunds(ai, si)">
                           <template v-if="dcaScatter.matrix[ai][si].count">
                             {{ dcaScatter.matrix[ai][si].count }} 只<br/>
                             <span :class="dcaScatter.matrix[ai][si].mean_xirr >= 0 ? 'chg-up' : 'chg-down'">{{ pctp(dcaScatter.matrix[ai][si].mean_xirr) }}</span>
@@ -2404,7 +2449,7 @@ watch(
                     </table>
                     <div class="dc-head" style="margin-top: 16px">
                       <b>年限段 × 规模段 分箱统计（中位）</b>
-                      <span class="dc-badge">格内 = 基金数 / 中位年化 · 中位不受极端值拉扯</span>
+                      <span class="dc-badge">格内 = 基金数 / 中位年化 · 中位不受极端值拉扯 · 点击查看清单</span>
                     </div>
                     <table class="dca-matrix dca-median">
                       <tr>
@@ -2414,7 +2459,10 @@ watch(
                       <tr v-for="(sb, si) in dcaScatter.scale_bands" :key="sb">
                         <th>{{ sb }}</th>
                         <td v-for="(ab, ai) in dcaScatter.age_bands" :key="ab"
-                            :class="{ 'dca-matrix-best': dcaMedianBest && dcaMedianBest.ageIdx === ai && dcaMedianBest.scaleIdx === si }">
+                            :class="{ 'dca-matrix-best': dcaMedianBest && dcaMedianBest.ageIdx === ai && dcaMedianBest.scaleIdx === si,
+                                      'dca-cell-link': dcaScatter.matrix[ai][si].count }"
+                            title="点击查看格内基金清单"
+                            @click="openDcaCellFunds(ai, si)">
                           <template v-if="dcaScatter.matrix[ai][si].count">
                             {{ dcaScatter.matrix[ai][si].count }} 只<br/>
                             <span :class="dcaScatter.matrix[ai][si].median_xirr >= 0 ? 'chg-up' : 'chg-down'">{{ pctp(dcaScatter.matrix[ai][si].median_xirr) }}</span>
@@ -2430,13 +2478,32 @@ watch(
               <div v-else class="browse-empty">散点数据加载中…</div>
             </div>
 
-            <!-- ===== 每次止盈明细弹窗（点排行行触发） ===== -->
+            <!-- ===== 每次止盈明细弹窗（点排行行或「详情」按钮触发） ===== -->
             <Dialog v-model:visible="dcaRoundsVisible" modal
               :header="dcaRoundsFund ? `${dcaRoundsFund.code} ${dcaRoundsFund.name} · 每次止盈明细` : '每次止盈明细'"
-              :style="{ width: '780px' }" @hide="disposeDcaRoundsChart">
+              :style="{ width: '1000px' }" @hide="disposeDcaRoundsChart">
               <p class="sub" style="margin: 0 0 8px">
-                统计口径：近 10 年窗口内 · 间隔=距上次止盈天数（首次止盈从本轮首次买入起算）· 实际收益率含跳空越过 20% 的部分
+                统计口径：近 10 年窗口 · 费用口径：<b>{{ dcaFeeLabel }}</b>（申购费外扣折份额、赎回费按每笔持有天数阶梯，与散点区切换联动）· 间隔=距上次止盈天数（首次止盈从本轮首次买入起算）· 实际收益率为市值口径（含跳空越过 20% 的部分）
               </p>
+              <div v-if="dcaRounds.totals?.rounds" class="dc-grid"
+                style="grid-template-columns: repeat(4, 1fr); margin: 0 0 12px">
+                <div class="dc-item">
+                  <div class="dc-label">已止盈轮次</div>
+                  <div class="dc-value">{{ dcaRounds.totals.rounds }} 轮</div>
+                </div>
+                <div class="dc-item">
+                  <div class="dc-label">累计投入（已了结轮次）</div>
+                  <div class="dc-value">{{ fmt(dcaRounds.totals.invested) }} 元</div>
+                </div>
+                <div class="dc-item">
+                  <div class="dc-label">累计净收益（扣费后）</div>
+                  <div class="dc-value"><b :class="dcaRounds.totals.net_profit >= 0 ? 'pos' : 'neg'">{{ fmt(dcaRounds.totals.net_profit) }}</b> 元</div>
+                </div>
+                <div class="dc-item">
+                  <div class="dc-label">费用合计（申购+赎回）</div>
+                  <div class="dc-value">{{ fmt(dcaRounds.totals.sub_fee) }} + {{ fmt(dcaRounds.totals.redeem_fee) }} 元</div>
+                </div>
+              </div>
               <div v-show="dcaRounds.rounds?.length" ref="dcaRoundsChartEl"
                 style="width: 100%; height: 300px; margin-bottom: 10px"></div>
               <p class="note" style="margin: 0 0 8px" v-if="dcaRounds.rounds?.length">
@@ -2445,18 +2512,52 @@ watch(
               <div v-if="dcaRounds.status === 'down'" class="browse-empty">
                 明细不可用：{{ dcaRounds.detail || '数据库连接失败' }}
               </div>
-              <table v-else-if="dcaRounds.rounds?.length" class="dca-matrix" style="width: 100%">
-                <tr><th>轮次</th><th>止盈日</th><th>距上次止盈</th><th>本轮持有</th><th>实际收益率</th></tr>
-                <tr v-for="r in dcaRounds.rounds" :key="r.seq">
-                  <td>第 {{ r.seq }} 次</td>
-                  <td class="mono">{{ r.tp_date || '—' }}</td>
-                  <td>{{ gapLabel(r.gap_days) }}</td>
-                  <td>{{ r.round_days != null ? r.round_days + ' 天' : '—' }}</td>
-                  <td><span :class="r.profit >= 0 ? 'chg-up' : 'chg-down'">{{ pctp(r.profit) }}</span></td>
-                </tr>
-              </table>
+              <div v-else-if="dcaRoundsRows.length" style="overflow-x: auto">
+                <table class="dca-matrix" style="width: 100%">
+                  <tr>
+                    <th>轮次</th><th>止盈日</th><th>止盈净值<br/>(复权)</th><th>实际收益率</th><th>距上次止盈</th><th>本轮持有</th>
+                    <th>本轮投入(元)</th><th>申购费(元)</th><th>赎回费(元)</th><th>本轮净收益(元)</th><th>累计净收益(元)</th>
+                  </tr>
+                  <tr v-for="r in dcaRoundsRows" :key="r.seq">
+                    <td>第 {{ r.seq }} 次</td>
+                    <td class="mono">{{ r.tp_date || '—' }}</td>
+                    <td class="mono">{{ r.tp_nav != null ? r.tp_nav.toFixed(4) : '—' }}</td>
+                    <td><span :class="r.profit >= 0 ? 'chg-up' : 'chg-down'">{{ pctp(r.profit) }}</span></td>
+                    <td>{{ gapLabel(r.gap_days) }}</td>
+                    <td>{{ r.round_days != null ? r.round_days + ' 天' : '—' }}</td>
+                    <td>{{ r.invested != null ? fmt(r.invested) : '—' }}</td>
+                    <td>{{ r.sub_fee != null ? fmt(r.sub_fee) : '—' }}</td>
+                    <td>{{ r.redeem_fee != null ? fmt(r.redeem_fee) : '—' }}</td>
+                    <td><span :class="(r.net_profit || 0) >= 0 ? 'chg-up' : 'chg-down'">{{ r.net_profit != null ? fmt(r.net_profit) : '—' }}</span></td>
+                    <td><span :class="(r.cum_net_profit || 0) >= 0 ? 'chg-up' : 'chg-down'">{{ fmt(r.cum_net_profit) }}</span></td>
+                  </tr>
+                </table>
+              </div>
               <div v-else-if="dcaRounds.status === 'loading'" class="browse-empty">加载中…</div>
               <div v-else class="browse-empty">该基金在统计窗口内没有止盈记录（从未达到 +20%）</div>
+            </Dialog>
+
+            <!-- ===== 分箱格点击 → 格内基金清单 ===== -->
+            <Dialog v-model:visible="dcaCellFundsVisible" modal
+              :header="dcaCellFunds.title ? `${dcaCellFunds.title} · 基金清单（${dcaCellFunds.rows.length} 只）` : '基金清单'"
+              :style="{ width: '880px' }">
+              <p class="sub" style="margin: 0 0 8px">
+                落在该年限段 × 规模段格内的全部在市基金 · 年化为当前口径（{{ dcaFeeLabel }}）· 按年化降序 · 点「明细」查看该基金每轮止盈
+              </p>
+              <div style="overflow: auto; max-height: 560px">
+                <table class="dca-matrix" style="width: 100%">
+                  <tr><th>代码</th><th>名称</th><th>类型</th><th>运作年限</th><th>规模(亿)</th><th>年化</th><th>操作</th></tr>
+                  <tr v-for="f in dcaCellFunds.rows" :key="f.code">
+                    <td class="mono">{{ f.code }}</td>
+                    <td style="text-align: left">{{ f.name }}</td>
+                    <td>{{ f.fund_type || '—' }}</td>
+                    <td>{{ f.age != null ? f.age.toFixed(1) + ' 年' : '—' }}</td>
+                    <td>{{ f.scale != null ? f.scale : '—' }}</td>
+                    <td><span :class="f.xirr >= 0 ? 'chg-up' : 'chg-down'">{{ pctp(f.xirr) }}</span></td>
+                    <td><button class="detail-btn" @click="openDcaRounds({ code: f.code, name: f.name })">明细</button></td>
+                  </tr>
+                </table>
+              </div>
             </Dialog>
           </template>
 
@@ -3788,6 +3889,14 @@ body {
 .dca-matrix-wrap .dca-matrix { width: 100%; min-width: 620px; font-size: 13px; }
 .dca-matrix-wrap .dca-matrix th, .dca-matrix-wrap .dca-matrix td { padding: 9px 14px; }
 .dca-matrix.dca-median { margin-top: 14px; }
+.dca-cell-link { cursor: pointer; }
+.dca-cell-link:hover { background: #eef4fc; }
+.detail-btn {
+  padding: 3px 12px; font: inherit; font-size: 12px; cursor: pointer;
+  background: var(--btn-bg); color: var(--btn-fg);
+  border: 1px solid var(--btn-border-color); border-radius: 4px;
+}
+.detail-btn:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
 .browse-pv tbody tr { cursor: pointer; }
 .task-actions { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
 .task-actions .btn { font-size: 13px; padding: 6px 14px; }

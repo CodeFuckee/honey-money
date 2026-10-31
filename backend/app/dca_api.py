@@ -164,24 +164,44 @@ def fetch_dca_list(dsn: str, *, q: str = "", alive: str = "true",
 
 
 _ROUNDS_SQL = """
-SELECT seq, tp_date, round_days, gap_days, profit
-FROM fund_dca_rounds WHERE code = %s ORDER BY seq
+SELECT seq, tp_date, round_days, gap_days, profit,
+       tp_nav, invested, sub_fee, redeem_fee, net_profit
+FROM fund_dca_rounds WHERE code = %s AND fee = %s ORDER BY seq
 """
 
 
-def fetch_dca_rounds(dsn: str, code: str) -> dict:
+def fetch_dca_rounds(dsn: str, code: str, fee: str = "nom") -> dict:
+    """单基金每轮止盈明细（按费用口径）。fee 白名单外回落 nom。
+
+    行字段：seq/tp_date/round_days/gap_days/profit（市值口径收益率）+
+    tp_nav（止盈日复权净值）/invested（本轮投入）/sub_fee/redeem_fee
+    （本轮申购/赎回费）/net_profit（本轮净收益，扣费后）；
+    totals 为已了结轮次汇总（轮数/累计投入/累计净收益/两项费用合计）。
+    """
+    fee_val = fee if fee in _FEE_XIRR_COL else "nom"
+
     def run():
         with psycopg.connect(dsn, connect_timeout=3) as conn:
             with conn.cursor() as cur:
-                cur.execute(_ROUNDS_SQL, (code,))
+                cur.execute(_ROUNDS_SQL, (code, fee_val))
                 rows = cur.fetchall()
         out = [{"seq": r[0], "tp_date": r[1].isoformat() if r[1] else None,
                 "round_days": r[2], "gap_days": r[3],
-                "profit": round(r[4], 4) if r[4] is not None else None}
+                "profit": round(r[4], 4) if r[4] is not None else None,
+                "tp_nav": r[5], "invested": r[6],
+                "sub_fee": r[7], "redeem_fee": r[8], "net_profit": r[9]}
                for r in rows]
-        return {"status": "up", "code": code, "rounds": out}
+        totals = {
+            "rounds": len(out),
+            "invested": round(sum(r["invested"] or 0 for r in out), 2),
+            "net_profit": round(sum(r["net_profit"] or 0 for r in out), 2),
+            "sub_fee": round(sum(r["sub_fee"] or 0 for r in out), 2),
+            "redeem_fee": round(sum(r["redeem_fee"] or 0 for r in out), 2),
+        }
+        return {"status": "up", "code": code, "fee": fee_val, "rounds": out,
+                "totals": totals}
     return _safe(run, {"status": "down", "detail": "pg unreachable",
-                       "code": code, "rounds": []})
+                       "code": code, "rounds": [], "totals": {}})
 
 
 def register_fund_dca_routes(app):
@@ -203,10 +223,13 @@ def register_fund_dca_routes(app):
                               limit=limit, offset=offset)
 
     @app.get("/api/funds/dca/{code}/rounds")
-    def funds_dca_rounds(code: str):
-        """单基金每次止盈明细：止盈日 / 距上次止盈天数 / 本轮持有天数 /
-        实际止盈收益率（≥20%，含跳空越过）。降级约定同 /api/funds/dca。"""
-        return fetch_dca_rounds(config.DATABASE_URL, code)
+    def funds_dca_rounds(code: str, fee: str = "nom"):
+        """单基金每轮止盈明细：止盈日 / 复权净值 / 本轮投入 / 申购赎回费 /
+        净收益（扣费后）/ 距上次止盈天数 / 本轮持有天数 / 市值口径收益率，
+        外加 totals 已了结轮次汇总。fee 选费用口径（默认含费·申购名义，
+        白名单外回落）。降级约定同 /api/funds/dca。"""
+        return fetch_dca_rounds(config.DATABASE_URL, code,
+                                fee=fee.strip().lower())
 
     @app.get("/api/funds/dca/scatter")
     def funds_dca_scatter(fee: str = "nom"):

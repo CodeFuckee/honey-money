@@ -42,12 +42,18 @@ CREATE INDEX IF NOT EXISTS idx_fund_dca_w10_xirr ON fund_dca_result (w10_xirr);
 
 CREATE TABLE IF NOT EXISTS fund_dca_rounds (
   code       VARCHAR(10) NOT NULL,
+  fee        VARCHAR(8)  NOT NULL DEFAULT 'gross',
   seq        INTEGER NOT NULL,
   tp_date    DATE NOT NULL,
   round_days INTEGER,
   gap_days   INTEGER,
   profit     DOUBLE PRECISION,
-  PRIMARY KEY (code, seq)
+  tp_nav     DOUBLE PRECISION,
+  invested   DOUBLE PRECISION,
+  sub_fee    DOUBLE PRECISION,
+  redeem_fee DOUBLE PRECISION,
+  net_profit DOUBLE PRECISION,
+  PRIMARY KEY (code, fee, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_fund_dca_rounds_code ON fund_dca_rounds (code);
 
@@ -66,6 +72,20 @@ CREATE TABLE IF NOT EXISTS fund_dca_meta (
   fund_count   INTEGER,
   params       JSONB
 );
+"""
+
+# 一次性迁移：v1 轮次表无 fee 列（PK code,seq），数据可由 CSV 全量重导，
+# 检测到旧结构直接弃表重建（导入前 ensure_schema 兜底，生产由重导填充）
+_MIGRATE_ROUNDS_V2 = """
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.tables
+             WHERE table_name = 'fund_dca_rounds')
+     AND NOT EXISTS (SELECT 1 FROM information_schema.columns
+                     WHERE table_name = 'fund_dca_rounds'
+                       AND column_name = 'fee') THEN
+    DROP TABLE fund_dca_rounds;
+  END IF;
+END $$;
 """
 
 # 列顺序即 INSERT 占位符顺序
@@ -130,10 +150,13 @@ def parse_csv(path: str | Path) -> list[dict]:
     return rows
 
 
-_ROUNDS_COLS = ["code", "seq", "tp_date", "round_days", "gap_days", "profit"]
+_ROUNDS_COLS = ["code", "fee", "seq", "tp_date", "round_days", "gap_days",
+                "profit", "tp_nav", "invested", "sub_fee", "redeem_fee",
+                "net_profit"]
 _ROUNDS_DATE = {"tp_date"}
 _ROUNDS_INT = {"seq", "round_days", "gap_days"}
-_ROUNDS_FLOAT = {"profit"}
+_ROUNDS_FLOAT = {"profit", "tp_nav", "invested", "sub_fee", "redeem_fee",
+                 "net_profit"}
 
 _UPSERT_ROUND = f"""
 INSERT INTO fund_dca_rounds ({", ".join(_ROUNDS_COLS)})
@@ -149,7 +172,7 @@ UPDATE fund_dca_result r SET
   gap_avg_days = t.gap_avg, gap_min_days = t.gap_min, gap_max_days = t.gap_max
 FROM (SELECT code, avg(gap_days) AS gap_avg,
              min(gap_days) AS gap_min, max(gap_days) AS gap_max
-      FROM fund_dca_rounds GROUP BY code) t
+      FROM fund_dca_rounds WHERE fee = 'gross' GROUP BY code) t
 WHERE r.code = t.code
 """
 
@@ -199,6 +222,7 @@ def import_rows(conn, rows: list[dict], *, params: dict | None = None) -> int:
 
 def ensure_schema(conn) -> None:
     with conn.cursor() as cur:
+        cur.execute(_MIGRATE_ROUNDS_V2)   # v1 轮次表（无 fee 列）一次性弃表重建
         cur.execute(DDL)
 
 

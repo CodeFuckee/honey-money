@@ -173,13 +173,17 @@ def simulate(dates: pd.DatetimeIndex, adj: np.ndarray,
 
     res["flows"]：XIRR 现金流 [(日期, 金额)]。
     res["round_events"]：每轮止盈事件 (tp_date, round_days, gap_days,
-    profit)——profit 为市值口径收益率（≥20%，含跳空越过部分）。
+    profit, tp_nav, invested, sub_fee, redeem_fee, net_profit)——
+    profit 为市值口径收益率（≥20%，含跳空越过部分）；tp_nav=止盈日
+    复权净值；invested=本轮累计投入；sub_fee/redeem_fee=本轮申购费
+    合计/赎回费（无费场景为 0）；net_profit=本轮净收益（回款-投入）。
     """
     months = dates.to_numpy().astype("datetime64[M]")
     seen_months = set()
     lots: list[tuple[int, float]] = []   # (买入日下标, 份额)
     basis_units = 0.0                    # Σ 份额，市值 = basis_units*adj(t)
     invested = 0.0
+    round_sub_fee = 0.0                  # 本轮累计申购费（外扣法折损）
     rounds = 0
     realized = 0.0
     flows: list[tuple[pd.Timestamp, float]] = []
@@ -198,10 +202,12 @@ def simulate(dates: pd.DatetimeIndex, adj: np.ndarray,
             lots.append((i, net_amount / a))
             basis_units += net_amount / a
             invested += AMOUNT
+            round_sub_fee += AMOUNT - net_amount
             flows.append((dates[i], -AMOUNT))
         if basis_units > 0 and basis_units * a >= invested * (1.0 + TAKE_PROFIT):
             value = basis_units * a
             net = _net_redeem(lots, dates, i, a, fee)
+            redeem_fee = value - net
             realized += net - invested
             rounds += 1
             flows.append((dates[i], net))
@@ -212,11 +218,17 @@ def simulate(dates: pd.DatetimeIndex, adj: np.ndarray,
                 (dates[i] - round_start).days if round_start is not None else None,
                 gap,
                 round(value / invested - 1.0, 4),
+                round(a, 4),                     # 止盈日复权净值
+                round(invested, 2),              # 本轮累计投入
+                round(round_sub_fee, 2),         # 本轮申购费合计
+                round(redeem_fee, 2),            # 本轮赎回费
+                round(net - invested, 2),        # 本轮净收益（扣费后）
             ))
             last_tp = dates[i]
             lots = []
             basis_units = 0.0
             invested = 0.0
+            round_sub_fee = 0.0
 
     if basis_units > 0:
         end_value = _net_redeem(lots, dates, len(dates) - 1, adj[-1], fee)
@@ -335,21 +347,26 @@ def main():
             "scale_yi": scale_idx["scale_yi"].get(code),
             "scale_date": scale_idx["scale_date"].get(code),
         }
+        w10_res_by_fee = {}
         for prefix, prep in (("full", full_p), ("w10", w10_p)):
             res = simulate(*prep, fee["gross"]) if prep else None
             for k in COLS_FULL:
                 row[f"{prefix}_{k}"] = res[k] if res else None
-            # 含费场景只多出年化列；轮次等事件沿用无费口径（触发线一致）
-            row[f"{prefix}_xirr_disc"] = (
-                simulate(*prep, fee["disc"])["xirr"] if prep else None)
-            row[f"{prefix}_xirr_nom"] = (
-                simulate(*prep, fee["nom"])["xirr"] if prep else None)
+            # 含费场景多出年化列；w10 的三场景轮次明细全量入库（止盈日
+            # 随场景份额略有差异，各自自洽）
+            disc_res = simulate(*prep, fee["disc"]) if prep else None
+            nom_res = simulate(*prep, fee["nom"]) if prep else None
+            row[f"{prefix}_xirr_disc"] = disc_res["xirr"] if disc_res else None
+            row[f"{prefix}_xirr_nom"] = nom_res["xirr"] if nom_res else None
             if prefix == "w10":
                 w10_res = res
+                w10_res_by_fee = {"gross": res, "disc": disc_res, "nom": nom_res}
         rows.append(row)
-        if w10_res:
-            for seq, ev in enumerate(w10_res["round_events"], 1):
-                rounds_rows.append([code, seq, *ev])
+        for fee_name in ("gross", "disc", "nom"):
+            res_w = w10_res_by_fee.get(fee_name)
+            if res_w:
+                for seq, ev in enumerate(res_w["round_events"], 1):
+                    rounds_rows.append([code, fee_name, seq, *ev])
         if len(rows) % 1000 == 0:
             print(f"  已回测 {len(rows)} 只", flush=True)
 
@@ -358,7 +375,9 @@ def main():
     out.to_csv(OUT_CSV, index=False)
     with (DATA / "fund_dca_rounds.csv").open("w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["code", "seq", "tp_date", "round_days", "gap_days", "profit"])
+        w.writerow(["code", "fee", "seq", "tp_date", "round_days", "gap_days",
+                    "profit", "tp_nav", "invested", "sub_fee", "redeem_fee",
+                    "net_profit"])
         w.writerows(rounds_rows)
     print(f"写入 {OUT_CSV}：{len(out)} 只"
           + (f"（运作 ≥{min_age_years:g} 年门槛剔除 {skipped_age} 只）"
