@@ -2310,31 +2310,55 @@ watch(
               <template v-else-if="dcaScatter?.points?.length">
                 <div ref="dcaScatterChartEl" class="dca-scatter-chart" style="width: 100%; height: 620px"></div>
 
-                <div class="dca-conclusion" v-if="dcaScatterConclusion" style="margin-top: 10px">
-                  <p><b>结论（在市 {{ dcaScatter.points.length }} 只，每基金只计一次）：</b></p>
-                  <p>① 年限维度：运作 &lt;1 年的平均年化 {{ pctp(dcaScatterConclusion.ageMean[0]) }}，之后随年限整体抬升，≥10 年达 {{ pctp(dcaScatterConclusion.ageMean[4]) }}——年限越长、定投止盈的年化越稳越高。</p>
-                  <p>② 规模维度：规模的影响弱于年限——各规模段平均年化 {{ dcaScatter.scale_bands.map((_, i) => pctp(dcaScatterConclusion.scaleMean[i])).join(' → ') }}（&lt;1 亿 → ≥100 亿），差距不大且非单调。</p>
-                  <p v-if="dcaScatterConclusion.best">③ 组合最优格（样本 ≥300）：{{ dcaScatter.age_bands[dcaScatterConclusion.best.ageIdx] }} × {{ dcaScatter.scale_bands[dcaScatterConclusion.best.scaleIdx] }}——平均年化 {{ pctp(dcaScatterConclusion.best.cell.mean_xirr) }}（{{ dcaScatterConclusion.best.cell.count }} 只，中位 {{ pctp(dcaScatterConclusion.best.cell.median_xirr) }}，年化为正 {{ pct0(dcaScatterConclusion.best.cell.positive_share) }}）。</p>
+                <!-- 结论（左） + 分箱矩阵（右）：宽屏并排、窄屏堆叠 -->
+                <div class="dca-panel">
+                  <div class="dca-conclusion" v-if="dcaScatterConclusion">
+                    <div class="dc-head">
+                      <b>结论</b>
+                      <span class="dc-badge">在市 {{ fmt(dcaScatter.points.length) }} 只 · 每基金只计一次</span>
+                    </div>
+                    <div class="dc-grid">
+                      <div class="dc-item">
+                        <div class="dc-label">年限维度</div>
+                        <div class="dc-value">&lt;1 年 <b :class="dcaScatterConclusion.ageMean[0] >= 0 ? 'pos' : 'neg'">{{ pctp(dcaScatterConclusion.ageMean[0]) }}</b><span class="dc-arrow">→</span>≥10 年 <b :class="dcaScatterConclusion.ageMean[4] >= 0 ? 'pos' : 'neg'">{{ pctp(dcaScatterConclusion.ageMean[4]) }}</b></div>
+                        <div class="dc-note">年限越长、定投止盈的年化越稳越高</div>
+                      </div>
+                      <div class="dc-item">
+                        <div class="dc-label">规模维度</div>
+                        <div class="dc-value"><template v-for="(sb, i) in dcaScatter.scale_bands" :key="sb"><span v-if="i" class="dc-arrow">→</span><b :class="dcaScatterConclusion.scaleMean[i] >= 0 ? 'pos' : 'neg'">{{ pctp(dcaScatterConclusion.scaleMean[i]) }}</b></template></div>
+                        <div class="dc-note">&lt;1 亿 → ≥100 亿 · 影响弱于年限，差距不大且非单调</div>
+                      </div>
+                      <div class="dc-item dc-best" v-if="dcaScatterConclusion.best">
+                        <div class="dc-label">★ 组合最优格<span class="dc-hint">样本 ≥300</span></div>
+                        <div class="dc-value">{{ dcaScatter.age_bands[dcaScatterConclusion.best.ageIdx] }} × {{ dcaScatter.scale_bands[dcaScatterConclusion.best.scaleIdx] }}</div>
+                        <div class="dc-note">平均年化 <b :class="dcaScatterConclusion.best.cell.mean_xirr >= 0 ? 'pos' : 'neg'">{{ pctp(dcaScatterConclusion.best.cell.mean_xirr) }}</b> · {{ fmt(dcaScatterConclusion.best.cell.count) }} 只 · 中位 {{ pctp(dcaScatterConclusion.best.cell.median_xirr) }} · 年化为正 {{ pct0(dcaScatterConclusion.best.cell.positive_share) }}</div>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="dca-matrix-wrap">
+                    <div class="dc-head">
+                      <b>年限段 × 规模段 分箱统计</b>
+                      <span class="dc-badge">格内 = 基金数 / 平均年化</span>
+                    </div>
+                    <table class="dca-matrix">
+                      <tr>
+                        <th>规模 \ 年限</th>
+                        <th v-for="ab in dcaScatter.age_bands" :key="ab">{{ ab }}</th>
+                      </tr>
+                      <tr v-for="(sb, si) in dcaScatter.scale_bands" :key="sb">
+                        <th>{{ sb }}</th>
+                        <td v-for="(ab, ai) in dcaScatter.age_bands" :key="ab"
+                            :class="{ 'dca-matrix-best': dcaScatterConclusion?.best && dcaScatterConclusion.best.ageIdx === ai && dcaScatterConclusion.best.scaleIdx === si }">
+                          <template v-if="dcaScatter.matrix[ai][si].count">
+                            {{ dcaScatter.matrix[ai][si].count }} 只<br/>
+                            <span :class="dcaScatter.matrix[ai][si].mean_xirr >= 0 ? 'chg-up' : 'chg-down'">{{ pctp(dcaScatter.matrix[ai][si].mean_xirr) }}</span>
+                          </template>
+                          <template v-else>—</template>
+                        </td>
+                      </tr>
+                    </table>
+                  </div>
                 </div>
-
-                <p class="sub" style="margin: 10px 0 6px"><b>年限段 × 规模段 分箱统计</b>（每基金按自身坐标计入唯一格子；格内=基金数 / 平均年化）</p>
-                <table class="dca-matrix">
-                  <tr>
-                    <th>规模 \ 年限</th>
-                    <th v-for="ab in dcaScatter.age_bands" :key="ab">{{ ab }}</th>
-                  </tr>
-                  <tr v-for="(sb, si) in dcaScatter.scale_bands" :key="sb">
-                    <th>{{ sb }}</th>
-                    <td v-for="(ab, ai) in dcaScatter.age_bands" :key="ab"
-                        :class="{ 'dca-matrix-best': dcaScatterConclusion?.best && dcaScatterConclusion.best.ageIdx === ai && dcaScatterConclusion.best.scaleIdx === si }">
-                      <template v-if="dcaScatter.matrix[ai][si].count">
-                        {{ dcaScatter.matrix[ai][si].count }} 只<br/>
-                        <span :class="dcaScatter.matrix[ai][si].mean_xirr >= 0 ? 'chg-up' : 'chg-down'">{{ pctp(dcaScatter.matrix[ai][si].mean_xirr) }}</span>
-                      </template>
-                      <template v-else>—</template>
-                    </td>
-                  </tr>
-                </table>
                 <p class="note" style="margin-top: 8px">口径：在市且年化非空的基金 · 年化为定投+20%止盈的 XIRR · 超出轴范围（年化 &lt;-100% / &gt;300%、年限 &gt;25 年）的点截断在边缘 · 结论由分箱统计自动生成</p>
               </template>
               <div v-else class="browse-empty">散点数据加载中…</div>
@@ -3663,14 +3687,40 @@ body {
 .age-wrap { display: inline-flex; align-items: center; gap: 6px; }
 .age-wrap .age-input { width: 76px; text-align: right; }
 .age-suffix { font-size: 12px; opacity: .72; white-space: nowrap; }
-.dca-conclusion { background: #f4f7fb; border: 1px solid #d0e2ff; border-radius: 8px;
-  padding: 10px 14px; margin: 4px 0 10px; font-size: 13px; line-height: 1.7; }
-.dca-conclusion p { margin: 2px 0; }
+/* 结论卡（整宽，三条数据条自适应横排） + 分箱矩阵（拉伸撑满卡片宽）
+   （2026-10-31 截图反馈：原整段长句结论信息密度过高，重排后又留右侧空白；
+   二稿按用户要求整行撑满） */
+.dca-panel { margin-top: 10px; }
+.dca-conclusion { background: #f4f7fb; border: 1px solid #d0e2ff;
+  border-radius: 8px; padding: 12px 16px 14px; font-size: 13px; line-height: 1.6; }
+.dc-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; }
+.dc-head b { font-size: 14px; }
+.dc-badge { font-size: 12px; color: #5a6b85; background: #e8f0fc; border-radius: 999px;
+  padding: 2px 10px; white-space: nowrap; }
+.dc-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 12px 28px; margin-top: 12px; }
+.dc-label { font-size: 12px; color: #5a6b85; }
+.dc-value { font-size: 16px; font-weight: 600; margin-top: 2px; }
+.dc-value .pos { color: #da1e28; }   /* 红涨（同 .lm-v.chg-up 口径） */
+.dc-value .neg { color: #198038; }   /* 绿跌 */
+.dc-arrow { color: #8aa0c0; font-weight: 400; font-size: 13px; margin: 0 5px; }
+.dc-note { font-size: 12px; color: #6b7a93; margin-top: 3px; }
+.dc-hint { font-size: 11px; font-weight: 400; color: #5a6b85; background: #e8f0fc;
+  border-radius: 999px; padding: 1px 8px; margin-left: 6px; }
+.dc-best { background: #f3f9ea; border: 1px solid #c9e4a2; border-radius: 8px;
+  padding: 10px 12px 12px; }
+.dc-best .dc-label { color: #56742f; }
+.dca-matrix-wrap { margin-top: 14px; overflow-x: auto; }
 .dca-matrix { border-collapse: collapse; font-size: 12px; }
 .dca-matrix th, .dca-matrix td { border: 1px solid #e0e0e0; padding: 6px 10px;
   text-align: center; white-space: nowrap; }
 .dca-matrix th { background: #f4f4f4; font-weight: 600; }
 .dca-matrix-best { background: #def1c6; font-weight: 600; }
+.dca-matrix .chg-up { color: #da1e28; }    /* 红涨 */
+.dca-matrix .chg-down { color: #198038; }  /* 绿跌 */
+/* 散点区块内的矩阵拉伸撑满（基础 12px 版留给止盈明细弹窗） */
+.dca-matrix-wrap .dca-matrix { width: 100%; min-width: 620px; font-size: 13px; }
+.dca-matrix-wrap .dca-matrix th, .dca-matrix-wrap .dca-matrix td { padding: 9px 14px; }
 .browse-pv tbody tr { cursor: pointer; }
 .task-actions { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
 .task-actions .btn { font-size: 13px; padding: 6px 14px; }
