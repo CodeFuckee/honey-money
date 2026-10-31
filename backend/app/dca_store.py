@@ -54,6 +54,11 @@ CREATE INDEX IF NOT EXISTS idx_fund_dca_rounds_code ON fund_dca_rounds (code);
 ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS gap_avg_days DOUBLE PRECISION;
 ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS gap_min_days INTEGER;
 ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS gap_max_days INTEGER;
+-- 费用三口径年化（gross 沿用原 *_xirr 列；disc=申购一折、nom=名义，赎回费一致）
+ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS w10_xirr_disc DOUBLE PRECISION;
+ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS w10_xirr_nom DOUBLE PRECISION;
+ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS full_xirr_disc DOUBLE PRECISION;
+ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS full_xirr_nom DOUBLE PRECISION;
 
 CREATE TABLE IF NOT EXISTS fund_dca_meta (
   id           BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
@@ -68,13 +73,15 @@ _COLS = ["code", "name", "fund_type", "alive", "scale_yi", "scale_date",
          "w10_start", "w10_end", "w10_months", "w10_rounds",
          "w10_invested", "w10_final_value", "w10_profit_rate", "w10_xirr",
          "full_start", "full_end", "full_months", "full_rounds",
-         "full_invested", "full_final_value", "full_profit_rate", "full_xirr"]
+         "full_invested", "full_final_value", "full_profit_rate", "full_xirr",
+         "w10_xirr_disc", "w10_xirr_nom", "full_xirr_disc", "full_xirr_nom"]
 
 _DATE_COLS = {"scale_date", "w10_start", "w10_end", "full_start", "full_end"}
 _INT_COLS = {"w10_months", "w10_rounds", "full_months", "full_rounds"}
 _FLOAT_COLS = {"scale_yi", "w10_invested", "w10_final_value", "w10_profit_rate",
                "w10_xirr", "full_invested", "full_final_value",
-               "full_profit_rate", "full_xirr"}
+               "full_profit_rate", "full_xirr",
+               "w10_xirr_disc", "w10_xirr_nom", "full_xirr_disc", "full_xirr_nom"}
 
 _ALIVE_WINDOW_DAYS = 45   # 最后净值日距数据集最新净值日的在市窗口
 

@@ -420,18 +420,37 @@ const pct0 = v => v == null ? '—' : (v * 100).toFixed(0) + '%'
 const dcaScatter = ref(null)
 const dcaScatterChartEl = ref(null)
 let dcaScatterChart = null
+// 年化口径：gross=不含费 / disc=含费·申购一折 / nom=含费·申购名义
+// （赎回费三口径一致按持有天数阶梯收取；管理/托管/服务费已在净值内）
+const dcaFeeMode = ref('disc')
+const dcaFeeLoading = ref(false)
+let dcaFeeReqSeq = 0                       // 竞态防护：只采纳最后一次请求的响应
+const DCA_FEE_OPTIONS = [
+  { key: 'gross', label: '不含费' },
+  { key: 'disc', label: '含费·申购一折' },
+  { key: 'nom', label: '含费·申购名义' },
+]
+const dcaFeeLabel = computed(() =>
+  (DCA_FEE_OPTIONS.find(o => o.key === dcaFeeMode.value) || {}).label || '')
 
 async function loadDcaScatter() {
+  const seq = ++dcaFeeReqSeq
+  dcaFeeLoading.value = true
   try {
-    const r = await fetch('/api/funds/dca/scatter')
-    dcaScatter.value = await r.json()
+    const r = await fetch(`/api/funds/dca/scatter?fee=${dcaFeeMode.value}`)
+    const body = await r.json()
+    if (seq === dcaFeeReqSeq) dcaScatter.value = body   // 期间又切换过 → 丢弃旧响应
   } catch (e) {
-    dcaScatter.value = { status: 'down', detail: String(e), points: [],
-                         matrix: [] }
+    if (seq === dcaFeeReqSeq)
+      dcaScatter.value = { status: 'down', detail: String(e), points: [],
+                           matrix: [] }
+  } finally {
+    if (seq === dcaFeeReqSeq) dcaFeeLoading.value = false
   }
   await nextTick()
   renderDcaScatterChart()
 }
+watch(dcaFeeMode, () => { loadDcaScatter() })
 
 function renderDcaScatterChart() {
   if (dcaScatterChart) { dcaScatterChart.destroy(); dcaScatterChart = null }
@@ -2303,6 +2322,16 @@ watch(
                   <h2 class="h1" style="font-size: 18px">年限 × 规模 × 年化 三维散点</h2>
                   <p class="sub">每只在市基金一个点，落在自己的（运作年限，规模，年化）坐标上，不做任何分组重复计数 · 规模为对数轴 · 悬停点查看基金明细 · 统计截至 {{ dcaScatter?.ref_date || '—' }}</p>
                 </div>
+                <div class="toolbar-right">
+                  <span v-if="dcaFeeLoading" class="sub" style="margin-right: 8px">重算中…</span>
+                  <div class="src-seg" :style="dcaFeeLoading ? 'opacity:.55' : ''">
+                    <button v-for="o in DCA_FEE_OPTIONS" :key="o.key"
+                            class="src-seg-btn"
+                            :class="{ active: dcaFeeMode === o.key }"
+                            @click="dcaFeeMode = o.key"
+                            :data-fee="o.key">{{ o.label }}</button>
+                  </div>
+                </div>
               </div>
               <div v-if="dcaScatter?.status === 'down'" class="browse-empty">
                 散点分析不可用：{{ dcaScatter.detail || '数据库连接失败' }}
@@ -2315,7 +2344,7 @@ watch(
                   <div class="dca-conclusion" v-if="dcaScatterConclusion">
                     <div class="dc-head">
                       <b>结论</b>
-                      <span class="dc-badge">在市 {{ fmt(dcaScatter.points.length) }} 只 · 每基金只计一次</span>
+                      <span class="dc-badge">{{ dcaFeeLabel }} · 在市 {{ fmt(dcaScatter.points.length) }} 只 · 每基金只计一次</span>
                     </div>
                     <div class="dc-grid">
                       <div class="dc-item">
@@ -2359,7 +2388,7 @@ watch(
                     </table>
                   </div>
                 </div>
-                <p class="note" style="margin-top: 8px">口径：在市且年化非空的基金 · 年化为定投+20%止盈的 XIRR · 超出轴范围（年化 &lt;-100% / &gt;300%、年限 &gt;25 年）的点截断在边缘 · 结论由分箱统计自动生成</p>
+                <p class="note" style="margin-top: 8px">口径：在市且年化非空的基金 · 年化为定投+20%止盈的 XIRR，可切换 不含费 / 含费·申购一折 / 含费·申购名义（申购费外扣折份额，赎回费按每笔持有天数阶梯：权益类 7 天内 1.5%、7 天~1 年 0.5%、1~2 年 0.25%、之后免，债券与 C 类 7 天后免；管理/托管/销售服务费已在净值内不重复计） · 超出轴范围（年化 &lt;-100% / &gt;300%、年限 &gt;25 年）的点截断在边缘 · 结论由分箱统计自动生成</p>
               </template>
               <div v-else class="browse-empty">散点数据加载中…</div>
             </div>

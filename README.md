@@ -39,7 +39,9 @@ frontend/           Vue3 + Vite 前端
                       同步 URL + 止盈间隔列（≈N 月/次，点行弹窗看每轮
                       止盈日/间隔/持有天数/实际收益率，fund_dca_rounds
                       表 35k 轮全市场明细）；下方「年限 × 规模 × 年化」
-                      可旋转三维散点
+                      可旋转三维散点，年化口径三档切换（不含费/
+                      含费·申购一折/含费·申购名义——申赎费用建模见
+                      scripts/fund_dca_backtest.py 费率表）
                       （原生 canvas 自绘引擎：拖拽旋转/滚轮缩放/悬停明细，
                       每基金一点）+ 年限段×规模段分箱统计矩阵与自动结论；
                       数据链路见 scripts/）；
@@ -72,7 +74,8 @@ scripts/            离线研究/数据管道脚本（不入 CI）：fund_scale_
                     （短历史净值回补）/ fund_full_sync_missing.py（fund_basic
                     全集差集同步——ETF 等）/ fund_dca_backtest.py（定投+止盈
                     全市场回测 → scripts/data/*.csv，gitignore，经 app.dca_store
-                    导入后页面可见）
+                    导入后页面可见；含申赎费用三场景建模：gross 不含费/
+                    disc 申购一折/nom 申购名义，赎回费按每笔持有天数阶梯）
 ```
 
 ## MCP server（agent 接入回测与行情）

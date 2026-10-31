@@ -5,12 +5,19 @@
 - 定投：每只基金每月首个净值日投入固定 1000 元（金额不影响收益率）；
 - 复权：东财日增长率 pct_chg 已是分红再投资口径（已验证），链乘合成复权净值；
   pct_chg 缺失行用 (unit_nav+每份分红)/前日单位净值 兜底（分红由累计净值差推出）；
-- 止盈：任一净值日持仓收益率 = 持仓市值/已投入 - 1 ≥ 20% 即全仓赎回并开启新一轮；
-  忽略申赎费用；
-- 年化：XIRR（资金加权，现金流 = 每月 -1000 / 止盈日 +市值 / 期末清算 +市值）；
+- 止盈：任一净值日持仓收益率 = 持仓市值/已投入 - 1 ≥ 20% 即全仓赎回并开启新一轮
+  （触发线按市值口径，三场景共用同一条路径）；
+- 费用：持有期费用（管理/托管/销售服务费）已在净值口径内；交易费用按
+  申购费（外扣法，按买入折份额）+ 赎回费（按每笔份额持有天数套阶梯）建模，
+  跑三场景——gross 不含费（原口径）/ disc 申购费一折 / nom 申购费名义
+  （赎回费一律不折扣）。全市场无结构化费率源，费率按基金类型 + A/C 类
+  估典型档位（精确的近似）；
+- 年化：XIRR（资金加权，现金流 = 每月 -1000 / 止盈日 +净回款 / 期末清算 +净回款；
+  含费场景的回款为扣赎回费后净额，投入现金流仍记全额）；
 - 双窗口：full=基金全历史；10y=近 10 年（窗口内成立则从成立起）。
 
-输出 scripts/data/fund_dca_backtest.csv（每基金一行，双窗口指标）。
+输出 scripts/data/fund_dca_backtest.csv（每基金一行，双窗口指标；
+xirr 三列 *_xirr / *_xirr_disc / *_xirr_nom 对应三场景）。
 用法：.venv/bin/python scripts/fund_dca_backtest.py
 """
 
@@ -19,6 +26,7 @@ import io
 import os
 from datetime import date
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -36,6 +44,56 @@ AMOUNT = 1000.0
 TAKE_PROFIT = 0.20
 WINDOW_10Y = pd.DateOffset(years=10)
 MIN_SPAN_DAYS = 90  # 窗口短于此天数的年化记 nan
+
+
+# ===== 费用模型（典型档位近似，见模块 docstring） =====
+
+SUB_DISCOUNT = 0.1   # 三方代销平台申购费一折（disc 场景）
+# 申购名义费率（A 类按 fund_type 前缀归档；C 类与货币类为 0）
+SUB_RATE_A = {"股票": 0.015, "混合": 0.015, "指数": 0.015, "QDII": 0.015,
+              "FOF": 0.012, "商品": 0.015, "债券": 0.008, "货币": 0.0}
+_SUB_RATE_DEFAULT = 0.015   # 未知类型按权益类顶格
+# 赎回费阶梯 (持有天数上限, 费率)：天数 < 上限命中该档，超出末档为 0
+REDEEM_EQUITY = ((7, 0.015), (365, 0.005), (730, 0.0025))   # 权益类 A
+REDEEM_BOND_C = ((7, 0.015),)                                # 债券 A ≥7 天免、一切 C 类、货币
+
+
+class FeeSchedule(NamedTuple):
+    sub_rate: float
+    redeem_tiers: tuple
+
+
+def sub_rate_for(fund_type) -> float:
+    ft = fund_type or ""
+    for prefix, rate in SUB_RATE_A.items():
+        if ft.startswith(prefix):
+            return rate
+    return _SUB_RATE_DEFAULT
+
+
+def is_c_class(name) -> bool:
+    return bool(name) and name.rstrip().endswith("C")
+
+
+def redeem_rate(days: int, tiers: tuple) -> float:
+    for cap, rate in tiers:
+        if days < cap:
+            return rate
+    return 0.0
+
+
+def fee_schedules_for(name, fund_type) -> dict:
+    """三场景费率调度：gross 无费；disc=申购一折；nom=申购名义。
+
+    赎回费不折扣。C 类/货币类申购费为 0；债券 A 与 C 类/货币类用短赎回阶梯。
+    """
+    c_or_money = is_c_class(name) or (fund_type or "").startswith("货币")
+    sub_nom = 0.0 if c_or_money else sub_rate_for(fund_type)
+    tiers = (REDEEM_BOND_C if c_or_money or (fund_type or "").startswith("债券")
+             else REDEEM_EQUITY)
+    return {"gross": None,
+            "disc": FeeSchedule(sub_nom * SUB_DISCOUNT, tiers),
+            "nom": FeeSchedule(sub_nom, tiers)}
 
 
 def build_growth(df: pd.DataFrame) -> np.ndarray:
@@ -94,16 +152,33 @@ def xirr(flows: list[tuple[pd.Timestamp, float]]) -> float | None:
     return grid[-1] if f_prev == 0 else None
 
 
-def simulate(dates: pd.DatetimeIndex, adj: np.ndarray) -> dict:
+def _net_redeem(lots: list[tuple[int, float]], dates: pd.DatetimeIndex,
+                i: int, a: float, fee: "FeeSchedule | None") -> float:
+    """按笔清仓：Σ 份额市值×(1-赎回费率(持有天数))；无费调度直通总市值。"""
+    if fee is None:
+        return sum(sh for _, sh in lots) * a
+    return sum(sh * a * (1.0 - redeem_rate((dates[i] - dates[bi]).days,
+                                           fee.redeem_tiers))
+               for bi, sh in lots)
+
+
+def simulate(dates: pd.DatetimeIndex, adj: np.ndarray,
+             fee: FeeSchedule | None = None) -> dict:
     """单基金单窗口：每月首个净值日买入，日频检查 20% 止盈。
 
+    fee=None 为无费口径（原行为）；给定调度时申购按外扣法折份额
+    （净申购 = 金额/(1+费率)，投入现金流仍记全额），止盈/期末清算的
+    回款现金流为扣赎回费后净额。止盈触发线按市值口径，与用户在
+    APP 里看到的一致，三场景共用。
+
+    res["flows"]：XIRR 现金流 [(日期, 金额)]。
     res["round_events"]：每轮止盈事件 (tp_date, round_days, gap_days,
-    profit)——gap_days=距上次止盈天数（首轮=从首轮首次买入起算），
-    profit=实际止盈收益率（≥20%，含跳空越过部分）。
+    profit)——profit 为市值口径收益率（≥20%，含跳空越过部分）。
     """
     months = dates.to_numpy().astype("datetime64[M]")
     seen_months = set()
-    basis_units = 0.0  # Σ 投入额/买入日adj，市值 = basis_units*adj(t)
+    lots: list[tuple[int, float]] = []   # (买入日下标, 份额)
+    basis_units = 0.0                    # Σ 份额，市值 = basis_units*adj(t)
     invested = 0.0
     rounds = 0
     realized = 0.0
@@ -119,14 +194,17 @@ def simulate(dates: pd.DatetimeIndex, adj: np.ndarray) -> dict:
             seen_months.add(m)
             if basis_units == 0.0:
                 round_start = dates[i]      # 新一轮从本轮首次买入起算
-            basis_units += AMOUNT / a
+            net_amount = AMOUNT if fee is None else AMOUNT / (1.0 + fee.sub_rate)
+            lots.append((i, net_amount / a))
+            basis_units += net_amount / a
             invested += AMOUNT
             flows.append((dates[i], -AMOUNT))
         if basis_units > 0 and basis_units * a >= invested * (1.0 + TAKE_PROFIT):
             value = basis_units * a
-            realized += value - invested
+            net = _net_redeem(lots, dates, i, a, fee)
+            realized += net - invested
             rounds += 1
-            flows.append((dates[i], value))
+            flows.append((dates[i], net))
             gap = (dates[i] - last_tp).days if last_tp is not None else \
                 (dates[i] - round_start).days
             round_events.append((
@@ -136,12 +214,15 @@ def simulate(dates: pd.DatetimeIndex, adj: np.ndarray) -> dict:
                 round(value / invested - 1.0, 4),
             ))
             last_tp = dates[i]
+            lots = []
             basis_units = 0.0
             invested = 0.0
 
-    end_value = basis_units * adj[-1]
     if basis_units > 0:
+        end_value = _net_redeem(lots, dates, len(dates) - 1, adj[-1], fee)
         flows.append((dates[-1], end_value))
+    else:
+        end_value = 0.0
     invested_total = -sum(a for _, a in flows if a < 0)  # 正数口径
     profit = realized + (end_value - invested) if basis_units > 0 else realized
     span = (dates[-1] - dates[0]).days
@@ -151,6 +232,7 @@ def simulate(dates: pd.DatetimeIndex, adj: np.ndarray) -> dict:
         "months": len(seen_months),
         "rounds": rounds,
         "round_events": round_events,
+        "flows": flows,
         "invested": round(invested_total, 2),
         "final_value": round(invested_total + profit, 2),
         "profit_rate": profit / invested_total if invested_total > 0 else None,
@@ -159,7 +241,8 @@ def simulate(dates: pd.DatetimeIndex, adj: np.ndarray) -> dict:
     return res
 
 
-def run_window(df: pd.DataFrame, start: pd.Timestamp | None) -> dict | None:
+def prep_window(df: pd.DataFrame, start: pd.Timestamp | None):
+    """窗口切片 + 复权净值链，返回 (dates, adj)；数据不足返回 None。"""
     d = df["nav_date"]
     if start is not None:
         df = df[d >= start]
@@ -167,8 +250,15 @@ def run_window(df: pd.DataFrame, start: pd.Timestamp | None) -> dict | None:
         return None
     df = df.reset_index(drop=True)
     dates = pd.DatetimeIndex(pd.to_datetime(df["nav_date"]))
-    adj = np.cumprod(1.0 + build_growth(df))
-    return simulate(dates, adj)
+    return dates, np.cumprod(1.0 + build_growth(df))
+
+
+def run_window(df: pd.DataFrame, start: pd.Timestamp | None,
+               fee: FeeSchedule | None = None) -> dict | None:
+    prep = prep_window(df, start)
+    if prep is None:
+        return None
+    return simulate(prep[0], prep[1], fee)
 
 
 COLS_FULL = ["start", "end", "months", "rounds", "invested", "final_value",
@@ -231,10 +321,12 @@ def main():
             if (end_ts - first).days < min_age_years * 365.25:
                 skipped_age += 1
                 continue
-        full = run_window(g, None)
-        w10 = run_window(g, end_ts - WINDOW_10Y)
-        if full is None and w10 is None:
+        full_p = prep_window(g, None)
+        w10_p = prep_window(g, end_ts - WINDOW_10Y)
+        if full_p is None and w10_p is None:
             continue
+        fee = fee_schedules_for(basic["name"].get(code, ""),
+                                basic["fund_type"].get(code, ""))
         row = {
             "code": code,
             "name": basic["name"].get(code, ""),
@@ -243,12 +335,20 @@ def main():
             "scale_yi": scale_idx["scale_yi"].get(code),
             "scale_date": scale_idx["scale_date"].get(code),
         }
-        for prefix, res in (("full", full), ("w10", w10)):
+        for prefix, prep in (("full", full_p), ("w10", w10_p)):
+            res = simulate(*prep, fee["gross"]) if prep else None
             for k in COLS_FULL:
                 row[f"{prefix}_{k}"] = res[k] if res else None
+            # 含费场景只多出年化列；轮次等事件沿用无费口径（触发线一致）
+            row[f"{prefix}_xirr_disc"] = (
+                simulate(*prep, fee["disc"])["xirr"] if prep else None)
+            row[f"{prefix}_xirr_nom"] = (
+                simulate(*prep, fee["nom"])["xirr"] if prep else None)
+            if prefix == "w10":
+                w10_res = res
         rows.append(row)
-        if w10:
-            for seq, ev in enumerate(w10["round_events"], 1):
+        if w10_res:
+            for seq, ev in enumerate(w10_res["round_events"], 1):
                 rounds_rows.append([code, seq, *ev])
         if len(rows) % 1000 == 0:
             print(f"  已回测 {len(rows)} 只", flush=True)

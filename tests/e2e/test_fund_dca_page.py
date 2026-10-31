@@ -92,10 +92,31 @@ def mock_dca(page):
     return calls
 
 
+def _scatter_body_for(fee: str) -> dict:
+    """按年化口径缩放矩阵年化：gross=×1.1、nom=×0.92、disc（默认）原值。
+
+    结论卡的「≥10 年」均值由矩阵 client 端聚合而来，口径切换后文本
+    随之变化（7.4% → 8.2% / 6.8%），供切换用例断言。
+    """
+    import copy
+    b = copy.deepcopy(SCATTER_BODY)
+    factor = {"gross": 1.10, "nom": 0.92}.get(fee, 1.0)
+    for row in b["matrix"]:
+        for cell in row:
+            if cell["count"] and cell["mean_xirr"] is not None:
+                cell["mean_xirr"] = round(cell["mean_xirr"] * factor, 4)
+    return b
+
+
 def mock_scatter(page):
-    """mock /api/funds/dca/scatter（三维散点）。"""
-    page.route("**/api/funds/dca/scatter", lambda route: route.fulfill(
-        status=200, content_type="application/json", body=json.dumps(SCATTER_BODY)))
+    """mock /api/funds/dca/scatter（三维散点，按 fee 查询参数返回对应口径）。"""
+    def handler(route):
+        from urllib.parse import urlparse, parse_qs
+        qs = parse_qs(urlparse(route.request.url).query)
+        fee = (qs.get("fee") or ["disc"])[0]
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps(_scatter_body_for(fee)))
+    page.route("**/api/funds/dca/scatter*", handler)
 
 
 def open_dca(page, frontend_port):
@@ -214,6 +235,58 @@ class TestFundDcaPage:
         # 分箱矩阵表：≥10 年表头（行首+列首）与 900 只格子
         expect(page.locator(".dca-matrix th", has_text="≥10 年")).to_have_count(1)
         expect(page.locator(".dca-matrix td", has_text="900 只")).to_have_count(1)
+
+    def test_fee_mode_toggle_switches_data(self, servers, page, mock_dca):
+        """E2E-413：年化口径切换（不含费/含费·一折/含费·名义）——
+        默认一折口径，切换后重新拉取散点、结论数值与徽标同步变化。"""
+        mock_scatter(page)
+        _, frontend_port = servers
+        open_dca(page, frontend_port)
+        concl = page.locator(".dca-conclusion")
+        # 默认 含费·申购一折：徽标 + ≥10 年均值 7.4%
+        expect(page.locator(".src-seg-btn.active", has_text="含费·申购一折")
+              ).to_have_count(1)
+        expect(concl).to_contain_text("含费·申购一折 · 在市 3 只")
+        expect(concl).to_contain_text("≥10 年 7.4%")
+        # 切到 不含费：数值抬升
+        page.locator("button[data-fee='gross']").click()
+        expect(concl).to_contain_text("不含费 · 在市 3 只")
+        expect(concl).to_contain_text("≥10 年 8.2%")
+        # 切到 含费·申购名义：数值压低
+        page.locator("button[data-fee='nom']").click()
+        expect(concl).to_contain_text("含费·申购名义 · 在市 3 只")
+        expect(concl).to_contain_text("≥10 年 6.8%")
+
+    def test_fee_toggle_stale_response_guard(self, servers, page, mock_dca):
+        """E2E-414：快速连点竞态防护——扣住慢的 gross 响应，nom 先返回；
+        gross 迟到响应到达后必须被丢弃，表格保持名义口径。"""
+        held = []
+
+        def handler(route):
+            from urllib.parse import urlparse, parse_qs
+            fee = (parse_qs(urlparse(route.request.url).query)
+                   .get("fee") or ["disc"])[0]
+            if fee == "gross":
+                held.append(route)          # 扣住不发，模拟慢响应
+                return
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps(_scatter_body_for(fee)))
+
+        page.route("**/api/funds/dca/scatter*", handler)
+        _, frontend_port = servers
+        open_dca(page, frontend_port)
+        concl = page.locator(".dca-conclusion")
+        page.locator("button[data-fee='gross']").click()
+        page.locator("button[data-fee='nom']").click()
+        expect(concl).to_contain_text("含费·申购名义 · 在市 3 只")
+        expect(concl).to_contain_text("≥10 年 6.8%")
+        # 迟到的 gross 响应此时才到达 → 必须被 seq 守卫丢弃
+        assert held, "gross 请求应被扣住"
+        held[0].fulfill(status=200, content_type="application/json",
+                        body=json.dumps(_scatter_body_for("gross")))
+        page.wait_for_timeout(800)
+        expect(concl).to_contain_text("含费·申购名义 · 在市 3 只")
+        expect(concl).to_contain_text("≥10 年 6.8%")
 
     def test_rounds_dialog_on_row_click(self, servers, page, mock_dca):
         """E2E-412：点排行行 → 弹窗展示每次止盈明细（日期/间隔/持有/收益率）。"""

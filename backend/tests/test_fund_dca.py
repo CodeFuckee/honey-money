@@ -389,3 +389,83 @@ class TestDcaRounds:
         assert len(conn.cursor_obj.batch) == 1            # executemany 一次
         sql, seq_rows = conn.cursor_obj.batch[0]
         assert "INSERT INTO fund_dca_rounds" in sql and len(seq_rows) == 2
+
+
+class TestDcaStoreFeeCols:
+    def test_parse_csv_fee_columns(self, tmp_path):
+        """费用三口径列（*_xirr_disc/nom）按表头导入为浮点。"""
+        import csv as _csv
+        from app.dca_store import _COLS, parse_csv
+        header = [c for c in _COLS if c != "alive"]
+        r0 = {c: "" for c in header}
+        r0.update({"code": "000001", "name": "测试混合A", "w10_xirr": "0.1",
+                   "w10_xirr_disc": "0.09", "w10_xirr_nom": "0.08",
+                   "full_start": "2024-01-01", "full_end": "2026-10-30"})
+        p = tmp_path / "bt.csv"
+        with p.open("w", newline="") as f:
+            w = _csv.writer(f)
+            w.writerow(header)
+            w.writerow([r0[c] for c in header])
+        rows = parse_csv(p)
+        assert rows[0]["w10_xirr"] == pytest.approx(0.1)
+        assert rows[0]["w10_xirr_disc"] == pytest.approx(0.09)
+        assert rows[0]["w10_xirr_nom"] == pytest.approx(0.08)
+
+    def test_parse_csv_fee_cols_missing_cell_ok(self, tmp_path):
+        """旧 CSV 无费用列 → None，不炸导入。"""
+        import csv as _csv
+        from app.dca_store import _COLS, parse_csv
+        header = ["code", "name", "full_start", "full_end", "w10_xirr"]
+        p = tmp_path / "old.csv"
+        with p.open("w", newline="") as f:
+            w = _csv.writer(f)
+            w.writerow(header)
+            w.writerow(["000002", "旧格式", "2024-01-01", "2026-10-30", "0.1"])
+        rows = parse_csv(p)
+        assert rows[0]["w10_xirr_disc"] is None
+        assert rows[0]["w10_xirr_nom"] is None
+
+
+def _fetch_scatter(**kw):
+    import app.dca_api as dca_mod
+    conn = FakeConn(one=(None,))
+
+    def fake_connect(*a, **k):
+        return conn
+
+    orig = dca_mod.psycopg.connect
+    dca_mod.psycopg.connect = fake_connect
+    try:
+        return dca_mod.fetch_dca_scatter("postgresql://fake", **kw), conn
+    finally:
+        dca_mod.psycopg.connect = orig
+
+
+class TestDcaScatterFee:
+    # run() 的执行序：[0]=max(full_end) 参考日，[1]=散点行
+    def test_default_fee_is_disc(self):
+        body, conn = _fetch_scatter()
+        sql, _ = conn.cursor_obj.executed[1]
+        assert "w10_xirr_disc" in sql
+        assert body["fee"] == "disc"
+
+    def test_fee_nom_switches_column(self):
+        body, conn = _fetch_scatter(fee="nom")
+        sql, _ = conn.cursor_obj.executed[1]
+        assert "w10_xirr_nom" in sql
+        assert "w10_xirr_disc" not in sql
+        assert body["fee"] == "nom"
+
+    def test_fee_gross_uses_legacy_column(self):
+        body, conn = _fetch_scatter(fee="gross")
+        sql, _ = conn.cursor_obj.executed[1]
+        assert "w10_xirr IS NOT NULL" in sql
+        assert body["fee"] == "gross"
+
+    def test_fee_invalid_falls_back_to_disc(self):
+        """非白名单值（含注入串）回落 disc，不得进入 SQL。"""
+        body, conn = _fetch_scatter(fee="w10_xirr; DROP TABLE fund_dca_result")
+        sql, _ = conn.cursor_obj.executed[1]
+        assert "DROP" not in sql
+        assert "w10_xirr_disc" in sql
+        assert body["fee"] == "disc"

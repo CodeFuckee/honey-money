@@ -209,11 +209,13 @@ def register_fund_dca_routes(app):
         return fetch_dca_rounds(config.DATABASE_URL, code)
 
     @app.get("/api/funds/dca/scatter")
-    def funds_dca_scatter():
+    def funds_dca_scatter(fee: str = "disc"):
         """三维散点：每只在市基金一点 (运作年限, 规模亿, 年化) + 年限段 ×
-        规模段分箱统计（每基金只计入唯一格子）。降级约定同 /api/funds/dca。
+        规模段分箱统计（每基金只计入唯一格子）。fee 选年化口径：
+        gross=不含费 / disc=含费·申购一折（默认）/ nom=含费·申购名义，
+        非白名单值回落 disc。降级约定同 /api/funds/dca。
         """
-        return fetch_dca_scatter(config.DATABASE_URL)
+        return fetch_dca_scatter(config.DATABASE_URL, fee=fee.strip().lower())
 
 
 
@@ -221,12 +223,9 @@ def register_fund_dca_routes(app):
 AGE_BANDS = [(0, 1), (1, 3), (3, 5), (5, 10), (10, None)]     # 运作年限段（年）
 SCALE_BANDS = [(0, 1), (1, 10), (10, 100), (100, None)]       # 规模段（亿元）
 
-_SCATTER_ROWS_SQL = """
-SELECT code, name, fund_type, scale_yi, full_start, w10_xirr, w10_rounds
-FROM fund_dca_result
-WHERE alive AND w10_xirr IS NOT NULL AND full_start IS NOT NULL
-  AND scale_yi IS NOT NULL
-"""
+# 年化口径 → 结果表列名（gross=不含费原口径；disc/nom 含费，赎回费一致）
+_FEE_XIRR_COL = {"gross": "w10_xirr", "disc": "w10_xirr_disc",
+                 "nom": "w10_xirr_nom"}
 
 
 def _pct(sorted_vals, p):
@@ -286,28 +285,37 @@ def compute_bands(rows, ref):
     }
 
 
-def fetch_dca_scatter(dsn: str) -> dict:
+def fetch_dca_scatter(dsn: str, fee: str = "disc") -> dict:
     """三维散点数据：每只在市基金一点 (运作年限, 规模亿, 年化) + 分箱统计。
 
-    点数组 [age, scale, xirr, code, name, fund_type]，规模取对数轴定位
-    由前端处理；降级约定同 /api/funds/dca。
+    fee 选择年化口径：gross=不含费 / disc=含费·申购一折 / nom=含费·申购名义
+    （赎回费三口径一致收取），响应带 fee 回显。点数组
+    [age, scale, xirr, code, name, fund_type]，规模取对数轴定位由前端处理；
+    降级约定同 /api/funds/dca。
     """
+    xirr_col = _FEE_XIRR_COL.get(fee, "w10_xirr_disc")
+
     def run():
         with psycopg.connect(dsn, connect_timeout=3) as conn:
             with conn.cursor() as cur:
                 cur.execute(_DCA_REF_SQL)
                 ref = cur.fetchone()[0]
-                cur.execute(_SCATTER_ROWS_SQL)
+                cur.execute(f"SELECT code, name, fund_type, scale_yi, "
+                            f"full_start, {xirr_col}, w10_rounds, full_end "
+                            f"FROM fund_dca_result "
+                            f"WHERE alive AND {xirr_col} IS NOT NULL "
+                            f"AND full_start IS NOT NULL AND scale_yi IS NOT NULL")
                 rows = cur.fetchall()
         points = [
             [round((ref - full_start).days / 365.25, 2), scale, xirr,
              code, name, fund_type]
-            for code, name, fund_type, scale, full_start, xirr, rounds in rows
+            for code, name, fund_type, scale, full_start, xirr, rounds, _fe in rows
         ]
         bands = compute_bands(
             [(scale, full_start, xirr, rounds)
-             for _, _, _, scale, full_start, xirr, rounds in rows], ref)
-        return {"status": "up", "ref_date": ref.isoformat() if ref else None,
+             for _, _, _, scale, full_start, xirr, rounds, _fe in rows], ref)
+        return {"status": "up", "fee": fee if fee in _FEE_XIRR_COL else "disc",
+                "ref_date": ref.isoformat() if ref else None,
                 "points": points, **bands}
     return _safe(run, {"status": "down", "detail": "pg unreachable",
                        "points": [],
