@@ -10,6 +10,7 @@
     "preview:prod": "vite preview --mode prod-backend --host 0.0.0.0 --port 4180 --strictPort"
   },
   "dependencies": {
+    "@primeuix/styles": "1.2.5",
     "@primeuix/themes": "^1.2.5",
     "echarts": "^6.1.0",
     "primeicons": "^8.0.2",
