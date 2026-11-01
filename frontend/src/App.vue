@@ -2024,16 +2024,18 @@ watch(
               <path d="M3 4.2c2.4-1.1 4.8-1.1 7 0 2.2-1.1 4.6-1.1 7 0v11.6c-2.4-1.1-4.8-1.1-7 0-2.2-1.1-4.6-1.1-7 0z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
               <path d="M10 4.2v11.6" stroke="currentColor" stroke-width="1.5"/>
             </svg>{{ n.label }}</button>
-          <div class="group">数据源</div>
-          <button v-for="s in SRC_ITEMS" :key="s.id" class="src-item"
-            :class="{ active: activeNav === s.id }" @click="setNav(s.id)">
-            {{ s.label }}<span v-if="s.field === 'eastmoney'" class="src-dot"
-              :class="emCookie.valid ? 'ok' : 'bad'" :title="emCookie.valid ? 'Cookie 有效' : '东财 Cookie 未配置/无效'"></span>
-          </button>
-          <button class="src-item" :class="{ active: activeNav === 'funds' }"
-            @click="setNav('funds')">基金净值</button>
-          <button class="src-item" :class="{ active: activeNav === 'fundDca' }"
-            @click="setNav('fundDca')">定投止盈回测</button>
+          <template v-if="!STATIC_MODE">
+            <div class="group">数据源</div>
+            <button v-for="s in SRC_ITEMS" :key="s.id" class="src-item"
+              :class="{ active: activeNav === s.id }" @click="setNav(s.id)">
+              {{ s.label }}<span v-if="s.field === 'eastmoney'" class="src-dot"
+                :class="emCookie.valid ? 'ok' : 'bad'" :title="emCookie.valid ? 'Cookie 有效' : '东财 Cookie 未配置/无效'"></span>
+            </button>
+            <button class="src-item" :class="{ active: activeNav === 'funds' }"
+              @click="setNav('funds')">基金净值</button>
+            <button class="src-item" :class="{ active: activeNav === 'fundDca' }"
+              @click="setNav('fundDca')">定投止盈回测</button>
+          </template>
           <div class="sidebar-foot">v0.1.0 · 工程骨架</div>
         </aside>
 
