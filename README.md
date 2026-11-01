@@ -148,6 +148,15 @@ npm run preview:prod                         # 反代 http://nas.example.com:280
 .venv/Scripts/python.exe -m pytest
 ```
 
+## GitHub Pages 静态快照站（定投止盈回测公开页）
+
+https://codefuckee.github.io/honey-money/ —— 纯静态（无后端）：
+排行/散点/分箱/每轮止盈明细全部内置快照数据，客户端过滤排序分页；
+无净值曲线与爬虫管理。数据刷新：在有库环境跑
+`DATABASE_URL=... .venv/bin/python scripts/export_static_api.py`
+导出 `site-data/` 并提交，push main 即由 .github/workflows/pages.yml
+自动构建发布（VITE_STATIC=1 + VITE_BASE 子路径）。
+
 ## Docker 部署（本地 / 群晖 NAS 通用）
 
 ```bash

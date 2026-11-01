@@ -25,7 +25,12 @@ const crawl = ref(null)                       // 爬虫数据统计
 const pendingBackend = ref(true)              // 三路探测各自独立结算（渐进上屏）
 const pendingInfra = ref(true)
 const pendingCrawl = ref(true)
-const activeNav = ref('dash')                 // dash | data | src-sina | src-ef | backtest | learn
+// ===== 静态快照模式（GitHub Pages：VITE_STATIC=1 构建，数据内置于 /data） =====
+// 数据为离线导出快照：排行/散点/分箱/每轮明细全客户端化；无净值曲线、无爬虫管理
+const STATIC_MODE = import.meta.env.VITE_STATIC === '1'
+const DATA_BASE = `${import.meta.env.BASE_URL}data`
+
+const activeNav = ref(STATIC_MODE ? 'fundDca' : 'dash')   // dash | data | src-sina | src-ef | backtest | learn
 
 // ===== 路由：URL 路径 ↔ 页面，查询串 ↔ 参数（刷新/分享/前进后退恢复） =====
 // 手写 History API 同步（单组件架构，无需 vue-router）；nginx/vite preview
@@ -89,6 +94,7 @@ function buildQuery() {
 }
 
 function syncUrl() {
+  if (STATIC_MODE) return   // Pages 子路径下 replaceState 会让刷新 404，静态模式停用 URL 同步
   const path = ROUTE_BY_NAV[activeNav.value] || '/'
   const qs = buildQuery().toString()
   history.replaceState(null, '', path + (qs ? `?${qs}` : ''))
@@ -102,8 +108,10 @@ function scheduleSync() {
 
 function setNav(nav) {
   activeNav.value = nav
-  history.pushState(null, '', ROUTE_BY_NAV[nav] || '/')
-  scheduleSync()
+  if (!STATIC_MODE) {
+    history.pushState(null, '', ROUTE_BY_NAV[nav] || '/')
+    scheduleSync()
+  }
 }
 
 function applyUrl() {
@@ -378,7 +386,67 @@ const dcaAge = ref(null)
 // 规模筛选：N（亿）→ 只看规模 >N 亿的基金；0/留空 = 全部（含无规模披露）
 const dcaScale = ref(null)
 
+let dcaAllRows = []   // 静态模式：全量行一次加载，之后纯客户端过滤/排序/分页
+
+function pctCont(sorted, p) {
+  if (!sorted.length) return null
+  const k = (sorted.length - 1) * p
+  const f = Math.floor(k), c = Math.min(f + 1, sorted.length - 1)
+  return sorted[f] + (sorted[c] - sorted[f]) * (k - f)
+}
+
+// 静态模式：alive/年限/规模过滤 + 排序 + 分页 + 统计卡（与 server 同语义：
+// stats 跟随 alive/age/scale 不随搜索词；基于 w10_xirr 非空行）
+function dcaStaticView() {
+  const q = dcaQuery.value.trim().toLowerCase()
+  const alive = dcaAlive.value
+  const ageN = dcaAge.value || 0
+  const scaleN = dcaScale.value || 0
+  const base = dcaAllRows.filter(r =>
+    (alive === '' || (alive === 'true' ? r.alive === true : r.alive === false))
+    && (!ageN || (r.age_years != null && r.age_years > ageN))
+    && (!scaleN || (r.scale_yi != null && r.scale_yi > scaleN)))
+  const rows = base.filter(r =>
+    !q || r.code.toLowerCase().includes(q) || r.name.toLowerCase().includes(q))
+  const key = dcaSort.value, dir = dcaOrder.value === 'asc' ? 1 : -1
+  rows.sort((a, b) => {
+    const va = a[key], vb = b[key]
+    if (va == null) return 1
+    if (vb == null) return -1
+    return va < vb ? -dir : va > vb ? dir : 0
+  })
+  const off = dcaPage.value * DCA_PAGE_SIZE
+  const xs = base.map(r => r.w10_xirr).filter(v => v != null).sort((a, b) => a - b)
+  const stats = xs.length ? {
+    count: xs.length, p25: pctCont(xs, 0.25), median: pctCont(xs, 0.5),
+    p75: pctCont(xs, 0.75), p90: pctCont(xs, 0.9),
+    positive_share: xs.filter(v => v > 0).length / xs.length,
+    take_profit_share: base.filter(r => (r.w10_rounds || 0) > 0).length / xs.length,
+  } : null
+  return { status: 'up', total: rows.length, rows: rows.slice(off, off + DCA_PAGE_SIZE),
+           stats, meta: dcaStaticMeta }
+}
+
+let dcaStaticMeta = null
 async function loadDca() {
+  if (STATIC_MODE) {
+    dcaLoading.value = true
+    try {
+      if (!dcaAllRows.length) {
+        const r = await fetch(`${DATA_BASE}/funds/dca.json`)
+        const body = await r.json()
+        dcaAllRows = body.rows || []
+        dcaStaticMeta = body.meta || null
+      }
+      dca.value = dcaStaticView()
+    } catch (e) {
+      dca.value = { status: 'down', detail: String(e), total: 0, rows: [],
+                    stats: null, meta: null }
+    } finally {
+      dcaLoading.value = false
+    }
+    return
+  }
   dcaLoading.value = true
   try {
     const q = encodeURIComponent(dcaQuery.value.trim())
@@ -438,7 +506,9 @@ async function loadDcaScatter() {
   const seq = ++dcaFeeReqSeq
   dcaFeeLoading.value = true
   try {
-    const r = await fetch(`/api/funds/dca/scatter?fee=${dcaFeeMode.value}`)
+    const r = await fetch(STATIC_MODE
+      ? `${DATA_BASE}/funds/dca/scatter.${dcaFeeMode.value}.json`
+      : `/api/funds/dca/scatter?fee=${dcaFeeMode.value}`)
     const body = await r.json()
     if (seq === dcaFeeReqSeq) dcaScatter.value = body   // 期间又切换过 → 丢弃旧响应
   } catch (e) {
@@ -488,15 +558,31 @@ function openDcaRounds(e) {
   dcaRoundsNavs.value = []
   disposeDcaRoundsChart()
   dcaRoundsVisible.value = true
-  fetch(`/api/funds/dca/${data.code}/rounds?fee=${dcaFeeMode.value}`)
-    .then(r => r.json())
-    .then(body => {
-      dcaRounds.value = body
-      if (body.rounds?.length && dcaRoundsNavs.value.length) {
-        nextTick(() => renderDcaRoundsChart())
-      }
-    })
-    .catch(err => { dcaRounds.value = { status: 'down', detail: String(err), rounds: [] } })
+  const emptyRounds = () => ({ status: 'up', code: data.code, fee: dcaFeeMode.value,
+                               rounds: [], totals: { rounds: 0 } })
+  if (STATIC_MODE) {
+    // 静态：{ rounds: {gross,disc,nom}, totals: {gross,...} }，无文件 = 从未止盈
+    fetch(`${DATA_BASE}/funds/dca/rounds/${data.code}.json`)
+      .then(r => r.ok ? r.json() : emptyRounds())
+      .then(body => {
+        const fee = dcaFeeMode.value
+        dcaRounds.value = { status: 'up', code: data.code, fee,
+                            rounds: body.rounds?.[fee] || [],
+                            totals: body.totals?.[fee] || { rounds: 0 } }
+      })
+      .catch(err => { dcaRounds.value = { status: 'down', detail: String(err), rounds: [] } })
+  } else {
+    fetch(`/api/funds/dca/${data.code}/rounds?fee=${dcaFeeMode.value}`)
+      .then(r => r.json())
+      .then(body => {
+        dcaRounds.value = body
+        if (body.rounds?.length && dcaRoundsNavs.value.length) {
+          nextTick(() => renderDcaRoundsChart())
+        }
+      })
+      .catch(err => { dcaRounds.value = { status: 'down', detail: String(err), rounds: [] } })
+  }
+  if (STATIC_MODE) return   // 静态无净值数据，弹窗隐藏曲线
   // 净值曲线（近 2600 个净值日 ≈ 覆盖 10 年窗口），与轮次到齐后渲染
   fetch(`/api/funds/${data.code}/navs?limit=2600`)
     .then(r => r.json())
@@ -1858,7 +1944,10 @@ function fmtBig(n, unitDiv = 1) {
 const fmtAmount = n => fmtBig(n)
 const fmtShares = n => fmtBig(n, 1)
 
-onMounted(() => { applyUrl(); refresh() })
+onMounted(() => {
+  if (STATIC_MODE) { loadDca(); loadDcaScatter(); return }
+  applyUrl(); refresh()
+})
 // 参数集合变化 → 防抖同步 URL（页面内参数变化 replace，不灌浏览历史）；
 // 前进/后退 → 从 URL 恢复。函数引用在 setup 末尾注册，避开 TDZ。
 window.addEventListener('popstate', applyUrl)
@@ -1902,10 +1991,12 @@ watch(
             <span>honey-money</span>
           </div>
           <div class="group">导航</div>
-          <button v-for="n in [
+          <button v-for="n in (STATIC_MODE
+              ? [{ id: 'fundDca', label: '定投止盈回测' }]
+              : [
               { id: 'dash', label: '仪表盘' }, { id: 'data', label: '数据' },
               { id: 'tasks', label: '任务' },
-              { id: 'backtest', label: '回测' }, { id: 'learn', label: '教学' }]"
+              { id: 'backtest', label: '回测' }, { id: 'learn', label: '教学' }])"
             :key="n.id" class="nav-item"
             :class="{ active: activeNav === n.id, 'sub-active': (activeNav.startsWith('src-') || activeNav === 'stock' || activeNav === 'funds' || activeNav === 'fund' || activeNav === 'fundDca') && n.id === 'data' }"
             @click="setNav(n.id)">
@@ -2193,6 +2284,8 @@ watch(
                 <p class="sub">已入库公募基金净值一览 · 东财全集（含已清盘与 A/C 份额）· 任务「基金历史净值」爬取入库</p>
               </div>
             </div>
+            <p class="note" v-if="STATIC_MODE && dca.meta?.generated_at"
+              style="margin: 0 0 8px">静态快照（GitHub Pages）· 数据生成于 {{ dca.meta.generated_at.slice(0, 10) }} · 明细不含净值曲线 · 实时数据以内网部署为准</p>
             <div class="ph-search funds-search">
               <span class="p-inputtext-icon-wrap"><i class="pi pi-search"></i></span>
               <InputText v-model="fundsQuery" placeholder="搜索基金代码 / 名称，如 000001 或 华夏成长"
@@ -2281,6 +2374,8 @@ watch(
               <div class="card lm"><div class="lm-k">年化为正</div><div class="lm-v">{{ pct0(dca.stats.positive_share) }}</div></div>
               <div class="card lm"><div class="lm-k">曾止盈</div><div class="lm-v">{{ pct0(dca.stats.take_profit_share) }}</div></div>
             </div>
+            <p class="note" v-if="STATIC_MODE && dca.meta?.generated_at"
+              style="margin: 0 0 8px">静态快照（GitHub Pages）· 数据生成于 {{ dca.meta.generated_at.slice(0, 10) }} · 明细不含净值曲线 · 实时数据以内网部署为准</p>
             <div class="ph-search funds-search">
               <span class="p-inputtext-icon-wrap"><i class="pi pi-search"></i></span>
               <InputText v-model="dcaQuery" placeholder="搜索基金代码 / 名称，如 510300 或 沪深300"
@@ -2506,7 +2601,8 @@ watch(
               </div>
               <div v-show="dcaRounds.rounds?.length" ref="dcaRoundsChartEl"
                 style="width: 100%; height: 300px; margin-bottom: 10px"></div>
-              <p class="note" style="margin: 0 0 8px" v-if="dcaRounds.rounds?.length">
+              <p class="note" style="margin: 0 0 8px"
+                v-if="dcaRounds.rounds?.length && dcaRoundsNavs.length">
                 ▲ = 每轮止盈卖点 · 曲线为复权净值（分红再投，窗口起点=1，与回测同口径）
               </p>
               <div v-if="dcaRounds.status === 'down'" class="browse-empty">

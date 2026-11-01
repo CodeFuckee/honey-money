@@ -6,6 +6,16 @@
 ## [Unreleased]
 
 ### Added
+- **GitHub Pages 静态快照站（定投止盈回测独立页面）**：https://codefuckee.github.io/honey-money/ 。
+  前端新增静态模式（VITE_STATIC=1 构建）：排行全量行一次加载、搜索/年限/
+  规模过滤与排序分页全部客户端化，统计卡按同语义重算（跟随 alive/age/scale
+  不随搜索词）；散点按口径映射静态文件，每轮明细取单基金三口径合并 JSON
+  （无文件=从未止盈），净值曲线与 URL 同步在静态模式停用（Pages 子路径
+  防刷新 404），导航仅保留回测页并显示快照日期。新增
+  scripts/export_static_api.py（有库环境导出排行/散点/三口径轮次到
+  site-data/，13,274 个文件 ~72MB）与 .github/workflows/pages.yml
+  （VITE_BASE 子路径构建 + 注入数据 + deploy-pages）。
+
 - **回测详情下钻：每轮止盈明细增强 + 排行「详情」按钮 + 分箱格点击基金清单**：
   ① 轮次事件从 4 字段扩到 9 字段（+止盈日复权净值/本轮投入/申购费/赎回费/
   本轮净收益），三场景轮次全量入库（102,851 轮 = gross 35,136 / disc

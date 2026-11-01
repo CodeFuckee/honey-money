@@ -10,6 +10,8 @@ export default defineConfig(({ mode }) => {
     || (mode === 'prod-backend' ? 'http://nas.example.com:28080' : null)
     || `http://127.0.0.1:${process.env.BACKEND_PORT || 8000}`
   return {
+    // GitHub Pages 项目子路径用 VITE_BASE=/honey-money/ 构建（pages workflow 注入）
+    base: process.env.VITE_BASE || '/',
     plugins: [vue()],
     server: {
       proxy: {
