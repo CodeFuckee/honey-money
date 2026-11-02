@@ -97,6 +97,90 @@ class PgAdvisoryLock:
                 pass
 
 
+async def _run_backtest_job(dsn: str, task: dict, progress,
+                            stop_event: asyncio.Event) -> dict:
+    """定投回测日更：子进程全量重算（~20-30 分钟，纯 CPU 不占 API 进程）
+    → 事务直写 fund_dca_result/fund_dca_rounds → crawl_run 记录。
+
+    前置只做净值新鲜度告警不阻断（跑最新可得数据，爬取失败次日自愈）；
+    stop_event 无法中断子进程，仅在各阶段间生效；kill/重启丢弃当日运行
+    （导入为末尾单事务，半途无脏数据），次日计划照常。
+    """
+    import concurrent.futures
+    import multiprocessing
+
+    from . import dca_backtest, dca_store
+    from .crawler.store import Store
+
+    store = Store()
+    loop = asyncio.get_running_loop()
+    with psycopg.connect(dsn) as conn:
+        latest = conn.execute(
+            "SELECT max(nav_date)::date FROM fund_nav").fetchone()[0]
+        stale = latest is None or (dt.date.today(SH_TZ) - latest).days > 1
+        if stale:
+            print(f"[backtest] 净值最新 {latest}（≥2 天未更新），按现有数据继续")
+        run_id = store.start_run(conn, mode=task["mode"], source="backtest",
+                                 task_id=task["id"],
+                                 trigger=task.get("_trigger", "manual"))
+        conn.commit()
+    if stop_event.is_set():
+        with psycopg.connect(dsn) as conn:
+            store.finish_run(conn, run_id, total_stocks=0, ok_stocks=0,
+                             failed_stocks=0, bars_upserted=0, failures=[],
+                             aborted=True)
+            conn.commit()
+        return {"total": 0, "ok": 0, "failed": 0, "bars": 0, "failures": [],
+                "aborted": True, "stopped": True, "error": False}
+
+    def _job():
+        return dca_backtest.run_full_backtest(dsn)
+
+    progress(0, 1)
+    ctx = multiprocessing.get_context("spawn")
+    try:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=1,
+                                                    mp_context=ctx) as pool:
+            result_rows, rounds_rows, stats = await loop.run_in_executor(pool, _job)
+    except Exception as exc:
+        with psycopg.connect(dsn) as conn:
+            store.finish_run(conn, run_id, total_stocks=0, ok_stocks=0,
+                             failed_stocks=0, bars_upserted=0,
+                             failures=[f"{type(exc).__name__}: {str(exc)[:180]}"],
+                             aborted=True)
+            conn.commit()
+        raise
+    if stop_event.is_set():
+        # 算完但等停：丢弃结果（不导入），下次计划照常全量重算
+        with psycopg.connect(dsn) as conn:
+            store.finish_run(conn, run_id, total_stocks=stats["fund_count"],
+                             ok_stocks=0, failed_stocks=0,
+                             bars_upserted=stats["round_count"], failures=[],
+                             aborted=True)
+            conn.commit()
+        return {"total": stats["fund_count"], "ok": 0, "failed": 0,
+                "bars": stats["round_count"], "failures": [],
+                "aborted": True, "stopped": True, "error": False}
+
+    progress(1, 1)
+    params = {"amount": 1000.0, "take_profit": 0.2, "frequency": "monthly",
+              "window_end": stats.get("window_end"), "min_age_years": None,
+              "scale_min_yi": None, "source": "scheduler/backtest"}
+    with psycopg.connect(dsn) as conn:
+        dca_store.import_rows(conn, result_rows, params=params)
+        dca_store.import_rounds(conn, rounds_rows)
+        store.finish_run(conn, run_id, total_stocks=stats["fund_count"],
+                         ok_stocks=stats["fund_count"], failed_stocks=0,
+                         bars_upserted=stats["round_count"], failures=[],
+                         aborted=False)
+        conn.commit()
+    print(f"[backtest] 日更完成：{stats['fund_count']:,} 只 / "
+          f"轮次 {stats['round_count']:,} 行，窗口截至 {stats.get('window_end')}")
+    return {"total": stats["fund_count"], "ok": stats["fund_count"],
+            "failed": 0, "bars": stats["round_count"], "failures": [],
+            "aborted": False, "stopped": False, "error": False}
+
+
 def build_crawl_executor(dsn: str, proxy_pool_url: str):
     """生产执行体：拉清单 → CrawlRunner 增量/全量爬取，返回结果摘要。
 
@@ -105,6 +189,8 @@ def build_crawl_executor(dsn: str, proxy_pool_url: str):
     """
 
     async def execute(task: dict, *, progress, stop_event: asyncio.Event) -> dict:
+        if task["source"] == "backtest":
+            return await _run_backtest_job(dsn, task, progress, stop_event)
         defaults = _SOURCE_DEFAULTS[task["source"]]
         rate = RateLimiter(initial_qps=defaults["initial_qps"],
                            min_qps=defaults["min_qps"], max_qps=defaults["max_qps"],

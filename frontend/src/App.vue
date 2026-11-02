@@ -909,8 +909,10 @@ watch(activeNav, nav => {
 })
 
 const TASK_SOURCES = [{ v: 'sina', label: '新浪财经' }, { v: 'eastmoney', label: '东方财富' },
+  { v: 'backtest', label: '定投回测' },
   { v: 'delisted', label: '退市股补爬' }, { v: 'fund', label: '基金净值' }]
-const TASK_MODES = [{ v: 'incremental', label: '增量续爬' }, { v: 'full', label: '全量重爬' }]
+const TASK_MODES = [{ v: 'incremental', label: '增量续爬' }, { v: 'full', label: '全量重爬' },
+  { v: 'daily', label: '日更' }]
 const sourceLabel = v => (TASK_SOURCES.find(s => s.v === v) || {}).label || v
 const modeLabel = v => (TASK_MODES.find(m => m.v === v) || {}).label || v
 const PHASES = { idle: ['空闲', 'idle'], queued: ['排队中', 'queued'], running: ['运行中', 'up'] }
@@ -1004,6 +1006,8 @@ function taskLastRunText(r) {
   return `${t} · ${trig} · ${outcome} · 成 ${fmt(r.ok_stocks)} / 败 ${fmt(r.failed_stocks)}`
 }
 function riskNote(t) {
+  if (t.source === 'backtest')
+    return '定投回测日更：子进程全量重算 2.6 万只（约 20-30 分钟）后直写结果表刷新页面；串行队列排在净值日更（21:00）之后，净值爬取失败时按最新可得数据运行、次日自愈'
   if (t.source === 'eastmoney')
     return '东财源 drip 模式：每 30 秒 1 请求（出口 IP 曾被封），全市场一轮约需 40+ 小时，仅作解封后校验/补数用'
   if (t.source === 'fund' && t.mode === 'incremental')
@@ -1017,6 +1021,8 @@ function riskNote(t) {
 const dialogRisk = computed(() => {
   const d = taskDialog.value
   if (!d) return ''
+  if (d.source === 'backtest')
+    return '定投回测日更：子进程全量重算 2.6 万只（约 20-30 分钟）后直写结果表刷新页面；串行队列排在净值日更（21:00）之后，净值爬取失败时按最新可得数据运行、次日自愈'
   if (d.source === 'eastmoney')
     return '东财源 drip 模式：每 30 秒 1 请求（出口 IP 曾被封），全市场一轮约 40+ 小时，仅作解封后校验/补数用'
   if (d.source === 'fund' && d.taskMode === 'incremental')

@@ -20,8 +20,9 @@ import datetime as dt
 
 import psycopg
 
-SOURCE_NAMES = {"sina": "新浪", "eastmoney": "东财", "fund": "基金"}
-MODE_NAMES = {"incremental": "增量", "full": "全量"}
+SOURCE_NAMES = {"sina": "新浪", "eastmoney": "东财", "fund": "基金",
+                "backtest": "回测"}
+MODE_NAMES = {"incremental": "增量", "full": "全量", "daily": "日更"}
 
 _DDL_TASK = """
 CREATE TABLE IF NOT EXISTS crawl_task (
@@ -93,6 +94,14 @@ class TaskStore:
                 " SELECT '基金每日增量', 'fund', 'incremental', '21:00'::time, FALSE"
                 " WHERE NOT EXISTS (SELECT 1 FROM crawl_task"
                 "                    WHERE name = '基金每日增量')")
+            # 定投回测日更：净值日更（21:00）之后全量重算并直写结果表（约
+            # 20-30 分钟，串行队列保证排在净值爬取之后），23:00 预置且默认
+            # 启用——用户明确要求日更（2026-11-01）；调度器串行 + 断点自愈
+            cur.execute(
+                "INSERT INTO crawl_task (name, source, mode, schedule_time, enabled)"
+                " SELECT '定投回测日更', 'backtest', 'daily', '23:00'::time, TRUE"
+                " WHERE NOT EXISTS (SELECT 1 FROM crawl_task"
+                "                    WHERE name = '定投回测日更')")
     def list_tasks(self, conn) -> list[dict]:
         with conn.cursor() as cur:
             cur.execute(f"SELECT {_TASK_COLS} FROM crawl_task ORDER BY id")

@@ -1,7 +1,6 @@
 """基金定投止盈回测的费用建模单测。
 
-被测对象是 scripts/fund_dca_backtest.py（离线脚本，非 backend.app 包成员），
-经 importlib 按路径加载——它依赖的 pandas/numpy/scipy 在项目 .venv 里。
+被测对象是 backend/app/dca_backtest.py——回测核心（脚本与调度器日更共用）。
 
 费用口径：
 - 申购费外扣法：净申购 = 金额/(1+费率)，买入份额按净申购折算，现金流仍记 -全额；
@@ -13,18 +12,16 @@
 [0, 31, 60, 91, 121, ...]（闰年 2 月 29 天）。
 """
 
-import importlib.util
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
-_SCRIPT = (Path(__file__).resolve().parents[2] / "scripts"
-           / "fund_dca_backtest.py")
-_spec = importlib.util.spec_from_file_location("fund_dca_backtest", _SCRIPT)
-mod = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(mod)
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from app import dca_backtest as mod  # noqa: E402
 
 # 2024-01-01 起自然日序列里的「每月首个净值日」下标（2024 闰年）
 MONTH_STARTS = [0, 31, 60, 91, 121, 152, 182, 213, 243, 274, 304, 334,
@@ -245,3 +242,44 @@ class TestRoundEventFields:
         ev = res["round_events"][0]
         assert ev[6] == 0.0 and ev[7] == 0.0
         assert ev[8] == pytest.approx(400.0)
+
+
+class TestRunFullBacktest:
+    def test_orchestration_alive_and_rounds(self, monkeypatch):
+        """日更编排：拉数→计算→alive 45 天新鲜度→三口径轮次行。"""
+        dates = pd.date_range("2024-01-01", periods=120, freq="D")
+        nav = pd.DataFrame({
+            "code": ["000001"] * 120,
+            "nav_date": dates,
+            "unit_nav": [1.0] * 45 + [1.25] * 75,
+            "accum_nav": [1.0] * 45 + [1.25] * 75,
+            "pct_chg": [0] * 45 + [25.0] + [0] * 74,
+        })
+        basic = pd.DataFrame(
+            {"name": ["测试混合A"], "fund_type": ["混合型-偏股"],
+             "delisted": [False]},
+            index=pd.Index(["000001"], name="code"))
+        scale_map = {"000001": {"scale_yi": 5.0, "scale_date": "2026-09-30"}}
+
+        class _NullCM:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        monkeypatch.setattr(mod, "psycopg",
+                            type("P", (), {"connect": lambda *a, **k: _NullCM()}))
+        monkeypatch.setattr(mod, "_load_codes", lambda conn: ["000001"])
+        monkeypatch.setattr(mod, "_load_basic", lambda conn, codes: basic)
+        monkeypatch.setattr(mod, "_load_scale", lambda conn: scale_map)
+        monkeypatch.setattr(mod, "_load_nav", lambda conn, codes: nav)
+        rows, rounds, stats = mod.run_full_backtest("postgresql://fake")
+        assert stats["fund_count"] == 1
+        assert stats["window_end"] == "2024-04-29"
+        # alive：full_end=max → 距 cutoff 内
+        assert rows[0]["alive"] is True
+        assert rows[0]["scale_yi"] == 5.0
+        # 三口径轮次全入库（gross/disc/nom 各 1 行）
+        assert {r[1] for r in rounds} == {"gross", "disc", "nom"}
+        assert len(rounds) == 3

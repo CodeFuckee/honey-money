@@ -6,6 +6,21 @@
 ## [Unreleased]
 
 ### Added
+- **定投回测日更定时任务（纯代码，无 agent 介入）**：回测计算核心从
+  scripts/fund_dca_backtest.py 迁入 backend/app/dca_backtest.py（脚本与
+  调度器共用同一实现，脚本变薄 CSV 驱动）；调度器执行器新增 backtest
+  分支——子进程全量重算 2.6 万只（spawn 隔离，纯 CPU 不占 API 进程，
+  约 20-30 分钟）→ 事务直写 fund_dca_result/fund_dca_rounds → crawl_run
+  记录（start/finish 含异常落档）。预置任务「定投回测日更」
+  （backtest/daily，23:00，**默认启用**——串行队列天然排在基金净值日更
+  21:00 之后；净值爬取失败时按最新可得数据运行并在日志告警，次日自愈；
+  中途 kill 无脏数据，次日计划照常）。规模数据首次落 PG：新增 fund_scale
+  表（scripts/data/fund_scale.csv 经 `python -m app.dca_backtest
+  --import-scale` 一次性导入 27,599 行，日更回测改从 PG 读规模，
+  后端容器不再依赖 scripts/data）。tasks_api 白名单扩展 backtest/daily，
+  任务页补来源标签与风险说明。测试：编排（alive/三口径轮次）1 例 +
+  全量回归 500 后端 + 81 E2E；脚本子集回归（规模≥500亿：11 只/73 轮）。
+
 - **GitHub Pages 静态快照站（定投止盈回测独立页面）**：https://codefuckee.github.io/honey-money/ 。
   前端新增静态模式（VITE_STATIC=1 构建）：排行全量行一次加载、搜索/年限/
   规模过滤与排序分页全部客户端化，统计卡按同语义重算（跟随 alive/age/scale
