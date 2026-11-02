@@ -19,6 +19,7 @@ start() 拉起的后台循环只是反复调用它们。
 
 import asyncio
 import datetime as dt
+import os
 from zoneinfo import ZoneInfo
 
 import psycopg
@@ -133,15 +134,15 @@ async def _run_backtest_job(dsn: str, task: dict, progress,
         return {"total": 0, "ok": 0, "failed": 0, "bars": 0, "failures": [],
                 "aborted": True, "stopped": True, "error": False}
 
-    def _job():
-        return dca_backtest.run_full_backtest(dsn)
-
     progress(0, 1)
     ctx = multiprocessing.get_context("spawn")
     try:
+        # 模块级函数 + 基元参数才可被 spawn pickle（嵌套闭包会
+        # "Can't get local object" 崩掉子进程任务）
         with concurrent.futures.ProcessPoolExecutor(max_workers=1,
                                                     mp_context=ctx) as pool:
-            result_rows, rounds_rows, stats = await loop.run_in_executor(pool, _job)
+            result_rows, rounds_rows, stats = await loop.run_in_executor(
+                pool, dca_backtest.run_full_backtest, dsn)
     except Exception as exc:
         with psycopg.connect(dsn) as conn:
             store.finish_run(conn, run_id, total_stocks=0, ok_stocks=0,
@@ -176,6 +177,22 @@ async def _run_backtest_job(dsn: str, task: dict, progress,
         conn.commit()
     print(f"[backtest] 日更完成：{stats['fund_count']:,} 只 / "
           f"轮次 {stats['round_count']:,} 行，窗口截至 {stats.get('window_end')}")
+
+    # Pages 自动发布（可选）：PAGES_REPO_URL 配置了含 token 的仓库 URL 才启用；
+    # 失败只告警不回滚——回测结果是主交付物，公开页保持上一份快照次日自愈
+    pages_url = os.environ.get("PAGES_REPO_URL", "")
+    if pages_url:
+        work_dir = os.environ.get("PAGES_WORKDIR", "/srv/pages")
+        try:
+            from . import pages_publish
+            pub = await asyncio.to_thread(
+                pages_publish.publish, dsn, pages_url, work_dir)
+            print(f"[backtest] Pages 发布：{'已推送' if pub.get('pushed') else '快照无变更'}"
+                  f"（排行 {pub.get('rows', 0):,} 行 / 轮次基金 {pub.get('round_funds', 0):,} 只）")
+        except Exception as exc:      # noqa: BLE001 —— 发布失败不影响回测交付
+            print(f"[backtest] Pages 发布失败（不影响回测结果，次日自愈）: {exc}")
+    else:
+        print("[backtest] 未配置 PAGES_REPO_URL，跳过 Pages 发布")
     return {"total": stats["fund_count"], "ok": stats["fund_count"],
             "failed": 0, "bars": stats["round_count"], "failures": [],
             "aborted": False, "stopped": False, "error": False}
