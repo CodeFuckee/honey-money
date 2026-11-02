@@ -19,6 +19,9 @@ backend/            Python 后端（FastAPI）
   app/task_store.py   爬虫任务持久化（crawl_task 表 CRUD + 预置任务播种）
   app/scheduler.py    进程内任务调度器（每日到点/启动补跑/全局串行/advisory lock 互斥）
   app/tasks_api.py    任务管理 API（CRUD/触发/取消/停止/历史）
+  app/dca_backtest.py 定投回测核心（脚本与调度器日更共用）
+  app/pages_export.py Pages 静态快照导出（手动脚本与日更发布共用）
+  app/pages_publish.py Pages 自动发布（clone→导出→commit/push）
   app/adjust.py       复权因子（懒加载入库；后/前复权合成；降级不复权）
   app/backtest/       vectorbt 回测引擎（信号/指标纯 pandas，六大经典策略）
   app/backtest_api.py 回测 API（策略/区间/撮合模式/成本，降级 200 约定）
@@ -148,14 +151,27 @@ npm run preview:prod                         # 反代 http://nas.example.com:280
 .venv/Scripts/python.exe -m pytest
 ```
 
+## 定投回测日更（定时任务，纯代码）
+
+预置任务「定投回测日更」（backtest/daily，**23:00，默认启用**）：串行队列
+保证排在「基金每日增量」（21:00）之后——先更新净值、后子进程全量重算
+2.6 万只（约 20-30 分钟）并直写结果表，「定投止盈回测」页即查即新。
+任务页可随时手动触发/停用；净值爬取失败时按最新可得数据运行、次日自愈。
+规模数据存 PG fund_scale 表（`python -m app.dca_backtest --import-scale
+scripts/data/fund_scale.csv` 刷新，规模季度披露后手动更新一次即可）。
+
 ## GitHub Pages 静态快照站（定投止盈回测公开页）
 
 https://codefuckee.github.io/honey-money/ —— 纯静态（无后端）：
 排行/散点/分箱/每轮止盈明细全部内置快照数据，客户端过滤排序分页；
-无净值曲线与爬虫管理。数据刷新：在有库环境跑
-`DATABASE_URL=... .venv/bin/python scripts/export_static_api.py`
-导出 `site-data/` 并提交，push main 即由 .github/workflows/pages.yml
-自动构建发布（VITE_STATIC=1 + VITE_BASE 子路径）。
+无净值曲线与爬虫管理。数据刷新（两种方式）：
+① **自动（推荐）**：NAS `.env` 配置 `PAGES_REPO_URL`（含 fine-grained
+   PAT 的仓库 URL，见 .env.example 指引）并 `docker compose up -d`——
+   回测日更完成后自动导出快照并推送，公开页每日随日更更新；
+② **手动**：在有库环境跑
+   `DATABASE_URL=... .venv/bin/python scripts/export_static_api.py`
+   导出 `site-data/` 并提交，push main 由 .github/workflows/pages.yml
+   自动构建发布（VITE_STATIC=1 + VITE_BASE 子路径）。
 
 ## Docker 部署（本地 / 群晖 NAS 通用）
 
