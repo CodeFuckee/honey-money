@@ -117,7 +117,7 @@ async def _run_backtest_job(dsn: str, task: dict, progress,
     with psycopg.connect(dsn) as conn:
         latest = conn.execute(
             "SELECT max(nav_date)::date FROM fund_nav").fetchone()[0]
-        stale = latest is None or (dt.date.today(SH_TZ) - latest).days > 1
+        stale = latest is None or (dt.datetime.now(SH_TZ).date() - latest).days > 1
         if stale:
             print(f"[backtest] 净值最新 {latest}（≥2 天未更新），按现有数据继续")
         run_id = store.start_run(conn, mode=task["mode"], source="backtest",
