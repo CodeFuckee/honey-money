@@ -334,8 +334,9 @@ def _load_basic(conn, codes: list[str]) -> pd.DataFrame:
 def _load_scale(conn) -> dict:
     rows = pd.read_sql("SELECT code, scale_yi, scale_date FROM fund_scale",
                        conn, dtype={"code": str})
+    # PG DATE 列返回 datetime.date（非 Timestamp），统一转 ISO 字符串
     return {r["code"]: {"scale_yi": r["scale_yi"],
-                        "scale_date": (str(r["scale_date"].date())
+                        "scale_date": (str(r["scale_date"])[:10]
                                        if pd.notna(r["scale_date"]) else None)}
             for _, r in rows.iterrows()}
 
