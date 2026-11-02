@@ -1,11 +1,15 @@
 """Pages 自动发布链路单测：导出编排（fake 连接）+ git 发布流程（本地裸仓）。"""
 
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+pytestmark = pytest.mark.skipif(shutil.which("git") is None,
+                                reason="容器/环境无 git，publish 流程不可测")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 

@@ -8,6 +8,13 @@ FROM python:3.12-slim
 
 WORKDIR /srv
 
+# git：pages_publish 测试需要真实 git（clone/commit/push 本地裸仓）
+# apt 换阿里源（与 pip 同理：官方源在本网络不可达）
+RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends git \
+ && rm -rf /var/lib/apt/lists/*
+
 COPY backend/requirements.txt .
 # pypi.org 官方 CDN 本网络实测 ~14KB/s 不可用，固定阿里源（Dockerfile.test 同）
 RUN pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ -r requirements.txt

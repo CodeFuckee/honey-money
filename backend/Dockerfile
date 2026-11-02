@@ -3,7 +3,9 @@ FROM python:3.12-slim
 WORKDIR /srv
 
 # git：定投回测日更的 Pages 快照自动发布（clone/push site-data）
-RUN apt-get update \
+# apt 换阿里源（与 pip 同理：官方源在本网络不可达）
+RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources \
+ && apt-get update \
  && apt-get install -y --no-install-recommends git \
  && rm -rf /var/lib/apt/lists/*
 
