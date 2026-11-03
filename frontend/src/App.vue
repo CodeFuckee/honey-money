@@ -31,6 +31,7 @@ const STATIC_MODE = import.meta.env.VITE_STATIC === '1'
 const DATA_BASE = `${import.meta.env.BASE_URL}data`
 
 const activeNav = ref(STATIC_MODE ? 'fundDca' : 'dash')   // dash | data | src-sina | src-ef | backtest | learn
+const sidebarOpen = ref(false)   // ≤820px：侧栏折叠抽屉开关（桌面端恒展开无影响）
 
 // ===== 路由：URL 路径 ↔ 页面，查询串 ↔ 参数（刷新/分享/前进后退恢复） =====
 // 手写 History API 同步（单组件架构，无需 vue-router）；nginx/vite preview
@@ -108,6 +109,7 @@ function scheduleSync() {
 
 function setNav(nav) {
   activeNav.value = nav
+  sidebarOpen.value = false   // 移动端抽屉：选中即收起
   if (!STATIC_MODE) {
     history.pushState(null, '', ROUTE_BY_NAV[nav] || '/')
     scheduleSync()
@@ -533,6 +535,19 @@ function renderDcaScatterChart() {
 
 // 数据与图表容器谁先就绪都能画：fetch 瞬间返回时可能早于分支挂载
 // （chartEl 还没绑定）——watch 兜底，避免竞态下静默丢图
+let _dcaScatterResizeTimer = null
+const _onDcaScatterResize = () => {
+  clearTimeout(_dcaScatterResizeTimer)
+  _dcaScatterResizeTimer = setTimeout(() => {
+    if (dcaScatterChart && dcaScatter.value?.status === 'up') renderDcaScatterChart()
+  }, 300)
+}
+onMounted(() => window.addEventListener('resize', _onDcaScatterResize))
+onUnmounted(() => {
+  window.removeEventListener('resize', _onDcaScatterResize)
+  clearTimeout(_dcaScatterResizeTimer)
+})
+
 watch(dcaScatterChartEl, el => {
   if (el && dcaScatter.value?.status === 'up' && dcaScatter.value?.points?.length)
     renderDcaScatterChart()
@@ -1972,7 +1987,7 @@ watch(
 
       <!-- 标题栏（apple 标准标题 / carbon 复用为深色 UI Shell 头；fluent 按原型无标题栏，切换控件移至工具栏） -->
       <div class="titlebar">
-        <svg class="shell-menu" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <svg class="shell-menu" role="button" aria-label="切换导航" @click="sidebarOpen = !sidebarOpen" viewBox="0 0 16 16" fill="none" aria-hidden="true">
           <line x1="2" y1="3.5" x2="14" y2="3.5" stroke="currentColor" stroke-width="1.6"/>
           <line x1="2" y1="8" x2="14" y2="8" stroke="currentColor" stroke-width="1.6"/>
           <line x1="2" y1="12.5" x2="14" y2="12.5" stroke="currentColor" stroke-width="1.6"/>
@@ -1988,7 +2003,7 @@ watch(
 
       <div class="body">
         <!-- 侧栏 -->
-        <aside class="sidebar">
+        <aside class="sidebar" :class="{ open: sidebarOpen }">
           <div class="app-item">
             <svg class="app-item-icon" viewBox="0 0 24 24" fill="none">
               <path d="M12 2.5 20 7v10l-8 4.5L4 17V7z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
@@ -2617,7 +2632,7 @@ watch(
                 明细不可用：{{ dcaRounds.detail || '数据库连接失败' }}
               </div>
               <div v-else-if="dcaRoundsRows.length" style="overflow-x: auto">
-                <table class="dca-matrix" style="width: 100%">
+                <table class="dca-matrix" style="width: 100%; min-width: 700px">
                   <tr>
                     <th>轮次</th><th>止盈日</th><th>止盈净值<br/>(复权)</th><th>实际收益率</th><th>距上次止盈</th><th>本轮持有</th>
                     <th>本轮投入(元)</th><th>申购费(元)</th><th>赎回费(元)</th><th>本轮净收益(元)</th><th>累计净收益(元)</th>
@@ -4204,4 +4219,32 @@ body {
 .ct-btn.on { background: #0f62fe; border-color: #0f62fe; color: #fff; font-weight: 600; }
 .ct-btn:hover:not(.on) { background: #e8e8e8; }
 .ct-hint { font-size: 12px; color: #da1e28; margin-left: 8px; }
+
+/* ===== 移动端（≤820px）：侧栏折叠、表格横滚、弹窗自适应（2026-11-03） ===== */
+@media (max-width: 820px) {
+  /* .body 自任滚动容器：desktop 100vh + window overflow:hidden，
+     块级布局下 content 高度不限，若不在此滚动则整页无法竖向滚动 */
+  .body { display: block; height: calc(100vh - var(--titlebar-h, 48px));
+    overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  .sidebar { width: auto; max-height: 0; overflow-y: auto;
+    transition: max-height .25s ease;
+    border-bottom: 1px solid var(--sidebar-border); }
+  .sidebar.open { max-height: 72vh; }
+  .shell-menu { cursor: pointer; }
+  .content { padding: 14px 12px 20px; }
+  .toolbar { flex-direction: column; gap: 10px; margin-bottom: 12px; }
+  .h1 { white-space: normal; }
+  .src-seg { flex-wrap: wrap; }
+  .ph-search { width: 100%; max-width: 480px; }
+  .browse-pv { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .browse-pv table { min-width: 860px; }
+  .browse-pv th, .browse-pv td { white-space: nowrap; }
+  /* PrimeVue Dialog 内联定宽（1000/880px）：媒体查询 !important 覆盖 */
+  .p-dialog { width: calc(100vw - 16px) !important;
+    max-width: calc(100vw - 16px); }
+  .p-dialog-content { overflow-x: auto; }
+  .p-dialog table { min-width: 680px; }
+  .dca-scatter-chart { height: 430px !important; }
+  .dca-matrix-wrap .dca-matrix { min-width: 560px; }
+}
 </style>

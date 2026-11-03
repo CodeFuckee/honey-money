@@ -30,8 +30,10 @@ const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v))
  * @returns { destroy() }
  */
 export function mountDca3DScatter(container, sc) {
-  const W = Math.max(600, container.clientWidth || 1000)
-  const H = 620
+  // 尺寸跟随容器实际宽高（移动端容器被媒体查询压到 ~430px 高，
+  // 写死 620 会溢出压住下方结论卡）；下限仅防隐藏/0 尺寸退化
+  const W = Math.max(300, container.clientWidth || 600)
+  const H = Math.max(360, container.clientHeight || 620)
   const dpr = window.devicePixelRatio || 1
   const canvas = document.createElement('canvas')
   canvas.width = W * dpr
