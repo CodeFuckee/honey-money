@@ -25,3 +25,6 @@ data/
 
 # 含账号密码的本地运维文档，禁止入库
 docs/*账号*.md
+
+# zcode site 部署阶段目录
+.zcode-site/

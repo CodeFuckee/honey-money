@@ -160,7 +160,14 @@ npm run preview:prod                         # 反代 http://nas.example.com:280
 规模数据存 PG fund_scale 表（`python -m app.dca_backtest --import-scale
 scripts/data/fund_scale.csv` 刷新，规模季度披露后手动更新一次即可）。
 
-## GitHub Pages 静态快照站（定投止盈回测公开页）
+## 公开快照站（三渠道）：ZCode Sites / GitHub Pages / 内网
+
+**ZCode Sites（每日自动更新）**：https://fund-dca-backtest-hov2.zai.site 。
+发布脚本 `scripts/publish_zcode_site.sh`（导出→构建→注入数据→部署），
+cron 每日 23:50 自动执行（开发机，需 DB 可达 + ZCode 登录态）；
+周日 12:00 附加 `--commit-site-data` 提交快照刷新 GitHub Pages。
+
+**GitHub Pages（手动/周更快照）**：https://codefuckee.github.io/honey-money/
 
 https://codefuckee.github.io/honey-money/ —— 纯静态（无后端）：
 排行/散点/分箱/每轮止盈明细全部内置快照数据，客户端过滤排序分页；
