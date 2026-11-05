@@ -28,3 +28,6 @@ docs/*账号*.md
 
 # zcode site 部署阶段目录
 .zcode-site/
+
+# zcode site 部署链接文件（本地保留，不入库）
+.zcode-site.json
