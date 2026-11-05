@@ -25,9 +25,10 @@ STAGE=".zcode-site/stage"
 export PATH="/home/ckd/.local/share/mise/shims:$PATH"   # cron 无 nvm/mise 激活，shims 自包含
 "$ROOT/.venv/bin/python" scripts/export_static_api.py
 
-# 2) 重建静态产物（根路径 base）并注入数据；start.sh/静态服务器用仓库
-#    内收编的模板（scripts/zcode-site/，源自 site-deploy 技能 templates）
-(cd frontend && "$NPM_BIN" run build >/dev/null)
+# 2) 重建静态快照模式产物（VITE_STATIC=1：导航只留回测页、取数走内置
+#    快照；根路径 base）并注入数据；start.sh/静态服务器用仓库内收编的
+#    模板（scripts/zcode-site/，源自 site-deploy 技能 templates）
+(cd frontend && VITE_STATIC=1 "$NPM_BIN" run build >/dev/null)
 rm -rf "$STAGE"
 mkdir -p "$STAGE/dist/data"
 cp -r frontend/dist/* "$STAGE/dist/"
