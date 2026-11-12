@@ -5,6 +5,7 @@
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createServer } from "node:http";
+import { gzipSync } from "node:zlib";
 import { extname, join, normalize, resolve, sep } from "node:path";
 
 const root = resolve(process.argv[2] ?? "dist");
@@ -91,14 +92,17 @@ async function proxyData(req, res, pathname) {
   const target = `${DATA_PROXY}${pathname}`;
   const hit = dataCache.get(target);
   if (hit && Date.now() - hit.at < 5 * 60 * 1000) {
+    // 大 JSON 经前置网关会被截断：统一 gzip 传输（浏览器/curl --compressed 透明解压）
+    const gz = gzipSync(hit.body);
     res.writeHead(hit.status, {
       "Content-Type": hit.type,
-      "Content-Length": hit.body.length,
+      "Content-Encoding": "gzip",
+      "Content-Length": gz.length,
       "Cache-Control": "no-cache",
       "X-Data-Source": "proxy-cache",
     });
     if (req.method === "HEAD") return res.end();
-    return res.end(hit.body);
+    return res.end(gz);
   }
   try {
     const upstream = await fetch(target, { redirect: "follow",
@@ -109,14 +113,16 @@ async function proxyData(req, res, pathname) {
       if (dataCache.size > 2000) dataCache.clear();
       dataCache.set(target, { at: Date.now(), status: 200, type, body });
     }
+    const gz = gzipSync(body);
     res.writeHead(upstream.status, {
       "Content-Type": type,
-      "Content-Length": body.length,
+      "Content-Encoding": "gzip",
+      "Content-Length": gz.length,
       "Cache-Control": "no-cache",
       "X-Data-Source": "proxy-upstream",
     });
     if (req.method === "HEAD") return res.end();
-    res.end(body);
+    res.end(gz);
   } catch {
     const file = await resolveFile(pathname);
     if (file) return send(req, res, 200, file);
