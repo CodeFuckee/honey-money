@@ -81,6 +81,50 @@ function send(req, res, status, file) {
   createReadStream(file.path).pipe(res);
 }
 
+// 数据透传（可选）：DATA_PROXY_TARGET 配置后，/data/* 实时反代到上游最新
+// 快照（如 GitHub Pages），本站数据随上游日更而无需重新部署；上游不可达
+// 时回退本地打包快照。200 响应缓存 5 分钟，非 200 不缓存。
+const DATA_PROXY = process.env.DATA_PROXY_TARGET?.replace(/\/$/, "");
+const dataCache = new Map();   // url → { at, status, type, body }
+
+async function proxyData(req, res, pathname) {
+  const target = `${DATA_PROXY}${pathname}`;
+  const hit = dataCache.get(target);
+  if (hit && Date.now() - hit.at < 5 * 60 * 1000) {
+    res.writeHead(hit.status, {
+      "Content-Type": hit.type,
+      "Content-Length": hit.body.length,
+      "Cache-Control": "no-cache",
+      "X-Data-Source": "proxy-cache",
+    });
+    if (req.method === "HEAD") return res.end();
+    return res.end(hit.body);
+  }
+  try {
+    const upstream = await fetch(target, { redirect: "follow",
+      signal: AbortSignal.timeout(20000) });
+    const body = Buffer.from(await upstream.arrayBuffer());
+    const type = upstream.headers.get("content-type") ?? "application/json";
+    if (upstream.status === 200) {
+      if (dataCache.size > 2000) dataCache.clear();
+      dataCache.set(target, { at: Date.now(), status: 200, type, body });
+    }
+    res.writeHead(upstream.status, {
+      "Content-Type": type,
+      "Content-Length": body.length,
+      "Cache-Control": "no-cache",
+      "X-Data-Source": "proxy-upstream",
+    });
+    if (req.method === "HEAD") return res.end();
+    res.end(body);
+  } catch {
+    const file = await resolveFile(pathname);
+    if (file) return send(req, res, 200, file);
+    res.writeHead(502, { "Content-Type": "text/plain; charset=utf-8" })
+       .end("data upstream unavailable");
+  }
+}
+
 createServer(async (req, res) => {
   if (req.method !== "GET" && req.method !== "HEAD") {
     res.writeHead(405, { Allow: "GET, HEAD" }).end();
@@ -93,6 +137,9 @@ createServer(async (req, res) => {
   } catch {
     res.writeHead(400).end();
     return;
+  }
+  if (DATA_PROXY && pathname.startsWith("/data/")) {
+    return proxyData(req, res, pathname);
   }
   const file = await resolveFile(pathname);
   if (file) return send(req, res, 200, file);

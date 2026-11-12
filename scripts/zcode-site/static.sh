@@ -10,4 +10,7 @@ SITE_DIR=dist
 export SPA_FALLBACK=1
 
 export PORT="${PORT:-3000}"
+# ADJUST: /data/* 实时反代上游最新快照（NAS 日更推 GitHub → 本站自动跟随）；
+# 留空则只服务打包内数据。打包内 site-data 作为上游故障时的回退。
+export DATA_PROXY_TARGET="${DATA_PROXY_TARGET:-https://codefuckee.github.io/honey-money/data}"
 exec node static-server.mjs "$SITE_DIR"
