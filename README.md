@@ -162,10 +162,12 @@ scripts/data/fund_scale.csv` 刷新，规模季度披露后手动更新一次即
 
 ## 公开快照站（三渠道）：ZCode Sites / GitHub Pages / 内网
 
-**ZCode Sites（每日自动更新）**：https://fund-dca-backtest-hov2.zai.site 。
-发布脚本 `scripts/publish_zcode_site.sh`（导出→构建→注入数据→部署），
-cron 每日 23:50 自动执行（开发机，需 DB 可达 + ZCode 登录态）；
-周日 12:00 附加 `--commit-site-data` 提交快照刷新 GitHub Pages。
+**ZCode Sites（每日自动跟随）**：https://fund-dca-backtest-hov2.zai.site 。
+页面/数据分离：页面为打包产物，`/data/*` 由其静态服务器实时反代
+GitHub Pages 最新快照（上游故障回退本地快照）——数据链路：
+开发机 cron 23:50 `scripts/publish_snapshot.sh` 导出快照并推送
+（Pages 重建后 zai.site 自动跟随）。前端代码变更时加 `--deploy-zcode`
+手动重发 zai.site。
 
 **GitHub Pages（手动/周更快照）**：https://codefuckee.github.io/honey-money/
 
