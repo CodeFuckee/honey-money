@@ -105,8 +105,21 @@ async function proxyData(req, res, pathname) {
     return res.end(gz);
   }
   try {
-    const upstream = await fetch(target, { redirect: "follow",
-      signal: AbortSignal.timeout(20000) });
+    // 回源可能很慢（阿里云→GitHub 国际线路实测 ~60KB/s，大文件需分钟级）：
+    // 超时放宽到 60s + 失败重试一次；仍失败才回退本地快照
+    let upstream;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        upstream = await fetch(target, { redirect: "follow",
+          signal: AbortSignal.timeout(60000) });
+        break;
+      } catch (err) {
+        if (attempt === 2) throw err;
+        console.warn(`[data-proxy] 上游第 ${attempt} 次拉取失败，重试:`,
+          String(err).slice(0, 120));
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+    }
     const body = Buffer.from(await upstream.arrayBuffer());
     const type = upstream.headers.get("content-type") ?? "application/json";
     if (upstream.status === 200) {
