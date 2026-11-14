@@ -44,9 +44,13 @@ fi
 if [[ "${1:-}" == "--deploy-zcode" ]]; then
   (cd frontend && VITE_STATIC=1 "$NPM_BIN" run build >/dev/null)
   rm -rf "$STAGE"
-  mkdir -p "$STAGE/dist/data"
+  mkdir -p "$STAGE/dist/data/funds/dca"
   cp -r frontend/dist/* "$STAGE/dist/"
-  cp -r site-data/* "$STAGE/dist/data/"
+  # 打包合同限 20000 文件（2026-11-14 navs 上线后 site-data 共 39.9k 超限）：
+  # 包内数据只放排行+散点作 Pages 故障回退；rounds/navs 单基金明细
+  # （13.3k+26.6k 文件）一律走 /data 运行时反代 Pages，不进包。
+  cp site-data/funds/dca.json "$STAGE/dist/data/funds/dca/"
+  cp site-data/funds/dca/scatter.*.json "$STAGE/dist/data/funds/dca/"
   cp scripts/zcode-site/static.sh "$STAGE/start.sh"
   cp scripts/zcode-site/static-server.mjs "$STAGE/static-server.mjs"
   "$NODE_BIN" "$ZCODE_SITE_CLI" deploy "$STAGE"
