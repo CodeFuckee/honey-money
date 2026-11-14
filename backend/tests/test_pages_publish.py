@@ -19,20 +19,46 @@ from app.pages_export import export_all  # noqa: E402
 
 @pytest.fixture
 def fake_dsn(monkeypatch):
-    """export_list/scatter/rounds 全部走内存假数据（不连真库）。"""
+    """export_list/scatter/rounds/navs 全部走内存假数据（不连真库）。"""
+    from datetime import date
+
     import app.pages_export as pe
 
-    class _Cur:
-        rows = [
-            ("000001", "gross", 1, None, 10, 10, 0.21, 1.2, 1000.0, 0.0, 0.0, 210.0),
-            ("000001", "nom", 1, None, 10, 10, 0.21, 1.2, 1000.0, 1.5, 3.2, 205.3),
-        ]
+    rounds_rows = [
+        ("000001", "gross", 1, None, 10, 10, 0.21, 1.2, 1000.0, 0.0, 0.0, 210.0),
+        ("000001", "nom", 1, None, 10, 10, 0.21, 1.2, 1000.0, 1.5, 3.2, 205.3),
+    ]
+    tp_rows = [("000001", date(2020, 6, 1))]      # export_navs 止盈日集合
+    nav_rows = [                                  # export_navs 单基金净值（两日以上成线）
+        (date(2020, 1, 2), None, 1.0),
+        (date(2020, 1, 3), 2.0, 1.02),
+        (date(2020, 1, 6), -1.0, 1.0098),
+    ]
 
-        def execute(self, *_a, **_k):
+    class _Cur:
+        """按 SQL 关键字分发假结果（导出各函数的查询互不重叠）。"""
+
+        def execute(self, sql, *_a, **_k):
+            if "tp_date IS NOT NULL" in sql:
+                self._rows = tp_rows
+            elif "max(nav_date)" in sql:
+                self._rows = [(date(2020, 12, 31),)]
+            elif "FROM fund_dca_result" in sql:
+                self._rows = [("000001",)]
+            elif "FROM fund_nav" in sql:
+                self._rows = nav_rows
+            else:                                     # export_rounds 全表轮次
+                self._rows = rounds_rows
             return self
 
+        def fetchone(self):
+            return self._rows[0] if self._rows else None
+
+        def fetchall(self):
+            return list(self._rows)
+
         def __iter__(self):
-            return iter(self.rows)
+            return iter(self._rows)
 
         def __enter__(self):
             return self
@@ -89,6 +115,12 @@ class TestExportAll:
             (tmp_path / "funds" / "dca" / "rounds" / "000001.json").read_text())
         assert set(rounds["rounds"]) == {"gross", "nom"}
         assert rounds["totals"]["nom"]["rounds"] == 1
+        # 净值折线：复权链起点=1（×1e4 整数），日期存天偏移，全点保留
+        navs = json.loads(
+            (tmp_path / "funds" / "dca" / "navs" / "000001.json").read_text())
+        assert navs["d0"] == "2020-01-02" and navs["d"] == [0, 1, 4]
+        assert navs["v"] == [10000, 10200, 10098]
+        assert stats["nav_funds"] == 1
 
 
 class TestPublish:

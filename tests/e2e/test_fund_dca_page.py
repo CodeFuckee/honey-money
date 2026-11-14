@@ -6,6 +6,7 @@
 - E2E-403 在市过滤：切「仅清盘/退市」→ alive=false，切「全部」→ alive=（空值）；
 - E2E-404 排序：点「年化·全史」列头 → sort=full_xirr&order=asc，且翻页保留；
 - E2E-405 深链接：直接打开 /data/fund-dca?alive=false → 首个请求即带 alive=false。
+- E2E-417 无止盈基金弹窗：rounds 为空也渲染复权净值曲线（无止盈点），空态文案并存。
 运行：python -m pytest tests/e2e/test_fund_dca_page.py
 """
 
@@ -377,6 +378,33 @@ class TestFundDcaPage:
         expect(page.locator(".p-dialog")).to_be_visible()
         expect(page.locator(".p-dialog")).to_contain_text("没有止盈记录")
         assert len(calls) == 1, calls
+
+    def test_no_rounds_dialog_still_shows_nav_chart(self, servers, page, mock_dca):
+        """E2E-417：从未止盈的基金 → 弹窗仍渲染复权净值曲线（无止盈点/图例），
+        空态文案与曲线说明并存。"""
+        page.route("**/api/funds/dca/019387/rounds*", lambda route: route.fulfill(
+            status=200, content_type="application/json", body=json.dumps({
+                "status": "up", "code": "019387", "fee": "nom", "rounds": [],
+                "totals": {"rounds": 0, "invested": 0, "net_profit": 0,
+                           "sub_fee": 0, "redeem_fee": 0}})))
+        page.route("**/api/funds/019387/navs*", lambda route: route.fulfill(
+            status=200, content_type="application/json", body=json.dumps({
+                "status": "up", "code": "019387", "navs": [
+                    {"date": "2023-11-28", "unit_nav": 1.0, "accum_nav": 1.0,
+                     "pct_chg": 0, "unit_money": None, "source": "fund_em"},
+                    {"date": "2024-02-10", "unit_nav": 0.95, "accum_nav": 0.95,
+                     "pct_chg": -2.1, "unit_money": None, "source": "fund_em"},
+                    {"date": "2024-05-20", "unit_nav": 1.02, "accum_nav": 1.02,
+                     "pct_chg": 1.4, "unit_money": None, "source": "fund_em"},
+                ]})))
+        _, frontend_port = servers
+        open_dca(page, frontend_port)
+        page.locator(".browse-pv tbody tr", has_text="中欧时代共赢").click()
+        expect(page.locator(".p-dialog")).to_be_visible()
+        # 空态文案保留（表格区域），但曲线上方照常渲染
+        expect(page.locator(".p-dialog")).to_contain_text("没有止盈记录")
+        expect(page.locator(".p-dialog-content canvas")).to_have_count(1)
+        expect(page.locator(".p-dialog")).to_contain_text("尚未止盈，仍可观察其净值走势")
 
     def test_matrix_cell_click_lists_funds(self, servers, page, mock_dca):
         """E2E-416：点击分箱格 → 格内基金清单（client 端过滤散点点集）；

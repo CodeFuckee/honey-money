@@ -172,8 +172,8 @@ GitHub Pages 最新快照（上游故障回退本地快照）——数据链路�
 **GitHub Pages（手动/周更快照）**：https://codefuckee.github.io/honey-money/
 
 https://codefuckee.github.io/honey-money/ —— 纯静态（无后端）：
-排行/散点/分箱/每轮止盈明细全部内置快照数据，客户端过滤排序分页；
-无净值曲线与爬虫管理。数据刷新（两种方式）：
+排行/散点/分箱/每轮止盈明细/单基金复权净值折线全部内置快照数据，
+客户端过滤排序分页；无爬虫管理。数据刷新（两种方式）：
 ① **自动（推荐）**：NAS `.env` 配置 `PAGES_REPO_URL`（含 fine-grained
    PAT 的仓库 URL，见 .env.example 指引）并 `docker compose up -d`——
    回测日更完成后自动导出快照并推送，公开页每日随日更更新；

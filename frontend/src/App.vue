@@ -558,12 +558,36 @@ const dcaRoundsVisible = ref(false)
 const dcaRoundsFund = ref(null)          // { code, name }
 const dcaRounds = ref({ status: 'loading', rounds: [] })
 
-const dcaRoundsNavs = ref([])            // 弹窗净值曲线（复权，起点=1）
+const dcaRoundsNavs = ref([])            // 弹窗净值曲线（已复权链 [{date,value}]，起点=1）
 let dcaRoundsChart = null
 const dcaRoundsChartEl = ref(null)
 
 function disposeDcaRoundsChart() {
   if (dcaRoundsChart) { dcaRoundsChart.dispose(); dcaRoundsChart = null }
+}
+
+// 复权净值链（与回测同口径：pct_chg 已是分红再投；缺失用单位净值比兜底）
+function chainFromNavs(navs) {
+  let v = 1
+  return navs.map((n, i) => {
+    if (i > 0) {
+      const g = n.pct_chg != null ? n.pct_chg / 100
+        : (n.unit_nav && navs[i - 1].unit_nav ? n.unit_nav / navs[i - 1].unit_nav - 1 : 0)
+      v *= 1 + g
+    }
+    return { date: n.date, value: v }
+  })
+}
+
+// 静态快照折线（export_navs 产物 {d0, d:天偏移, v:×1e4 整数}）→ 复权链
+function chainFromStatic(body) {
+  if (!body?.d0 || !body.d?.length || body.d.length !== body.v?.length) return []
+  const [y, m, dd] = body.d0.split('-').map(Number)
+  const utc0 = Date.UTC(y, m - 1, dd)
+  return body.d.map((off, i) => ({
+    date: new Date(utc0 + off * 86400000).toISOString().slice(0, 10),
+    value: body.v[i] / 10000,
+  }))
 }
 
 function openDcaRounds(e) {
@@ -576,36 +600,42 @@ function openDcaRounds(e) {
   const emptyRounds = () => ({ status: 'up', code: data.code, fee: dcaFeeMode.value,
                                rounds: [], totals: { rounds: 0 } })
   if (STATIC_MODE) {
-    // 静态：{ rounds: {gross,disc,nom}, totals: {gross,...} }，无文件 = 从未止盈
+    // 静态：{ rounds: {gross,disc,nom}, totals: {gross,...} }，无文件 = 从未止盈；
+    // 200 但非 JSON（本地 vite preview 的 SPA 回退页）同样按无文件处理
     fetch(`${DATA_BASE}/funds/dca/rounds/${data.code}.json`)
-      .then(r => r.ok ? r.json() : emptyRounds())
+      .then(r => (r.ok ? r.json().catch(() => null) : null))
       .then(body => {
         const fee = dcaFeeMode.value
-        dcaRounds.value = { status: 'up', code: data.code, fee,
-                            rounds: body.rounds?.[fee] || [],
-                            totals: body.totals?.[fee] || { rounds: 0 } }
-      })
-      .catch(err => { dcaRounds.value = { status: 'down', detail: String(err), rounds: [] } })
-  } else {
-    fetch(`/api/funds/dca/${data.code}/rounds?fee=${dcaFeeMode.value}`)
-      .then(r => r.json())
-      .then(body => {
         dcaRounds.value = body
-        if (body.rounds?.length && dcaRoundsNavs.value.length) {
-          nextTick(() => renderDcaRoundsChart())
-        }
+          ? { status: 'up', code: data.code, fee,
+              rounds: body.rounds?.[fee] || [],
+              totals: body.totals?.[fee] || { rounds: 0 } }
+          : emptyRounds()
       })
       .catch(err => { dcaRounds.value = { status: 'down', detail: String(err), rounds: [] } })
+    // 净值折线快照（近 10 年窗口）；404 = 窗口内净值不足不成线，曲线隐藏
+    fetch(`${DATA_BASE}/funds/dca/navs/${data.code}.json`)
+      .then(r => r.ok ? r.json() : null)
+      .then(body => {
+        dcaRoundsNavs.value = body ? chainFromStatic(body) : []
+        nextTick(() => renderDcaRoundsChart())
+      })
+      .catch(() => { dcaRoundsNavs.value = [] })
+    return
   }
-  if (STATIC_MODE) return   // 静态无净值数据，弹窗隐藏曲线
-  // 净值曲线（近 2600 个净值日 ≈ 覆盖 10 年窗口），与轮次到齐后渲染
+  fetch(`/api/funds/dca/${data.code}/rounds?fee=${dcaFeeMode.value}`)
+    .then(r => r.json())
+    .then(body => {
+      dcaRounds.value = body
+      nextTick(() => renderDcaRoundsChart())
+    })
+    .catch(err => { dcaRounds.value = { status: 'down', detail: String(err), rounds: [] } })
+  // 净值曲线（近 2600 个净值日 ≈ 覆盖 10 年窗口）；无止盈轮次也照常渲染曲线
   fetch(`/api/funds/${data.code}/navs?limit=2600`)
     .then(r => r.json())
     .then(body => {
-      dcaRoundsNavs.value = body.status === 'up' ? (body.navs || []) : []
-      if (dcaRounds.value.rounds?.length) {
-        nextTick(() => renderDcaRoundsChart())
-      }
+      dcaRoundsNavs.value = body.status === 'up' ? chainFromNavs(body.navs || []) : []
+      nextTick(() => renderDcaRoundsChart())
     })
     .catch(() => { dcaRoundsNavs.value = [] })
 }
@@ -620,31 +650,22 @@ const dcaRoundsRows = computed(() => {
   })
 })
 
-// 复权净值链（与回测同口径：pct_chg 已是分红再投；缺失用单位净值比兜底）
 function buildDcaRoundsChart() {
-  const navs = dcaRoundsNavs.value
-  if (navs.length < 2) return null
-  let v = 1
-  const dates = [], adj = []
-  navs.forEach((n, i) => {
-    if (i > 0) {
-      const g = n.pct_chg != null ? n.pct_chg / 100
-        : (n.unit_nav && navs[i - 1].unit_nav ? n.unit_nav / navs[i - 1].unit_nav - 1 : 0)
-      v *= 1 + g
-    }
-    dates.push(n.date)
-    adj.push(v)
-  })
-  const tpMap = new Map(dates.map((d, i) => [d, adj[i]]))
-  const tpPts = (dcaRounds.value.rounds || [])
+  const chain = dcaRoundsNavs.value
+  if (chain.length < 2) return null
+  const dates = chain.map(p => p.date)
+  const adj = chain.map(p => p.value)
+  const tpMap = new Map(chain.map(p => [p.date, p.value]))
+  const rounds = dcaRounds.value.rounds || []
+  const tpPts = rounds
     .filter(r => r.tp_date && tpMap.has(r.tp_date))
     .map(r => ({ value: [r.tp_date, tpMap.get(r.tp_date)],
                  profit: r.profit, seq: r.seq, gap: r.gap_days }))
   return {
     animation: false,
     tooltip: { trigger: 'axis' },
-    legend: { data: ['复权净值', '止盈点'], top: 0 },
-    grid: { left: 56, right: 16, top: 30, bottom: 46 },
+    legend: rounds.length ? { data: ['复权净值', '止盈点'], top: 0 } : null,
+    grid: { left: 56, right: 16, top: rounds.length ? 30 : 16, bottom: 46 },
     dataZoom: [{ type: 'inside' }],
     xAxis: { type: 'category', data: dates, boundary: false,
              axisLabel: { fontSize: 10 } },
@@ -652,14 +673,14 @@ function buildDcaRoundsChart() {
     series: [
       { name: '复权净值', type: 'line', data: adj, showSymbol: false,
         lineStyle: { width: 1.3, color: '#0f62fe' } },
-      { name: '止盈点', type: 'scatter', data: tpPts, symbol: 'triangle',
-        symbolSize: 11, itemStyle: { color: '#da1e28' },
+      ...(rounds.length ? [{ name: '止盈点', type: 'scatter', data: tpPts,
+        symbol: 'triangle', symbolSize: 11, itemStyle: { color: '#da1e28' },
         tooltip: { formatter: (p) => {
           const d = p.data
           return `<b>第 ${d.seq} 次止盈</b><br/>${d.value[0]}<br/>` +
             `实际收益率：${(d.profit * 100).toFixed(1)}%` +
             (d.gap != null ? `<br/>距上次止盈：${d.gap} 天` : '')
-        } } },
+        } } }] : []),
     ],
   }
 }
@@ -2623,11 +2644,14 @@ watch(
                   <div class="dc-value">{{ fmt(dcaRounds.totals.sub_fee) }} + {{ fmt(dcaRounds.totals.redeem_fee) }} 元</div>
                 </div>
               </div>
-              <div v-show="dcaRounds.rounds?.length" ref="dcaRoundsChartEl"
+              <div v-show="dcaRoundsNavs.length" ref="dcaRoundsChartEl"
                 style="width: 100%; height: 300px; margin-bottom: 10px"></div>
               <p class="note" style="margin: 0 0 8px"
                 v-if="dcaRounds.rounds?.length && dcaRoundsNavs.length">
                 ▲ = 每轮止盈卖点 · 曲线为复权净值（分红再投，窗口起点=1，与回测同口径）
+              </p>
+              <p class="note" style="margin: 0 0 8px" v-else-if="dcaRoundsNavs.length">
+                曲线为复权净值（分红再投，窗口起点=1，与回测同口径）· 该基金尚未止盈，仍可观察其净值走势
               </p>
               <div v-if="dcaRounds.status === 'down'" class="browse-empty">
                 明细不可用：{{ dcaRounds.detail || '数据库连接失败' }}

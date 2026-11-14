@@ -1,6 +1,6 @@
 # GitHub Pages：定投止盈回测静态快照站。
 # 数据来自 site-data/（scripts/export_static_api.py 在有库环境导出后提交），
-# 前端以 VITE_STATIC=1 构建为纯静态应用（无后端，明细不含净值曲线）。
+# 前端以 VITE_STATIC=1 构建为纯静态应用（无后端，明细曲线读快照 navs 数据）。
 name: pages
 on:
   push:
