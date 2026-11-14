@@ -2388,108 +2388,6 @@ watch(
                 <p class="sub">{{ dca.meta?.params?.scale_min_yi ? `资产规模 ≥${dca.meta.params.scale_min_yi} 亿公募基金` : '全市场公募基金（不限规模）' }} · 月定投 {{ dca.meta?.params?.amount ?? 1000 }} 元 · 收益 ≥{{ (((dca.meta?.params?.take_profit) ?? 0.2) * 100).toFixed(0) }}% 全仓止盈重来<template v-if="dca.meta?.params?.min_age_years"> · 运作 ≥{{ dca.meta.params.min_age_years }} 年</template> · 年化=XIRR 资金加权<template v-if="dca.meta?.params?.window_end"> · 数据截至 {{ dca.meta.params.window_end }}</template></p>
               </div>
             </div>
-            <div class="learn-metrics" v-if="dca.stats">
-              <div class="card lm"><div class="lm-k">在市基金</div><div class="lm-v">{{ dca.stats.count }}</div></div>
-              <div class="card lm"><div class="lm-k">年化中位</div><div class="lm-v">{{ pctp(dca.stats.median) }}</div></div>
-              <div class="card lm"><div class="lm-k">P25</div><div class="lm-v">{{ pctp(dca.stats.p25) }}</div></div>
-              <div class="card lm"><div class="lm-k">P75</div><div class="lm-v">{{ pctp(dca.stats.p75) }}</div></div>
-              <div class="card lm"><div class="lm-k">P90</div><div class="lm-v">{{ pctp(dca.stats.p90) }}</div></div>
-              <div class="card lm"><div class="lm-k">年化为正</div><div class="lm-v">{{ pct0(dca.stats.positive_share) }}</div></div>
-              <div class="card lm"><div class="lm-k">曾止盈</div><div class="lm-v">{{ pct0(dca.stats.take_profit_share) }}</div></div>
-            </div>
-            <p class="note" v-if="STATIC_MODE && dca.meta?.generated_at"
-              style="margin: 0 0 8px">静态快照（GitHub Pages）· 数据生成于 {{ dca.meta.generated_at.slice(0, 10) }} · 明细不含净值曲线 · 实时数据以内网部署为准</p>
-            <div class="ph-search funds-search">
-              <span class="p-inputtext-icon-wrap"><i class="pi pi-search"></i></span>
-              <InputText v-model="dcaQuery" placeholder="搜索基金代码 / 名称，如 510300 或 沪深300"
-                class="browse-input" @keydown.enter="dcaSearch" />
-              <Button label="搜索" size="small" severity="secondary" outlined @click="dcaSearch" />
-              <Select v-model="dcaAlive" :options="DCA_ALIVE_FILTERS"
-                optionLabel="label" optionValue="value" size="small"
-                placeholder="仅在市" class="delisted-select"
-                aria-label="按在市状态过滤" @change="dcaSearch" />
-              <span class="age-wrap" title="只看运作超过 N 年的基金；0 或留空 = 全部">
-                <InputNumber v-model="dcaAge" :min="0" :max="99"
-                  :maxFractionDigits="0" :useGrouping="false" size="small"
-                  inputClass="age-input" inputId="dca-age"
-                  placeholder="年限" aria-label="按运作年限过滤，大于该年数" />
-                <span class="age-suffix">年以上</span>
-              </span>
-              <span class="age-wrap" title="只看规模超过 N 亿的基金；0 或留空 = 全部（含无规模披露）">
-                <InputNumber v-model="dcaScale" :min="0" :max="99999"
-                  :maxFractionDigits="2" :useGrouping="false" size="small"
-                  inputClass="age-input" inputId="dca-scale"
-                  placeholder="规模" aria-label="按资产规模过滤，大于该数值（亿元）" />
-                <span class="age-suffix">亿以上</span>
-              </span>
-            </div>
-            <div class="browse-pv">
-              <DataTable :value="dca.rows || []" lazy paginator :rows="DCA_PAGE_SIZE"
-                :first="dcaPage * DCA_PAGE_SIZE"
-                :totalRecords="dca.total || 0" :loading="dcaLoading"
-                dataKey="code" stripedRows size="small"
-                :sortField="dcaSort" :sortOrder="dcaOrder === 'asc' ? 1 : -1"
-                @page="onDcaPage" @sort="onDcaSort" @row-click="openDcaRounds">
-                <template #empty>
-                  <div class="browse-empty">
-                    {{ dca.status === 'down' ? '数据库不可达：' + (dca.detail || '')
-                      : dca.status === 'loading' ? '加载中…'
-                      : '暂无回测数据（运行 scripts/fund_dca_backtest.py 回测并经 app.dca_store 导入后展示）' }}
-                  </div>
-                </template>
-                <Column field="code" header="代码" style="width: 90px" sortable>
-                  <template #body="{ data }"><span class="mono">{{ data.code }}</span></template>
-                </Column>
-                <Column field="name" header="名称" />
-                <Column field="fund_type" header="类型" style="width: 130px">
-                  <template #body="{ data }">{{ data.fund_type || '—' }}</template>
-                </Column>
-                <Column field="age_years" sortField="full_start" header="运作年限" style="width: 90px" sortable bodyClass="num-col">
-                  <template #body="{ data }">{{ data.age_years != null ? data.age_years + ' 年' : '—' }}</template>
-                </Column>
-                <Column field="scale_yi" header="规模(亿)" style="width: 95px" sortable bodyClass="num-col">
-                  <template #body="{ data }">{{ data.scale_yi != null ? data.scale_yi : '—' }}</template>
-                </Column>
-                <Column field="w10_rounds" header="止盈次数" style="width: 88px" sortable bodyClass="num-col">
-                  <template #body="{ data }">{{ data.w10_rounds ?? '—' }}</template>
-                </Column>
-                <Column field="gap_avg_days" header="止盈间隔" style="width: 100px" sortable bodyClass="num-col">
-                  <template #body="{ data }">{{ data.gap_avg_days != null ? '≈' + (data.gap_avg_days / 30.44).toFixed(1) + ' 月/次' : '—' }}</template>
-                </Column>
-                <Column field="w10_profit_rate" header="总收益率" style="width: 98px" sortable bodyClass="num-col">
-                  <template #body="{ data }">
-                    <span v-if="data.w10_profit_rate != null"
-                      :class="data.w10_profit_rate >= 0 ? 'chg-up' : 'chg-down'">{{ pct1(data.w10_profit_rate) }}</span>
-                    <span v-else>—</span>
-                  </template>
-                </Column>
-                <Column field="w10_xirr" header="年化·近10年" style="width: 110px" sortable bodyClass="num-col">
-                  <template #body="{ data }">
-                    <span v-if="data.w10_xirr != null"
-                      :class="data.w10_xirr >= 0 ? 'chg-up' : 'chg-down'">{{ pct1(data.w10_xirr) }}</span>
-                    <span v-else>—</span>
-                  </template>
-                </Column>
-                <Column field="full_xirr" header="年化·全史" style="width: 105px" sortable bodyClass="num-col">
-                  <template #body="{ data }">
-                    <span v-if="data.full_xirr != null"
-                      :class="data.full_xirr >= 0 ? 'chg-up' : 'chg-down'">{{ pct1(data.full_xirr) }}</span>
-                    <span v-else>—</span>
-                  </template>
-                </Column>
-                <Column header="回测区间" style="width: 205px">
-                  <template #body="{ data }">
-                    <span class="mono">{{ data.w10_start || '—' }} ~ {{ data.w10_end || '—' }}</span>
-                  </template>
-                </Column>
-                <Column header="操作" style="width: 72px">
-                  <template #body="{ data }">
-                    <button class="detail-btn" @click.stop="openDcaRounds(data)">详情</button>
-                  </template>
-                </Column>
-              </DataTable>
-            </div>
-            <p class="note">口径：每月首个净值日投入固定金额，任一净值日持仓收益达止盈线即全仓赎回并重开新一轮（分红再投）；排行年化为不含费口径，散点区可切含费口径 · 统计卡为在市全集分位，不随搜索变化 · 新基金（回测窗口 &lt;90 天）年化留空 · 数据为离线回测快照，重跑 scripts/fund_dca_backtest.py 并经 app.dca_store 导入后刷新 · 点行或「详情」查看每轮止盈明细</p>
 
             <!-- ===== 年限 × 规模 三维散点（每基金一点） + 分箱统计 ===== -->
             <div class="card" style="margin-top: 16px; padding: 14px 16px 18px">
@@ -2595,6 +2493,109 @@ watch(
               </template>
               <div v-else class="browse-empty">散点数据加载中…</div>
             </div>
+            <div class="learn-metrics" v-if="dca.stats">
+              <div class="card lm"><div class="lm-k">在市基金</div><div class="lm-v">{{ dca.stats.count }}</div></div>
+              <div class="card lm"><div class="lm-k">年化中位</div><div class="lm-v">{{ pctp(dca.stats.median) }}</div></div>
+              <div class="card lm"><div class="lm-k">P25</div><div class="lm-v">{{ pctp(dca.stats.p25) }}</div></div>
+              <div class="card lm"><div class="lm-k">P75</div><div class="lm-v">{{ pctp(dca.stats.p75) }}</div></div>
+              <div class="card lm"><div class="lm-k">P90</div><div class="lm-v">{{ pctp(dca.stats.p90) }}</div></div>
+              <div class="card lm"><div class="lm-k">年化为正</div><div class="lm-v">{{ pct0(dca.stats.positive_share) }}</div></div>
+              <div class="card lm"><div class="lm-k">曾止盈</div><div class="lm-v">{{ pct0(dca.stats.take_profit_share) }}</div></div>
+            </div>
+            <p class="note" v-if="STATIC_MODE && dca.meta?.generated_at"
+              style="margin: 0 0 8px">静态快照（GitHub Pages）· 数据生成于 {{ dca.meta.generated_at.slice(0, 10) }} · 明细不含净值曲线 · 实时数据以内网部署为准</p>
+            <div class="ph-search funds-search">
+              <span class="p-inputtext-icon-wrap"><i class="pi pi-search"></i></span>
+              <InputText v-model="dcaQuery" placeholder="搜索基金代码 / 名称，如 510300 或 沪深300"
+                class="browse-input" @keydown.enter="dcaSearch" />
+              <Button label="搜索" size="small" severity="secondary" outlined @click="dcaSearch" />
+              <Select v-model="dcaAlive" :options="DCA_ALIVE_FILTERS"
+                optionLabel="label" optionValue="value" size="small"
+                placeholder="仅在市" class="delisted-select"
+                aria-label="按在市状态过滤" @change="dcaSearch" />
+              <span class="age-wrap" title="只看运作超过 N 年的基金；0 或留空 = 全部">
+                <InputNumber v-model="dcaAge" :min="0" :max="99"
+                  :maxFractionDigits="0" :useGrouping="false" size="small"
+                  inputClass="age-input" inputId="dca-age"
+                  placeholder="年限" aria-label="按运作年限过滤，大于该年数" />
+                <span class="age-suffix">年以上</span>
+              </span>
+              <span class="age-wrap" title="只看规模超过 N 亿的基金；0 或留空 = 全部（含无规模披露）">
+                <InputNumber v-model="dcaScale" :min="0" :max="99999"
+                  :maxFractionDigits="2" :useGrouping="false" size="small"
+                  inputClass="age-input" inputId="dca-scale"
+                  placeholder="规模" aria-label="按资产规模过滤，大于该数值（亿元）" />
+                <span class="age-suffix">亿以上</span>
+              </span>
+            </div>
+            <div class="browse-pv">
+              <DataTable :value="dca.rows || []" lazy paginator :rows="DCA_PAGE_SIZE"
+                :first="dcaPage * DCA_PAGE_SIZE"
+                :totalRecords="dca.total || 0" :loading="dcaLoading"
+                dataKey="code" stripedRows size="small"
+                :sortField="dcaSort" :sortOrder="dcaOrder === 'asc' ? 1 : -1"
+                @page="onDcaPage" @sort="onDcaSort" @row-click="openDcaRounds">
+                <template #empty>
+                  <div class="browse-empty">
+                    {{ dca.status === 'down' ? '数据库不可达：' + (dca.detail || '')
+                      : dca.status === 'loading' ? '加载中…'
+                      : '暂无回测数据（运行 scripts/fund_dca_backtest.py 回测并经 app.dca_store 导入后展示）' }}
+                  </div>
+                </template>
+                <Column field="code" header="代码" style="width: 90px" sortable>
+                  <template #body="{ data }"><span class="mono">{{ data.code }}</span></template>
+                </Column>
+                <Column field="name" header="名称" />
+                <Column field="fund_type" header="类型" style="width: 130px">
+                  <template #body="{ data }">{{ data.fund_type || '—' }}</template>
+                </Column>
+                <Column field="age_years" sortField="full_start" header="运作年限" style="width: 90px" sortable bodyClass="num-col">
+                  <template #body="{ data }">{{ data.age_years != null ? data.age_years + ' 年' : '—' }}</template>
+                </Column>
+                <Column field="scale_yi" header="规模(亿)" style="width: 95px" sortable bodyClass="num-col">
+                  <template #body="{ data }">{{ data.scale_yi != null ? data.scale_yi : '—' }}</template>
+                </Column>
+                <Column field="w10_rounds" header="止盈次数" style="width: 88px" sortable bodyClass="num-col">
+                  <template #body="{ data }">{{ data.w10_rounds ?? '—' }}</template>
+                </Column>
+                <Column field="gap_avg_days" header="止盈间隔" style="width: 100px" sortable bodyClass="num-col">
+                  <template #body="{ data }">{{ data.gap_avg_days != null ? '≈' + (data.gap_avg_days / 30.44).toFixed(1) + ' 月/次' : '—' }}</template>
+                </Column>
+                <Column field="w10_profit_rate" header="总收益率" style="width: 98px" sortable bodyClass="num-col">
+                  <template #body="{ data }">
+                    <span v-if="data.w10_profit_rate != null"
+                      :class="data.w10_profit_rate >= 0 ? 'chg-up' : 'chg-down'">{{ pct1(data.w10_profit_rate) }}</span>
+                    <span v-else>—</span>
+                  </template>
+                </Column>
+                <Column field="w10_xirr" header="年化·近10年" style="width: 110px" sortable bodyClass="num-col">
+                  <template #body="{ data }">
+                    <span v-if="data.w10_xirr != null"
+                      :class="data.w10_xirr >= 0 ? 'chg-up' : 'chg-down'">{{ pct1(data.w10_xirr) }}</span>
+                    <span v-else>—</span>
+                  </template>
+                </Column>
+                <Column field="full_xirr" header="年化·全史" style="width: 105px" sortable bodyClass="num-col">
+                  <template #body="{ data }">
+                    <span v-if="data.full_xirr != null"
+                      :class="data.full_xirr >= 0 ? 'chg-up' : 'chg-down'">{{ pct1(data.full_xirr) }}</span>
+                    <span v-else>—</span>
+                  </template>
+                </Column>
+                <Column header="回测区间" style="width: 205px">
+                  <template #body="{ data }">
+                    <span class="mono">{{ data.w10_start || '—' }} ~ {{ data.w10_end || '—' }}</span>
+                  </template>
+                </Column>
+                <Column header="操作" style="width: 72px">
+                  <template #body="{ data }">
+                    <button class="detail-btn" @click.stop="openDcaRounds(data)">详情</button>
+                  </template>
+                </Column>
+              </DataTable>
+            </div>
+            <p class="note">口径：每月首个净值日投入固定金额，任一净值日持仓收益达止盈线即全仓赎回并重开新一轮（分红再投）；排行年化为不含费口径，散点区可切含费口径 · 统计卡为在市全集分位，不随搜索变化 · 新基金（回测窗口 &lt;90 天）年化留空 · 数据为离线回测快照，重跑 scripts/fund_dca_backtest.py 并经 app.dca_store 导入后刷新 · 点行或「详情」查看每轮止盈明细</p>
+
 
             <!-- ===== 每次止盈明细弹窗（点排行行或「详情」按钮触发） ===== -->
             <Dialog v-model:visible="dcaRoundsVisible" modal

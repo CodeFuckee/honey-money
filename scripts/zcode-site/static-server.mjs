@@ -88,54 +88,73 @@ function send(req, res, status, file) {
 const DATA_PROXY = process.env.DATA_PROXY_TARGET?.replace(/\/$/, "");
 const dataCache = new Map();   // url → { at, status, type, body }
 
+const FRESH_MS = 60 * 60 * 1000;   // 缓存 1 小时：数据每日一更，长缓存换首屏速度
+const CACHE_CONTROL = "public, max-age=600";   // 浏览器端 10 分钟内直接复用
+
+async function fetchUpstream(target) {
+  // 回源可能很慢（阿里云→GitHub 国际线路实测 ~60KB/s，大文件需分钟级）：
+  // 超时放宽到 60s + 失败重试一次；仍失败由调用方回退本地快照
+  let upstream;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      upstream = await fetch(target, { redirect: "follow",
+        signal: AbortSignal.timeout(60000) });
+      break;
+    } catch (err) {
+      if (attempt === 2) throw err;
+      console.warn(`[data-proxy] 上游第 ${attempt} 次拉取失败，重试:`,
+        String(err).slice(0, 120));
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
+  const body = Buffer.from(await upstream.arrayBuffer());
+  const type = upstream.headers.get("content-type") ?? "application/json";
+  return { status: upstream.status, type, body };
+}
+
+function serveGz(req, res, status, type, body, source) {
+  const gz = gzipSync(body);
+  res.writeHead(status, {
+    "Content-Type": type,
+    "Content-Encoding": "gzip",
+    "Content-Length": gz.length,
+    "Cache-Control": CACHE_CONTROL,
+    "X-Data-Source": source,
+  });
+  if (req.method === "HEAD") return res.end();
+  res.end(gz);
+}
+
 async function proxyData(req, res, pathname) {
   const target = `${DATA_PROXY}${pathname}`;
   const hit = dataCache.get(target);
-  if (hit && Date.now() - hit.at < 5 * 60 * 1000) {
-    // 大 JSON 经前置网关会被截断：统一 gzip 传输（浏览器/curl --compressed 透明解压）
-    const gz = gzipSync(hit.body);
-    res.writeHead(hit.status, {
-      "Content-Type": hit.type,
-      "Content-Encoding": "gzip",
-      "Content-Length": gz.length,
-      "Cache-Control": "no-cache",
-      "X-Data-Source": "proxy-cache",
-    });
+  if (hit && Date.now() - hit.at < FRESH_MS) {
+    serveGz(req, res, hit.status, hit.type, hit.body, "proxy-cache");
     if (req.method === "HEAD") return res.end();
-    return res.end(gz);
+    return;
+  }
+  if (hit) {
+    // 过期：先回旧值秒开，后台静默刷新（数据日更，1h 内旧值无感知）
+    serveGz(req, res, hit.status, hit.type, hit.body, "proxy-cache");
+    if (!hit.refreshing) {
+      hit.refreshing = true;
+      fetchUpstream(target).then((r) => {
+        if (r.status === 200) {
+          if (dataCache.size > 8000) dataCache.clear();
+          dataCache.set(target, { at: Date.now(), ...r });
+        }
+      }).catch(() => {}).finally(() => { hit.refreshing = false; });
+    }
+    if (req.method === "HEAD") return res.end();
+    return;
   }
   try {
-    // 回源可能很慢（阿里云→GitHub 国际线路实测 ~60KB/s，大文件需分钟级）：
-    // 超时放宽到 60s + 失败重试一次；仍失败才回退本地快照
-    let upstream;
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      try {
-        upstream = await fetch(target, { redirect: "follow",
-          signal: AbortSignal.timeout(60000) });
-        break;
-      } catch (err) {
-        if (attempt === 2) throw err;
-        console.warn(`[data-proxy] 上游第 ${attempt} 次拉取失败，重试:`,
-          String(err).slice(0, 120));
-        await new Promise((r) => setTimeout(r, 2000));
-      }
+    const r = await fetchUpstream(target);
+    if (r.status === 200) {
+      if (dataCache.size > 8000) dataCache.clear();
+      dataCache.set(target, { at: Date.now(), ...r });
     }
-    const body = Buffer.from(await upstream.arrayBuffer());
-    const type = upstream.headers.get("content-type") ?? "application/json";
-    if (upstream.status === 200) {
-      if (dataCache.size > 2000) dataCache.clear();
-      dataCache.set(target, { at: Date.now(), status: 200, type, body });
-    }
-    const gz = gzipSync(body);
-    res.writeHead(upstream.status, {
-      "Content-Type": type,
-      "Content-Encoding": "gzip",
-      "Content-Length": gz.length,
-      "Cache-Control": "no-cache",
-      "X-Data-Source": "proxy-upstream",
-    });
-    if (req.method === "HEAD") return res.end();
-    res.end(gz);
+    serveGz(req, res, r.status, r.type, r.body, "proxy-upstream");
   } catch {
     const file = await resolveFile(pathname);
     if (file) return send(req, res, 200, file);
