@@ -86,7 +86,8 @@ def _fake_list(dsn, *, limit=0, offset=0):
                 "meta": {"generated_at": "2026-11-01T00:00:00+00:00"}}
     return {"status": "up", "total": 1, "limit": limit, "offset": offset,
             "rows": [{"code": "000001", "name": "测试", "alive": True,
-                      "w10_xirr": 0.2}],
+                      "w10_xirr": 0.2, "w10_xirr_nom": 0.18,
+                      "w10_rounds_nom": 1, "w10_profit_rate_nom": 0.19}],
             "stats": {"count": 1, "p25": 0.2, "median": 0.2, "p75": 0.2,
                       "p90": 0.2, "positive_share": 1.0,
                       "take_profit_share": 1.0},
@@ -107,6 +108,9 @@ class TestExportAll:
         assert stats["rows"] == 1
         dca = json.loads((tmp_path / "funds" / "dca.json").read_text())
         assert dca["total"] == 1 and dca["rows"][0]["code"] == "000001"
+        # 口径字段原样透传（前端按 fee 切换行内取值，导出不得裁剪）
+        assert dca["rows"][0]["w10_xirr_nom"] == 0.18
+        assert dca["rows"][0]["w10_rounds_nom"] == 1
         for fee in ("gross", "disc", "nom"):
             body = json.loads(
                 (tmp_path / "funds" / "dca" / f"scatter.{fee}.json").read_text())

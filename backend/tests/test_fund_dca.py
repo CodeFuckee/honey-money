@@ -98,7 +98,9 @@ class FakeConn:
 
 def _fetch_dca(**kw):
     import app.dca_api as dca_mod
-    one = kw.pop("one", (None,))     # fetchone 桩：参考日/count/stats/meta 各取一次
+    # fetchone 桩：参考日/count/stats/meta 各取一次；meta 解包需 3 元素，
+    # [0] 恒 None（无参考日 → 无年限截止；stats/meta 记 None）
+    one = kw.pop("one", (None, None, None))
     conn = FakeConn(one=one)
 
     def fake_connect(*a, **k):
@@ -394,10 +396,12 @@ class TestDcaRounds:
         assert len(conn.cursor_obj.batch) == 1            # executemany 一次
         sql, seq_rows = conn.cursor_obj.batch[0]
         assert "INSERT INTO fund_dca_rounds" in sql and len(seq_rows) == 2
-        # 间隔聚合只统计 gross 口径（三场景入库后不重复计数）
+        # 间隔聚合按口径分列回填（gross 三列沿用 + disc/nom 均值各一列）
         apply_sql = [sql for sql in sqls
-                     if "gap_avg_days = t.gap_avg" in sql][0]
-        assert "fee = 'gross'" in apply_sql
+                     if "gap_avg_days = t.g_avg" in sql][0]
+        assert "FILTER (WHERE fee = 'gross')" in apply_sql
+        assert "FILTER (WHERE fee = 'disc')" in apply_sql
+        assert "FILTER (WHERE fee = 'nom')" in apply_sql
 
 
 class TestDcaStoreFeeCols:
@@ -420,6 +424,27 @@ class TestDcaStoreFeeCols:
         assert rows[0]["w10_xirr_disc"] == pytest.approx(0.09)
         assert rows[0]["w10_xirr_nom"] == pytest.approx(0.08)
 
+    def test_parse_csv_rounds_profit_rate_fee_columns(self, tmp_path):
+        """排行口径切换列（*_rounds_disc/nom、*_profit_rate_disc/nom）按类型导入。"""
+        import csv as _csv
+        from app.dca_store import _COLS, parse_csv
+        header = [c for c in _COLS if c != "alive"]
+        r0 = {c: "" for c in header}
+        r0.update({"code": "000001", "name": "测试混合A",
+                   "w10_rounds_disc": "4", "w10_rounds_nom": "3",
+                   "w10_profit_rate_disc": "0.213", "w10_profit_rate_nom": "0.198",
+                   "full_start": "2024-01-01", "full_end": "2026-10-30"})
+        p = tmp_path / "bt.csv"
+        with p.open("w", newline="") as f:
+            w = _csv.writer(f)
+            w.writerow(header)
+            w.writerow([r0[c] for c in header])
+        rows = parse_csv(p)
+        assert rows[0]["w10_rounds_disc"] == 4
+        assert rows[0]["w10_rounds_nom"] == 3
+        assert rows[0]["w10_profit_rate_disc"] == pytest.approx(0.213)
+        assert rows[0]["w10_profit_rate_nom"] == pytest.approx(0.198)
+
     def test_parse_csv_fee_cols_missing_cell_ok(self, tmp_path):
         """旧 CSV 无费用列 → None，不炸导入。"""
         import csv as _csv
@@ -433,6 +458,73 @@ class TestDcaStoreFeeCols:
         rows = parse_csv(p)
         assert rows[0]["w10_xirr_disc"] is None
         assert rows[0]["w10_xirr_nom"] is None
+
+
+class TestDcaListFee:
+    """排行列表 fee 参数：只切换 ORDER BY 与统计列，行恒带三口径字段。"""
+
+    # run() 的执行序：[0]=max(full_end) 参考日，[1]=列表，[2]=count，[3]=stats
+
+    def test_select_always_carries_all_fee_columns(self):
+        """SELECT 恒含三口径后缀列（前端按行内字段自取，不靠服务端裁剪）。"""
+        body, conn = _fetch_dca()
+        sql, _ = conn.cursor_obj.executed[1]
+        for col in ("w10_xirr_nom", "w10_rounds_disc", "gap_avg_days_nom",
+                    "w10_profit_rate_nom", "full_profit_rate_disc"):
+            assert col in sql
+        assert body["fee"] == "gross"          # 缺省口径回显
+
+    def test_default_sort_is_gross_column(self):
+        """缺省 fee=gross：排序沿用原列（行为与旧版一致）。"""
+        body, conn = _fetch_dca()
+        sql, _ = conn.cursor_obj.executed[1]
+        assert "ORDER BY w10_xirr DESC NULLS LAST" in sql
+        stats_sql, _ = conn.cursor_obj.executed[3]
+        assert "w10_xirr IS NOT NULL" in stats_sql
+        assert "w10_rounds > 0" in stats_sql
+
+    def test_fee_nom_switches_sort_and_stats_columns(self):
+        """fee=nom：排序/统计切到 _nom 后缀列。"""
+        body, conn = _fetch_dca(fee="nom")
+        sql, _ = conn.cursor_obj.executed[1]
+        assert "ORDER BY w10_xirr_nom DESC NULLS LAST" in sql
+        stats_sql, _ = conn.cursor_obj.executed[3]
+        assert "w10_xirr_nom IS NOT NULL" in stats_sql
+        assert "w10_rounds_nom > 0" in stats_sql
+        assert body["fee"] == "nom"
+
+    def test_fee_nom_sort_by_rounds_and_gap(self):
+        """fee=nom：轮次/间隔排序字段同样带后缀。"""
+        body, conn = _fetch_dca(fee="nom", sort="w10_rounds")
+        sql, _ = conn.cursor_obj.executed[1]
+        assert "ORDER BY w10_rounds_nom DESC NULLS LAST" in sql
+        body, conn = _fetch_dca(fee="disc", sort="gap_avg_days", order="asc")
+        sql, _ = conn.cursor_obj.executed[1]
+        assert "ORDER BY gap_avg_days_disc ASC NULLS LAST" in sql
+
+    def test_fee_disc_sort_by_profit_rate(self):
+        """fee=disc：收益率排序切 _disc；非口径字段（规模）不受影响。"""
+        body, conn = _fetch_dca(fee="disc", sort="w10_profit_rate")
+        sql, _ = conn.cursor_obj.executed[1]
+        assert "ORDER BY w10_profit_rate_disc DESC NULLS LAST" in sql
+        body, conn = _fetch_dca(fee="nom", sort="scale_yi")
+        sql, _ = conn.cursor_obj.executed[1]
+        assert "ORDER BY scale_yi DESC NULLS LAST" in sql
+
+    def test_fee_invalid_falls_back_to_gross(self):
+        """非白名单 fee（含注入串）回落 gross，不得进入 SQL。"""
+        body, conn = _fetch_dca(fee="nom; DROP TABLE fund_dca_result")
+        sql, _ = conn.cursor_obj.executed[1]
+        assert "DROP" not in sql
+        assert "ORDER BY w10_xirr DESC NULLS LAST" in sql
+        assert body["fee"] == "gross"
+
+    def test_select_columns_match_row_mapping(self):
+        """SELECT 列数与 _LIST_COLS 一致（dict(zip) 静默错位防线）。"""
+        from app.dca_api import _DCA_LIST_SQL, _LIST_COLS
+        seg = _DCA_LIST_SQL.split("SELECT", 1)[1].split("FROM", 1)[0]
+        select_cols = [c.strip() for c in seg.split(",") if c.strip()]
+        assert select_cols == _LIST_COLS
 
 
 def _fetch_scatter(**kw):

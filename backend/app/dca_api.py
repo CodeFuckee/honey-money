@@ -16,7 +16,12 @@ SELECT code, name, fund_type, alive, scale_yi, scale_date,
        w10_start, w10_end, w10_months, w10_rounds,
        w10_invested, w10_final_value, w10_profit_rate, w10_xirr,
        full_xirr, full_rounds, full_profit_rate, full_months,
-       full_start, gap_avg_days
+       full_start, gap_avg_days,
+       w10_xirr_disc, w10_xirr_nom, full_xirr_disc, full_xirr_nom,
+       w10_rounds_disc, w10_rounds_nom, full_rounds_disc, full_rounds_nom,
+       w10_profit_rate_disc, w10_profit_rate_nom,
+       full_profit_rate_disc, full_profit_rate_nom,
+       gap_avg_days_disc, gap_avg_days_nom
 FROM fund_dca_result
 WHERE (%s = '' OR code ILIKE %s OR name ILIKE %s)
   AND {alive_clause}
@@ -35,17 +40,18 @@ WHERE (%s = '' OR code ILIKE %s OR name ILIKE %s)
 """
 
 # 统计卡口径跟随「在市 + 运作年限」筛选（不跟搜索词——描述筛选后的宇宙，
-# 而非当页）；无年限筛选时与旧口径一致
+# 而非当页）与费用口径（{xirr_col}/{rounds_col} 按 fee 后缀替换）；
+# 无年限筛选时与旧口径一致
 _DCA_STATS_SQL = """
 SELECT count(*),
-       percentile_cont(0.25) WITHIN GROUP (ORDER BY w10_xirr),
-       percentile_cont(0.5)  WITHIN GROUP (ORDER BY w10_xirr),
-       percentile_cont(0.75) WITHIN GROUP (ORDER BY w10_xirr),
-       percentile_cont(0.9)  WITHIN GROUP (ORDER BY w10_xirr),
-       avg((w10_xirr > 0)::int)::float,
-       avg((w10_rounds > 0)::int)::float
+       percentile_cont(0.25) WITHIN GROUP (ORDER BY {xirr_col}),
+       percentile_cont(0.5)  WITHIN GROUP (ORDER BY {xirr_col}),
+       percentile_cont(0.75) WITHIN GROUP (ORDER BY {xirr_col}),
+       percentile_cont(0.9)  WITHIN GROUP (ORDER BY {xirr_col}),
+       avg(({xirr_col} > 0)::int)::float,
+       avg(({rounds_col} > 0)::int)::float
 FROM fund_dca_result
-WHERE alive AND w10_xirr IS NOT NULL
+WHERE alive AND {xirr_col} IS NOT NULL
   AND {age_clause}
   AND {scale_clause}
 """
@@ -62,6 +68,33 @@ _SORTABLE = {
     "w10_rounds", "full_rounds", "scale_yi", "code", "full_start",
     "gap_avg_days",
 }
+# 费用口径后缀（gross=不含费沿用原列；disc=申购一折；nom=申购名义）。
+# fee 只影响 ORDER BY 与统计卡的列替换；SELECT 恒返回全部口径列，
+# 前端按行内后缀字段自取（与静态快照同一份行结构）
+_LIST_FEE_SUFFIX = {"gross": "", "disc": "_disc", "nom": "_nom"}
+# 这些排序字段区分口径；scale_yi / code / full_start 与费用无关
+_FEE_SORTABLE = {"w10_xirr", "full_xirr", "w10_profit_rate", "full_profit_rate",
+                 "w10_rounds", "full_rounds", "gap_avg_days"}
+# 行映射列清单（与 _DCA_LIST_SQL 的 SELECT 列一一对应，dict(zip) 用）；
+# 恒含三口径后缀列——fee 只切换排序/统计列，行结构全口径
+_LIST_COLS = ["code", "name", "fund_type", "alive", "scale_yi",
+              "scale_date", "w10_start", "w10_end", "w10_months",
+              "w10_rounds", "w10_invested", "w10_final_value",
+              "w10_profit_rate", "w10_xirr", "full_xirr",
+              "full_rounds", "full_profit_rate", "full_months",
+              "full_start", "gap_avg_days",
+              "w10_xirr_disc", "w10_xirr_nom", "full_xirr_disc",
+              "full_xirr_nom", "w10_rounds_disc", "w10_rounds_nom",
+              "full_rounds_disc", "full_rounds_nom",
+              "w10_profit_rate_disc", "w10_profit_rate_nom",
+              "full_profit_rate_disc", "full_profit_rate_nom",
+              "gap_avg_days_disc", "gap_avg_days_nom"]
+# 浮点保留 4 位的字段（口径变体与原字段同规则）
+_LIST_ROUND4 = ("w10_xirr", "full_xirr", "w10_profit_rate",
+                "full_profit_rate", "w10_xirr_disc", "w10_xirr_nom",
+                "full_xirr_disc", "full_xirr_nom",
+                "w10_profit_rate_disc", "w10_profit_rate_nom",
+                "full_profit_rate_disc", "full_profit_rate_nom")
 
 
 def _safe(fn, default):
@@ -79,19 +112,26 @@ def _safe(fn, default):
 def fetch_dca_list(dsn: str, *, q: str = "", alive: str = "true",
                    sort: str = "w10_xirr", order: str = "desc",
                    min_age: float = 0.0, min_scale: float = 0.0,
-                   limit: int = 50, offset: int = 0) -> dict:
+                   limit: int = 50, offset: int = 0, fee: str = "gross") -> dict:
     """回测排行：分页 + 搜索 + 在市/年限过滤 + 服务端排序 + 宇宙统计与口径 meta。
 
     alive="true"（默认）仅近 45 天有净值的在市基金；"false" 仅清盘/退市；
     其余值（含空串）全部。min_age>0 只看运作超过 N 年的基金（严格大于：
     首条净值 < 参考日 - N*365.25 天，参考日=全表 max(full_end)）；
     min_scale>0 只看规模超过 N 亿的（scale_yi > N，无规模披露的自动排除）。
-    统计卡同步跟随两个筛选。sort 非白名单回落 w10_xirr。
+    统计卡同步跟随两个筛选与费用口径。sort 非白名单回落 w10_xirr；
+    fee 选费用口径（gross 默认=不含费 / disc=申购一折 / nom=申购名义，
+    白名单外回落 gross），仅切换排序与统计列——行内恒带全部口径字段
+    （w10_xirr / *_disc / *_nom 等），响应回显 fee。
     """
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
     like = f"%{q}%"
-    sort_col = sort if sort in _SORTABLE else "w10_xirr"
+    fee_val = fee if fee in _LIST_FEE_SUFFIX else "gross"
+    suffix = _LIST_FEE_SUFFIX[fee_val]
+    sort_base = sort if sort in _SORTABLE else "w10_xirr"
+    sort_col = (f"{sort_base}{suffix}" if sort_base in _FEE_SORTABLE
+                else sort_base)
     order_dir = "ASC" if order.lower() == "asc" else "DESC"
     alive_clause = ("true" if alive not in ("true", "false")
                     else f"alive = {alive.upper()}")
@@ -117,18 +157,14 @@ def fetch_dca_list(dsn: str, *, q: str = "", alive: str = "true",
                              .replace("{age_clause}", age_clause)
                              .replace("{scale_clause}", scale_clause))
                 stats_sql = (_DCA_STATS_SQL
+                             .replace("{xirr_col}", f"w10_xirr{suffix}")
+                             .replace("{rounds_col}", f"w10_rounds{suffix}")
                              .replace("{age_clause}", age_clause)
                              .replace("{scale_clause}", scale_clause))
                 base = ([q, like, like] + ([cutoff] if cutoff else [])
                         + ([scale_param] if scale_param else []))
                 cur.execute(sql, (*base, limit, offset))
-                cols = ["code", "name", "fund_type", "alive", "scale_yi",
-                        "scale_date", "w10_start", "w10_end", "w10_months",
-                        "w10_rounds", "w10_invested", "w10_final_value",
-                        "w10_profit_rate", "w10_xirr", "full_xirr",
-                        "full_rounds", "full_profit_rate", "full_months",
-                        "full_start", "gap_avg_days"]
-                rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+                rows = [dict(zip(_LIST_COLS, r)) for r in cur.fetchall()]
                 cur.execute(count_sql, base)
                 total = cur.fetchone()[0]
                 cur.execute(stats_sql, ([cutoff] if cutoff else [])
@@ -137,8 +173,7 @@ def fetch_dca_list(dsn: str, *, q: str = "", alive: str = "true",
                 cur.execute(_DCA_META_SQL)
                 m = cur.fetchone()
         for r in rows:
-            for k in ("w10_xirr", "full_xirr", "w10_profit_rate",
-                      "full_profit_rate"):
+            for k in _LIST_ROUND4:
                 r[k] = round(r[k], 4) if r[k] is not None else None
             r["scale_yi"] = round(r["scale_yi"], 2) if r["scale_yi"] is not None else None
             r["age_years"] = (round((ref - r["full_start"]).days / 365.25, 1)
@@ -157,7 +192,8 @@ def fetch_dca_list(dsn: str, *, q: str = "", alive: str = "true",
             meta = {"generated_at": m[0].isoformat() if m[0] else None,
                     "fund_count": m[1], "params": m[2]}
         return {"status": "up", "total": total, "limit": limit,
-                "offset": offset, "rows": rows, "stats": stats, "meta": meta}
+                "offset": offset, "fee": fee_val, "rows": rows,
+                "stats": stats, "meta": meta}
     return _safe(run, {"status": "down", "detail": "pg unreachable",
                        "total": 0, "limit": limit, "offset": offset,
                        "rows": [], "stats": None, "meta": None})
@@ -208,19 +244,24 @@ def register_fund_dca_routes(app):
     @app.get("/api/funds/dca")
     def funds_dca(q: str = "", alive: str = "true", sort: str = "w10_xirr",
                   order: str = "desc", min_age: float = 0.0,
-                  min_scale: float = 0.0, limit: int = 50, offset: int = 0):
+                  min_scale: float = 0.0, limit: int = 50, offset: int = 0,
+                  fee: str = "gross"):
         """定投止盈回测排行（快照数据，重跑回测导入后刷新）。
 
         降级约定同 /api/funds：始终 200；alive="true" 默认仅在市；
         min_age>0 只看运作 >N 年；min_scale>0 只看规模 >N 亿；
-        sort 白名单排序；stats 跟随在市+年限+规模筛选（不随搜索词）。
+        sort 白名单排序；stats 跟随在市+年限+规模筛选与费用口径
+        （fee=gross 不含费默认 / disc 申购一折 / nom 申购名义，
+        与散点/详情共用口径切换；白名单外回落 gross，
+        行内恒带三口径字段）。
         """
         return fetch_dca_list(config.DATABASE_URL, q=q,
                               alive=alive.strip().lower(), sort=sort,
                               order=order.strip().lower(),
                               min_age=max(0.0, min_age),
                               min_scale=max(0.0, min_scale),
-                              limit=limit, offset=offset)
+                              limit=limit, offset=offset,
+                              fee=fee.strip().lower())
 
     @app.get("/api/funds/dca/{code}/rounds")
     def funds_dca_rounds(code: str, fee: str = "nom"):

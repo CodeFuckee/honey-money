@@ -65,6 +65,18 @@ ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS w10_xirr_disc DOUBLE PRECIS
 ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS w10_xirr_nom DOUBLE PRECISION;
 ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS full_xirr_disc DOUBLE PRECISION;
 ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS full_xirr_nom DOUBLE PRECISION;
+-- 排行表格口径切换：轮次/总收益率也随口径入库（份额随申购费折损，
+-- 止盈日与触发轮次可能位移）；间隔均值按口径由轮次表聚合（下方 _APPLY_GAP）
+ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS w10_rounds_disc INTEGER;
+ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS w10_rounds_nom INTEGER;
+ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS full_rounds_disc INTEGER;
+ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS full_rounds_nom INTEGER;
+ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS w10_profit_rate_disc DOUBLE PRECISION;
+ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS w10_profit_rate_nom DOUBLE PRECISION;
+ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS full_profit_rate_disc DOUBLE PRECISION;
+ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS full_profit_rate_nom DOUBLE PRECISION;
+ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS gap_avg_days_disc DOUBLE PRECISION;
+ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS gap_avg_days_nom DOUBLE PRECISION;
 
 CREATE TABLE IF NOT EXISTS fund_dca_meta (
   id           BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
@@ -94,14 +106,21 @@ _COLS = ["code", "name", "fund_type", "alive", "scale_yi", "scale_date",
          "w10_invested", "w10_final_value", "w10_profit_rate", "w10_xirr",
          "full_start", "full_end", "full_months", "full_rounds",
          "full_invested", "full_final_value", "full_profit_rate", "full_xirr",
-         "w10_xirr_disc", "w10_xirr_nom", "full_xirr_disc", "full_xirr_nom"]
+         "w10_xirr_disc", "w10_xirr_nom", "full_xirr_disc", "full_xirr_nom",
+         "w10_rounds_disc", "w10_rounds_nom", "full_rounds_disc",
+         "full_rounds_nom", "w10_profit_rate_disc", "w10_profit_rate_nom",
+         "full_profit_rate_disc", "full_profit_rate_nom"]
 
 _DATE_COLS = {"scale_date", "w10_start", "w10_end", "full_start", "full_end"}
-_INT_COLS = {"w10_months", "w10_rounds", "full_months", "full_rounds"}
+_INT_COLS = {"w10_months", "w10_rounds", "full_months", "full_rounds",
+             "w10_rounds_disc", "w10_rounds_nom",
+             "full_rounds_disc", "full_rounds_nom"}
 _FLOAT_COLS = {"scale_yi", "w10_invested", "w10_final_value", "w10_profit_rate",
                "w10_xirr", "full_invested", "full_final_value",
                "full_profit_rate", "full_xirr",
-               "w10_xirr_disc", "w10_xirr_nom", "full_xirr_disc", "full_xirr_nom"}
+               "w10_xirr_disc", "w10_xirr_nom", "full_xirr_disc", "full_xirr_nom",
+               "w10_profit_rate_disc", "w10_profit_rate_nom",
+               "full_profit_rate_disc", "full_profit_rate_nom"}
 
 _ALIVE_WINDOW_DAYS = 45   # 最后净值日距数据集最新净值日的在市窗口
 
@@ -164,15 +183,21 @@ VALUES ({", ".join(["%s"] * len(_ROUNDS_COLS))})
 """
 
 _RESET_GAP = """
-UPDATE fund_dca_result SET gap_avg_days = NULL, gap_min_days = NULL, gap_max_days = NULL
+UPDATE fund_dca_result SET gap_avg_days = NULL, gap_min_days = NULL,
+  gap_max_days = NULL, gap_avg_days_disc = NULL, gap_avg_days_nom = NULL
 """
 
 _APPLY_GAP = """
 UPDATE fund_dca_result r SET
-  gap_avg_days = t.gap_avg, gap_min_days = t.gap_min, gap_max_days = t.gap_max
-FROM (SELECT code, avg(gap_days) AS gap_avg,
-             min(gap_days) AS gap_min, max(gap_days) AS gap_max
-      FROM fund_dca_rounds WHERE fee = 'gross' GROUP BY code) t
+  gap_avg_days = t.g_avg, gap_min_days = t.g_min, gap_max_days = t.g_max,
+  gap_avg_days_disc = t.d_avg, gap_avg_days_nom = t.n_avg
+FROM (SELECT code,
+             avg(gap_days) FILTER (WHERE fee = 'gross') AS g_avg,
+             min(gap_days) FILTER (WHERE fee = 'gross') AS g_min,
+             max(gap_days) FILTER (WHERE fee = 'gross') AS g_max,
+             avg(gap_days) FILTER (WHERE fee = 'disc')  AS d_avg,
+             avg(gap_days) FILTER (WHERE fee = 'nom')   AS n_avg
+      FROM fund_dca_rounds GROUP BY code) t
 WHERE r.code = t.code
 """
 

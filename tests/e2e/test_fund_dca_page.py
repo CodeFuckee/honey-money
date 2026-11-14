@@ -1,12 +1,15 @@
 """定投止盈回测页 E2E：mock /api/funds/dca。
 
 用例表（确认门 1：自主开发模式并入最终前端过目，见 test 文件尾注）：
-- E2E-401 P0 主流程：侧栏进入 → 标题/统计卡/表格行渲染，年化带红涨绿跌类；
+- E2E-401 P0 主流程：侧栏进入 → 标题/统计卡/表格行渲染，年化带红涨绿跌类
+  （默认含费·申购名义口径，行值取 _nom 后缀字段）；
 - E2E-402 搜索：输入回车 → 请求带 q；翻页请求保留 q（过滤不丢）；
 - E2E-403 在市过滤：切「仅清盘/退市」→ alive=false，切「全部」→ alive=（空值）；
 - E2E-404 排序：点「年化·全史」列头 → sort=full_xirr&order=asc，且翻页保留；
 - E2E-405 深链接：直接打开 /data/fund-dca?alive=false → 首个请求即带 alive=false。
+- E2E-413 年化口径切换：散点结论随口径变化（nom 默认）；
 - E2E-417 无止盈基金弹窗：rounds 为空也渲染复权净值曲线（无止盈点），空态文案并存。
+- E2E-418 排行口径切换：表格/统计卡随费率口径变化，列表请求带 fee 参数。
 运行：python -m pytest tests/e2e/test_fund_dca_page.py
 """
 
@@ -76,8 +79,8 @@ SCATTER_BODY = {
 
 @pytest.fixture
 def mock_dca(page):
-    """mock /api/funds/dca（列表）；记录请求 URL 供参数断言。grid 端点放行走
-    E2E 后端（死 DSN → down），避免污染列表参数断言。"""
+    """mock /api/funds/dca（列表，按 fee 口径生成行与统计）；记录请求 URL
+    供参数断言。grid 端点放行走 E2E 后端（死 DSN → down），避免污染列表参数断言。"""
     calls = []
 
     def handler(route):
@@ -86,11 +89,36 @@ def mock_dca(page):
             route.continue_()
             return
         calls.append(url)
+        from urllib.parse import urlparse, parse_qs
+        fee = (parse_qs(urlparse(url).query).get("fee") or ["gross"])[0]
         route.fulfill(status=200, content_type="application/json",
-                      body=json.dumps(LIST_BODY))
+                      body=json.dumps(_list_body_for(fee)))
 
     page.route("**/api/funds/dca*", handler)
     return calls
+
+
+# 列表口径演示语义与散点一致：nom=×0.92、disc=×0.96、gross 原值
+_FEE_SCALE = {"nom": 0.92, "disc": 0.96}
+
+
+def _list_body_for(fee: str) -> dict:
+    """按口径生成列表响应：canonical 字段恒为 gross，_disc/_nom 后缀字段
+    固定按系数缩放（模拟后端「SELECT 恒带全部口径列」）；统计卡分位按
+    请求口径缩放（后端 stats SQL 随 fee 切列）。默认 nom 由前端取后缀值。"""
+    import copy
+    b = copy.deepcopy(LIST_BODY)
+    for r in b["rows"]:
+        for k in ("w10_xirr", "full_xirr", "w10_profit_rate", "gap_avg_days"):
+            if r.get(k) is not None:
+                for f, s in _FEE_SCALE.items():
+                    r[f"{k}_{f}"] = round(r[k] * s, 4)
+    if b.get("stats"):
+        factor = _FEE_SCALE.get(fee, 1.0)
+        for k in ("p25", "median", "p75", "p90"):
+            if b["stats"].get(k) is not None:
+                b["stats"][k] = round(b["stats"][k] * factor, 4)
+    return b
 
 
 def _scatter_body_for(fee: str) -> dict:
@@ -118,7 +146,7 @@ def mock_scatter(page):
     def handler(route):
         from urllib.parse import urlparse, parse_qs
         qs = parse_qs(urlparse(route.request.url).query)
-        fee = (qs.get("fee") or ["disc"])[0]
+        fee = (qs.get("fee") or ["nom"])[0]
         route.fulfill(status=200, content_type="application/json",
                       body=json.dumps(_scatter_body_for(fee)))
     page.route("**/api/funds/dca/scatter*", handler)
@@ -132,20 +160,21 @@ def open_dca(page, frontend_port):
 
 class TestFundDcaPage:
     def test_renders_stats_and_rows(self, servers, page, mock_dca):
-        """E2E-401：统计卡与表格行渲染，正负年化分别带涨/跌配色类。"""
+        """E2E-401：统计卡与表格行渲染，正负年化分别带涨/跌配色类
+        （默认含费·申购名义口径，行值取 _nom 后缀字段）。"""
         _, frontend_port = servers
         open_dca(page, frontend_port)
         expect(page.locator(".learn-metrics .lm")).to_have_count(7)
-        expect(page.locator(".learn-metrics")).to_contain_text("4.1%")
+        expect(page.locator(".learn-metrics")).to_contain_text("3.8%")
         row = page.locator(".browse-pv tbody tr", has_text="中欧时代共赢")
-        expect(row).to_contain_text("+100.3%")
+        expect(row).to_contain_text("+92.3%")
         expect(row.locator(".chg-up")).to_have_count(3)   # 总收益/两个年化
         row2 = page.locator(".browse-pv tbody tr", has_text="白酒")
         expect(row2.locator(".chg-down")).to_have_count(3)
-        expect(row2).to_contain_text("-14.7%")
+        expect(row2).to_contain_text("-13.5%")
         # 运作年限列渲染（服务端按首条净值计算）+ 止盈间隔列
         expect(row).to_contain_text("2.9 年")
-        expect(row).to_contain_text("≈3.1 月/次")
+        expect(row).to_contain_text("≈2.9 月/次")
         expect(row2).to_contain_text("10.4 年")
         expect(row2).to_contain_text("—")
         # 口径副标题含运作年限门槛（meta.params.min_age_years 驱动，无则不显示）
@@ -252,14 +281,15 @@ class TestFundDcaPage:
 
     def test_fee_mode_toggle_switches_data(self, servers, page, mock_dca):
         """E2E-413：年化口径切换（不含费/含费·一折/含费·名义）——
-        默认一折口径，切换后重新拉取散点、结论数值与徽标同步变化。"""
+        默认含费·申购名义口径，切换后重新拉取散点、结论数值与徽标同步变化。"""
         mock_scatter(page)
         _, frontend_port = servers
         open_dca(page, frontend_port)
         concl = page.locator(".dca-conclusion")
         # 默认 含费·申购名义（保守上界）：徽标 + ≥10 年均值 6.8%
-        expect(page.locator(".src-seg-btn.active", has_text="含费·申购名义")
-              ).to_have_count(1)
+        # （散点组按钮带 data-fee，与排行旁 data-table-fee 组区分开）
+        expect(page.locator(".src-seg:has(button[data-fee]) .src-seg-btn.active",
+                            has_text="含费·申购名义")).to_have_count(1)
         expect(concl).to_contain_text("含费·申购名义 · 在市 3 只")
         expect(concl).to_contain_text("≥10 年 6.8%")
         # 切到 不含费：数值抬升
@@ -271,6 +301,28 @@ class TestFundDcaPage:
         expect(concl).to_contain_text("含费·申购一折 · 在市 3 只")
         expect(concl).to_contain_text("≥10 年 7.4%")
 
+    def test_fee_mode_switches_table_and_stats(self, servers, page, mock_dca):
+        """E2E-418：排行口径切换——默认 nom 表格/统计显示 nom 值；经表格旁
+        按钮切不含费后表格变 gross 值、统计卡分位变化、列表请求带 fee=gross。"""
+        mock_scatter(page)
+        _, frontend_port = servers
+        open_dca(page, frontend_port)
+        row = page.locator(".browse-pv tbody tr", has_text="中欧时代共赢")
+        metrics = page.locator(".learn-metrics")
+        # 默认 含费·申购名义：行内取 _nom 字段（+92.3%），统计分位 ×0.92
+        expect(row).to_contain_text("+92.3%")
+        expect(metrics).to_contain_text("3.8%")
+        # 表格旁按钮切 不含费：行值回 gross（+100.3%）、统计恢复、URL 带 fee=gross
+        page.locator("button[data-table-fee='gross']").click()
+        expect(row).to_contain_text("+100.3%")
+        expect(metrics).to_contain_text("4.1%")
+        assert any("fee=gross" in u for u in mock_dca), mock_dca
+        # 切 含费·申购一折：介于两者（+96.3% / ×0.96 分位）
+        page.locator("button[data-table-fee='disc']").click()
+        expect(row).to_contain_text("+96.3%")
+        expect(metrics).to_contain_text("3.9%")
+        assert "fee=disc" in mock_dca[-1], mock_dca[-1]
+
     def test_fee_toggle_stale_response_guard(self, servers, page, mock_dca):
         """E2E-414：快速连点竞态防护——扣住慢的 gross 响应，nom 先返回；
         gross 迟到响应到达后必须被丢弃，表格保持名义口径。"""
@@ -279,7 +331,7 @@ class TestFundDcaPage:
         def handler(route):
             from urllib.parse import urlparse, parse_qs
             fee = (parse_qs(urlparse(route.request.url).query)
-                   .get("fee") or ["disc"])[0]
+                   .get("fee") or ["nom"])[0]
             if fee == "gross":
                 held.append(route)          # 扣住不发，模拟慢响应
                 return

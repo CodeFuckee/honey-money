@@ -299,6 +299,14 @@ def run_backtest(nav: pd.DataFrame, basic: pd.DataFrame,
             nom_res = simulate(*prep, fee["nom"]) if prep else None
             row[f"{prefix}_xirr_disc"] = disc_res["xirr"] if disc_res else None
             row[f"{prefix}_xirr_nom"] = nom_res["xirr"] if nom_res else None
+            # 排行表格口径切换不止年化：轮次/总收益率也随口径入库
+            # （份额随申购费折损，止盈日与触发轮次可能位移）
+            row[f"{prefix}_rounds_disc"] = disc_res["rounds"] if disc_res else None
+            row[f"{prefix}_rounds_nom"] = nom_res["rounds"] if nom_res else None
+            row[f"{prefix}_profit_rate_disc"] = (disc_res["profit_rate"]
+                                                 if disc_res else None)
+            row[f"{prefix}_profit_rate_nom"] = (nom_res["profit_rate"]
+                                                if nom_res else None)
             if prefix == "w10":
                 w10_res = res
                 w10_res_by_fee = {"gross": res, "disc": disc_res, "nom": nom_res}

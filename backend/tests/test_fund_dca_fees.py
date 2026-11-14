@@ -244,6 +244,54 @@ class TestRoundEventFields:
         assert ev[8] == pytest.approx(400.0)
 
 
+class TestRunBacktestFeeFields:
+    """run_backtest 行携带三口径轮次/总收益率字段（排行表格口径切换数据源）。"""
+
+    def _nav_basic(self):
+        dates = pd.date_range("2024-01-01", periods=120, freq="D")
+        frames = []
+        for code in ("000001", "000002"):
+            frames.append(pd.DataFrame({
+                "code": [code] * 120,
+                "nav_date": dates,
+                "unit_nav": [1.0] * 45 + [1.25] * 75,
+                "accum_nav": [1.0] * 45 + [1.25] * 75,
+                "pct_chg": [0] * 45 + [25.0] + [0] * 74,
+            }))
+        nav = pd.concat(frames, ignore_index=True)
+        basic = pd.DataFrame(
+            {"name": ["测试混合A", "测试混合C"],
+             "fund_type": ["混合型-偏股", "混合型-偏股"],
+             "delisted": [False, False]},
+            index=pd.Index(["000001", "000002"], name="code"))
+        return nav, basic
+
+    def test_rows_carry_per_fee_rounds_and_profit_rate(self):
+        nav, basic = self._nav_basic()
+        rows, _ = mod.run_backtest(nav, basic, {}, log=lambda *a: None)
+        by_code = {r["code"]: r for r in rows}
+        for r in by_code.values():
+            # 触发线市值口径三场景共用：轮次一致
+            assert r["w10_rounds_disc"] == r["w10_rounds_nom"] == 1
+            for k in ("full_rounds_disc", "full_rounds_nom",
+                      "full_profit_rate_disc", "full_profit_rate_nom"):
+                assert r[k] is not None
+            # 费用拖累单调：gross ≥ disc ≥ nom
+            assert r["w10_profit_rate"] >= r["w10_profit_rate_disc"] \
+                >= r["w10_profit_rate_nom"]
+        # A 类有申购费：nom 严格低于 gross；C 类零申购费三者相等
+        assert by_code["000001"]["w10_profit_rate_nom"] \
+            < by_code["000001"]["w10_profit_rate"]
+
+    def test_c_class_disc_equals_nom(self):
+        """C 类零申购费：disc 与 nom 的轮次/收益率完全一致（单测锚定）。"""
+        nav, basic = self._nav_basic()
+        rows, _ = mod.run_backtest(nav, basic, {}, log=lambda *a: None)
+        c = next(r for r in rows if r["code"] == "000002")
+        assert c["w10_profit_rate_disc"] == c["w10_profit_rate_nom"]
+        assert c["w10_xirr_disc"] == c["w10_xirr_nom"]
+
+
 class TestRunFullBacktest:
     def test_orchestration_alive_and_rounds(self, monkeypatch):
         """日更编排：拉数→计算→alive 45 天新鲜度→三口径轮次行。"""

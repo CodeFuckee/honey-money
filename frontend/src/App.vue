@@ -398,7 +398,8 @@ function pctCont(sorted, p) {
 }
 
 // 静态模式：alive/年限/规模过滤 + 排序 + 分页 + 统计卡（与 server 同语义：
-// stats 跟随 alive/age/scale 不随搜索词；基于 w10_xirr 非空行）
+// stats 跟随 alive/age/scale 不随搜索词；基于当前费率口径年化非空行，
+// 排序与统计取值都走 dcaFeeVal 按口径解析）
 function dcaStaticView() {
   const q = dcaQuery.value.trim().toLowerCase()
   const alive = dcaAlive.value
@@ -412,18 +413,18 @@ function dcaStaticView() {
     !q || r.code.toLowerCase().includes(q) || r.name.toLowerCase().includes(q))
   const key = dcaSort.value, dir = dcaOrder.value === 'asc' ? 1 : -1
   rows.sort((a, b) => {
-    const va = a[key], vb = b[key]
+    const va = dcaFeeVal(a, key), vb = dcaFeeVal(b, key)
     if (va == null) return 1
     if (vb == null) return -1
     return va < vb ? -dir : va > vb ? dir : 0
   })
   const off = dcaPage.value * DCA_PAGE_SIZE
-  const xs = base.map(r => r.w10_xirr).filter(v => v != null).sort((a, b) => a - b)
+  const xs = base.map(r => dcaFeeVal(r, 'w10_xirr')).filter(v => v != null).sort((a, b) => a - b)
   const stats = xs.length ? {
     count: xs.length, p25: pctCont(xs, 0.25), median: pctCont(xs, 0.5),
     p75: pctCont(xs, 0.75), p90: pctCont(xs, 0.9),
     positive_share: xs.filter(v => v > 0).length / xs.length,
-    take_profit_share: base.filter(r => (r.w10_rounds || 0) > 0).length / xs.length,
+    take_profit_share: base.filter(r => (dcaFeeVal(r, 'w10_rounds') || 0) > 0).length / xs.length,
   } : null
   return { status: 'up', total: rows.length, rows: rows.slice(off, off + DCA_PAGE_SIZE),
            stats, meta: dcaStaticMeta }
@@ -457,6 +458,7 @@ async function loadDca() {
     const sc = dcaScale.value ? `&min_scale=${dcaScale.value}` : ''
     const r = await fetch(`/api/funds/dca?q=${q}&alive=${dcaAlive.value}${age}${sc}`
       + `&sort=${dcaSort.value}&order=${dcaOrder.value}`
+      + `&fee=${dcaFeeMode.value}`
       + `&limit=${DCA_PAGE_SIZE}&offset=${off}`)
     dca.value = await r.json()
   } catch (e) {
@@ -503,6 +505,14 @@ const DCA_FEE_OPTIONS = [
 ]
 const dcaFeeLabel = computed(() =>
   (DCA_FEE_OPTIONS.find(o => o.key === dcaFeeMode.value) || {}).label || '')
+// 行内按当前口径取值：gross 用原字段，disc/nom 用后缀字段（API 与静态快照
+// 行结构一致，恒带三口径字段）；后缀字段不存在（旧快照未重导）时回落
+// 原字段保持展示，存在但为 null（该基金无此口径数据）则如实显示 —
+function dcaFeeVal(row, f) {
+  if (dcaFeeMode.value === 'gross') return row[f]
+  const v = row[`${f}_${dcaFeeMode.value}`]
+  return v === undefined ? row[f] : v
+}
 
 async function loadDcaScatter() {
   const seq = ++dcaFeeReqSeq
@@ -523,7 +533,7 @@ async function loadDcaScatter() {
   await nextTick()
   renderDcaScatterChart()
 }
-watch(dcaFeeMode, () => { loadDcaScatter() })
+watch(dcaFeeMode, () => { loadDcaScatter(); loadDca() })
 
 function renderDcaScatterChart() {
   if (dcaScatterChart) { dcaScatterChart.destroy(); dcaScatterChart = null }
@@ -2548,6 +2558,14 @@ watch(
                   placeholder="规模" aria-label="按资产规模过滤，大于该数值（亿元）" />
                 <span class="age-suffix">亿以上</span>
               </span>
+              <!-- 费用口径：与散点区同一状态（dcaFeeMode），排行/统计/散点/详情联动 -->
+              <div class="src-seg" title="排行/统计/散点/详情共用同一费用口径">
+                <button v-for="o in DCA_FEE_OPTIONS" :key="o.key"
+                        class="src-seg-btn"
+                        :class="{ active: dcaFeeMode === o.key }"
+                        @click="dcaFeeMode = o.key"
+                        :data-table-fee="o.key">{{ o.label }}</button>
+              </div>
             </div>
             <div class="browse-pv">
               <DataTable :value="dca.rows || []" lazy paginator :rows="DCA_PAGE_SIZE"
@@ -2577,29 +2595,29 @@ watch(
                   <template #body="{ data }">{{ data.scale_yi != null ? data.scale_yi : '—' }}</template>
                 </Column>
                 <Column field="w10_rounds" header="止盈次数" style="width: 88px" sortable bodyClass="num-col">
-                  <template #body="{ data }">{{ data.w10_rounds ?? '—' }}</template>
+                  <template #body="{ data }">{{ dcaFeeVal(data, 'w10_rounds') ?? '—' }}</template>
                 </Column>
                 <Column field="gap_avg_days" header="止盈间隔" style="width: 100px" sortable bodyClass="num-col">
-                  <template #body="{ data }">{{ data.gap_avg_days != null ? '≈' + (data.gap_avg_days / 30.44).toFixed(1) + ' 月/次' : '—' }}</template>
+                  <template #body="{ data }">{{ dcaFeeVal(data, 'gap_avg_days') != null ? '≈' + (dcaFeeVal(data, 'gap_avg_days') / 30.44).toFixed(1) + ' 月/次' : '—' }}</template>
                 </Column>
                 <Column field="w10_profit_rate" header="总收益率" style="width: 98px" sortable bodyClass="num-col">
                   <template #body="{ data }">
-                    <span v-if="data.w10_profit_rate != null"
-                      :class="data.w10_profit_rate >= 0 ? 'chg-up' : 'chg-down'">{{ pct1(data.w10_profit_rate) }}</span>
+                    <span v-if="dcaFeeVal(data, 'w10_profit_rate') != null"
+                      :class="dcaFeeVal(data, 'w10_profit_rate') >= 0 ? 'chg-up' : 'chg-down'">{{ pct1(dcaFeeVal(data, 'w10_profit_rate')) }}</span>
                     <span v-else>—</span>
                   </template>
                 </Column>
                 <Column field="w10_xirr" header="年化·近10年" style="width: 110px" sortable bodyClass="num-col">
                   <template #body="{ data }">
-                    <span v-if="data.w10_xirr != null"
-                      :class="data.w10_xirr >= 0 ? 'chg-up' : 'chg-down'">{{ pct1(data.w10_xirr) }}</span>
+                    <span v-if="dcaFeeVal(data, 'w10_xirr') != null"
+                      :class="dcaFeeVal(data, 'w10_xirr') >= 0 ? 'chg-up' : 'chg-down'">{{ pct1(dcaFeeVal(data, 'w10_xirr')) }}</span>
                     <span v-else>—</span>
                   </template>
                 </Column>
                 <Column field="full_xirr" header="年化·全史" style="width: 105px" sortable bodyClass="num-col">
                   <template #body="{ data }">
-                    <span v-if="data.full_xirr != null"
-                      :class="data.full_xirr >= 0 ? 'chg-up' : 'chg-down'">{{ pct1(data.full_xirr) }}</span>
+                    <span v-if="dcaFeeVal(data, 'full_xirr') != null"
+                      :class="dcaFeeVal(data, 'full_xirr') >= 0 ? 'chg-up' : 'chg-down'">{{ pct1(dcaFeeVal(data, 'full_xirr')) }}</span>
                     <span v-else>—</span>
                   </template>
                 </Column>
@@ -2615,7 +2633,7 @@ watch(
                 </Column>
               </DataTable>
             </div>
-            <p class="note">口径：每月首个净值日投入固定金额，任一净值日持仓收益达止盈线即全仓赎回并重开新一轮（分红再投）；排行年化为不含费口径，散点区可切含费口径 · 统计卡为在市全集分位，不随搜索变化 · 新基金（回测窗口 &lt;90 天）年化留空 · 数据为离线回测快照，重跑 scripts/fund_dca_backtest.py 并经 app.dca_store 导入后刷新 · 点行或「详情」查看每轮止盈明细</p>
+            <p class="note">口径：每月首个净值日投入固定金额，任一净值日持仓收益达止盈线即全仓赎回并重开新一轮（分红再投）；排行/统计/散点/详情共用同一费用口径，搜索栏或散点区可切换（不含费 / 含费·申购一折 / 含费·申购名义，赎回费各口径一致按持有天数阶梯收取） · 统计卡为在市全集分位，不随搜索变化 · 新基金（回测窗口 &lt;90 天）年化留空 · 数据为离线回测快照，重跑 scripts/fund_dca_backtest.py 并经 app.dca_store 导入后刷新 · 点行或「详情」查看每轮止盈明细</p>
 
 
             <!-- ===== 每次止盈明细弹窗（点排行行或「详情」按钮触发） ===== -->
@@ -2623,7 +2641,7 @@ watch(
               :header="dcaRoundsFund ? `${dcaRoundsFund.code} ${dcaRoundsFund.name} · 每次止盈明细` : '每次止盈明细'"
               :style="{ width: '1000px' }" @hide="disposeDcaRoundsChart">
               <p class="sub" style="margin: 0 0 8px">
-                统计口径：近 10 年窗口 · 费用口径：<b>{{ dcaFeeLabel }}</b>（申购费外扣折份额、赎回费按每笔持有天数阶梯，与散点区切换联动）· 间隔=距上次止盈天数（首次止盈从本轮首次买入起算）· 实际收益率为市值口径（含跳空越过 20% 的部分）
+                统计口径：近 10 年窗口 · 费用口径：<b>{{ dcaFeeLabel }}</b>（申购费外扣折份额、赎回费按每笔持有天数阶梯，与排行/散点同一开关联动）· 间隔=距上次止盈天数（首次止盈从本轮首次买入起算）· 实际收益率为市值口径（含跳空越过 20% 的部分）
               </p>
               <div v-if="dcaRounds.totals?.rounds" class="dc-grid"
                 style="grid-template-columns: repeat(4, 1fr); margin: 0 0 12px">
@@ -3993,7 +4011,7 @@ body {
 .filter-chip.active .chip-dot { background: #0f62fe; }
 /* 基金页搜索栏：宽度自适应 + 换行（.ph-search 的 480px 钉死宽度会导致
    控件挤压竖排溢出——2026-10-29 截图反馈） */
-.funds-search { width: auto; max-width: 100%; flex-wrap: wrap; row-gap: 8px; }
+.funds-search { width: auto; max-width: 100%; height: auto; flex-wrap: wrap; row-gap: 8px; }
 .funds-search .browse-input { flex: 1 1 200px; min-width: 150px; width: auto; }
 .age-wrap { display: inline-flex; align-items: center; gap: 6px; }
 .age-wrap .age-input { width: 76px; text-align: right; }
