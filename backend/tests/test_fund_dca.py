@@ -157,14 +157,16 @@ class TestDcaSqlShapes:
         assert params[-2:] == (200, 0)
 
     def test_no_min_age_no_age_clause(self):
-        """缺省不限年限：列表 SQL 无年限谓词，参数恰 5 个（q/like/like/limit/offset）。"""
+        """缺省不限年限：列表 SQL 无年限谓词，参数恰 6 个
+        （q/like/like/权益白名单/limit/offset——缺省 equity=True 恒带白名单）。"""
         body, conn = _fetch_dca()
         sql, params = conn.cursor_obj.executed[1]
         assert "full_start <" not in sql
-        assert len(params) == 5
+        assert len(params) == 6
 
     def test_min_age_strictly_greater_and_stats_follows(self):
         """min_age=3：列表与 stats 都加 full_start < 参考日-3年 截止参数（严格大于）。"""
+        import app.dca_api as dca_mod
         ref = dt.date(2026, 10, 29)
         body, conn = _fetch_dca(min_age=3, one=(ref,))
         sql, params = conn.cursor_obj.executed[1]
@@ -173,7 +175,8 @@ class TestDcaSqlShapes:
         assert params[-2:] == (50, 0)
         stats_sql, stats_params = conn.cursor_obj.executed[3]
         assert "full_start < %s" in stats_sql
-        assert stats_params == [params[3]]
+        # 缺省 equity=True：stats 参数 = [年龄截止] + 权益白名单
+        assert stats_params == [params[3], list(dca_mod.EQUITY_TYPES)]
 
     def test_min_age_zero_means_no_filter(self):
         """min_age=0：等同不限年限（0 即「全部」）。"""
@@ -181,10 +184,11 @@ class TestDcaSqlShapes:
         body, conn = _fetch_dca(min_age=0, one=(ref,))
         sql, params = conn.cursor_obj.executed[1]
         assert "full_start <" not in sql
-        assert len(params) == 5
+        assert len(params) == 6
 
     def test_min_scale_adds_clause_and_stats_follows(self):
         """min_scale=2：列表与 stats 都加 scale_yi > %s，参数在年龄截止之后。"""
+        import app.dca_api as dca_mod
         ref = dt.date(2026, 10, 29)
         body, conn = _fetch_dca(min_age=3, min_scale=2, one=(ref,))
         sql, params = conn.cursor_obj.executed[1]
@@ -194,14 +198,124 @@ class TestDcaSqlShapes:
         assert params[-2:] == (50, 0)
         stats_sql, stats_params = conn.cursor_obj.executed[3]
         assert "scale_yi > %s" in stats_sql
-        assert stats_params == [params[3], 2]
+        # 缺省 equity=True：stats 参数 = [年龄截止, 规模] + 权益白名单
+        assert stats_params == [params[3], 2, list(dca_mod.EQUITY_TYPES)]
 
     def test_min_scale_zero_no_clause(self):
         """min_scale=0（默认）：无规模谓词，参数不含规模。"""
         body, conn = _fetch_dca(min_scale=0)
         sql, params = conn.cursor_obj.executed[1]
         assert "scale_yi >" not in sql
-        assert len(params) == 5
+        assert len(params) == 6
+
+
+class TestDcaEquity:
+    """权益类筛选：fund_type 白名单谓词，排行/count/stats/散点同步（默认仅权益类）。
+
+    口径（2026-11-15 用户确认）：核心三类（股票型/混合型-偏股/指数型-股票）
+    + 混合型-灵活 + 混合型-平衡 + 海外权益（指数型-海外股票/QDII-普通股票/
+    QDII-混合偏股）共 8 类；债券、FOF、货币、偏债、商品、REITs 不在内。
+    """
+
+    def test_equity_types_whitelist(self):
+        """白名单恰 8 类，债基/FOF/货币/偏债等不混入。"""
+        import app.dca_api as dca_mod
+        assert set(dca_mod.EQUITY_TYPES) == {
+            "股票型", "混合型-偏股", "混合型-灵活", "混合型-平衡",
+            "指数型-股票", "指数型-海外股票", "QDII-普通股票", "QDII-混合偏股"}
+
+    def test_equity_default_adds_clause_and_param(self):
+        """缺省（仅权益类）：列表 SQL 含 fund_type = ANY，参数紧跟搜索之后。"""
+        import app.dca_api as dca_mod
+        body, conn = _fetch_dca()
+        sql, params = conn.cursor_obj.executed[1]
+        assert "fund_type = ANY(%s)" in sql
+        assert params[3] == list(dca_mod.EQUITY_TYPES)
+        assert params[-2:] == (50, 0)
+
+    def test_equity_count_follows(self):
+        """count SQL 同步带权益谓词与白名单参数（分页总数口径一致）。"""
+        import app.dca_api as dca_mod
+        body, conn = _fetch_dca()
+        sql, params = conn.cursor_obj.executed[2]
+        assert "fund_type = ANY(%s)" in sql
+        assert params[3] == list(dca_mod.EQUITY_TYPES)
+
+    def test_equity_stats_follows(self):
+        """stats SQL 同步带权益谓词（统计卡口径跟随筛选）。"""
+        import app.dca_api as dca_mod
+        body, conn = _fetch_dca()
+        sql, params = conn.cursor_obj.executed[3]
+        assert "fund_type = ANY(%s)" in sql
+        assert params == [list(dca_mod.EQUITY_TYPES)]
+
+    def test_equity_false_no_clause(self):
+        """equity=False（全市场）：列表 SQL 无权益谓词，参数不含类型数组。"""
+        import app.dca_api as dca_mod
+        body, conn = _fetch_dca(equity=False)
+        sql, params = conn.cursor_obj.executed[1]
+        assert "fund_type = ANY" not in sql
+        assert len(params) == 5          # q/like/like/limit/offset
+        assert all(p != list(dca_mod.EQUITY_TYPES) for p in params)
+
+    def test_equity_false_count_stats_no_clause(self):
+        """equity=False：count/stats 亦无权益谓词。"""
+        body, conn = _fetch_dca(equity=False)
+        for idx in (2, 3):
+            sql, _ = conn.cursor_obj.executed[idx]
+            assert "fund_type = ANY" not in sql
+
+    def test_equity_param_after_scale(self):
+        """权益参数在规模参数之后：min_age/min_scale/equity 组合时顺序稳定。"""
+        import app.dca_api as dca_mod
+        ref = dt.date(2026, 10, 29)
+        body, conn = _fetch_dca(min_age=3, min_scale=2, one=(ref,))
+        sql, params = conn.cursor_obj.executed[1]
+        assert params[3] == ref - dt.timedelta(days=365.25 * 3)   # 年龄截止
+        assert params[4] == 2                                     # 规模
+        assert params[5] == list(dca_mod.EQUITY_TYPES)            # 权益白名单
+        assert params[-2:] == (50, 0)
+
+    # ---- 散点：run() 的执行序 [0]=参考日，[1]=散点行 ----
+    def test_scatter_equity_default_adds_clause(self):
+        """散点缺省带权益谓词 + 白名单参数，响应回显 equity=True。"""
+        import app.dca_api as dca_mod
+        body, conn = _fetch_scatter()
+        sql, params = conn.cursor_obj.executed[1]
+        assert "fund_type = ANY(%s)" in sql
+        assert params == (list(dca_mod.EQUITY_TYPES),)
+        assert body["equity"] is True
+
+    def test_scatter_equity_false_no_clause(self):
+        """散点 equity=False：无权益谓词，响应回显 equity=False。"""
+        body, conn = _fetch_scatter(equity=False)
+        sql, params = conn.cursor_obj.executed[1]
+        assert "fund_type = ANY" not in sql
+        assert params is None
+        assert body["equity"] is False
+
+    # ---- 路由：参数解析与回显（DEAD_DSN 降级形状仍带 equity） ----
+    def test_route_equity_default_true_echo(self, client, monkeypatch):
+        monkeypatch.setattr("app.config.DATABASE_URL", DEAD_DSN)
+        resp = client.get("/api/funds/dca")
+        assert resp.status_code == 200
+        assert resp.json()["equity"] is True
+
+    def test_route_equity_false_and_truthy_variants(self, client, monkeypatch):
+        """equity=false/0/否 → 全市场；true/1 → 仅权益类（大小写不敏感）。"""
+        monkeypatch.setattr("app.config.DATABASE_URL", DEAD_DSN)
+        for raw, expect in (("false", False), ("0", False), ("banana", False),
+                            ("TRUE", True), ("1", True)):
+            resp = client.get("/api/funds/dca", params={"equity": raw})
+            assert resp.status_code == 200
+            assert resp.json()["equity"] is expect
+
+    def test_scatter_route_equity_echo(self, client, monkeypatch):
+        monkeypatch.setattr("app.config.DATABASE_URL", DEAD_DSN)
+        resp = client.get("/api/funds/dca/scatter", params={"equity": "false"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "down" and body["equity"] is False
 
 
 class TestDcaImporter:

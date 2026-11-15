@@ -10,6 +10,11 @@
 - E2E-413 年化口径切换：散点结论随口径变化（nom 默认）；
 - E2E-417 无止盈基金弹窗：rounds 为空也渲染复权净值曲线（无止盈点），空态文案并存。
 - E2E-418 排行口径切换：表格/统计卡随费率口径变化，列表请求带 fee 参数。
+- E2E-419 权益筛选默认态：打开即 equity=true、开关 active、权益外类型行不可见；
+- E2E-420 权益开关切换：全市场 ↔ 仅权益类，列表+散点请求同步、债券行随开关增减；
+- E2E-421 权益深链接：?equity=0 直接带参加载（全市场宇宙）；
+- E2E-422 权益×费率共存：两开关独立生效，请求同时带 fee 与 equity；
+- E2E-423 散点联动：结论徽标与散点区按钮随类型口径切换。
 运行：python -m pytest tests/e2e/test_fund_dca_page.py
 """
 
@@ -158,6 +163,63 @@ def open_dca(page, frontend_port):
     expect(page.get_by_role("heading", name="定投止盈回测")).to_be_visible()
 
 
+# ===== 权益类筛选（E2E-419~423）：按 equity 查询参数返回不同宇宙 =====
+
+# 权益类之外的类型行：仅「全市场」宇宙可见，供开关切换的用户可见断言
+EQUITY_BOND_NAME = "中银丰和定期开放债券"
+_BOND_ROW = {"code": "006327", "name": EQUITY_BOND_NAME,
+             "fund_type": "债券型-长债",
+             "alive": True, "scale_yi": 12.0, "scale_date": "2026-09-30",
+             "age_years": 6.2,
+             "w10_start": "2016-10-31", "w10_end": "2026-10-28",
+             "w10_months": 121, "w10_rounds": 4, "w10_invested": 121000,
+             "w10_final_value": 128000, "w10_profit_rate": 0.058,
+             "w10_xirr": 0.032, "gap_avg_days": None,
+             "full_xirr": 0.031, "full_rounds": 4,
+             "full_profit_rate": 0.056, "full_months": 121}
+
+
+def _list_body_for_equity(equity: str) -> dict:
+    """按权益参数生成列表宇宙：true=仅权益两类（原 LIST_BODY），
+    false=追加债券型行（total 同步 +1）。"""
+    import copy
+    b = copy.deepcopy(LIST_BODY)
+    if equity in ("false", "0"):
+        b["total"] = b["total"] + 1
+        b["rows"] = b["rows"] + [_BOND_ROW]
+    return b
+
+
+def mock_dca_equity(page):
+    """权益用例专用 mock：列表按 equity 返回不同宇宙，散点按 fee 口径返回
+    并记录 URL；返回 (列表请求, 散点请求) 两组 URL 供参数断言。"""
+    list_calls, scatter_calls = [], []
+
+    def handler(route):
+        url = route.request.url
+        from urllib.parse import urlparse, parse_qs
+        qs = parse_qs(urlparse(url).query)
+        if "/api/funds/dca/scatter" in url:
+            scatter_calls.append(url)
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps(
+                              _scatter_body_for((qs.get("fee") or ["nom"])[0])))
+            return
+        if re.search(r"/api/funds/dca/[^/?]+/rounds", url):
+            route.continue_()
+            return
+        list_calls.append(url)
+        equity = (qs.get("equity") or ["true"])[0]
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps(_list_body_for_equity(equity)))
+
+    # 两个 glob 注册同一 handler：Playwright 的 * 不跨 /，「dca*」匹配不到
+    # 「dca/scatter」——散点 URL 需自己的 glob（后注册者优先命中）
+    page.route("**/api/funds/dca*", handler)
+    page.route("**/api/funds/dca/scatter*", handler)
+    return list_calls, scatter_calls
+
+
 class TestFundDcaPage:
     def test_renders_stats_and_rows(self, servers, page, mock_dca):
         """E2E-401：统计卡与表格行渲染，正负年化分别带涨/跌配色类
@@ -290,15 +352,15 @@ class TestFundDcaPage:
         # （散点组按钮带 data-fee，与排行旁 data-table-fee 组区分开）
         expect(page.locator(".src-seg:has(button[data-fee]) .src-seg-btn.active",
                             has_text="含费·申购名义")).to_have_count(1)
-        expect(concl).to_contain_text("含费·申购名义 · 在市 3 只")
+        expect(concl).to_contain_text("含费·申购名义 · 仅权益类 · 在市 3 只")
         expect(concl).to_contain_text("≥10 年 6.8%")
         # 切到 不含费：数值抬升
         page.locator("button[data-fee='gross']").click()
-        expect(concl).to_contain_text("不含费 · 在市 3 只")
+        expect(concl).to_contain_text("不含费 · 仅权益类 · 在市 3 只")
         expect(concl).to_contain_text("≥10 年 8.2%")
         # 切到 含费·申购一折：介于两者
         page.locator("button[data-fee='disc']").click()
-        expect(concl).to_contain_text("含费·申购一折 · 在市 3 只")
+        expect(concl).to_contain_text("含费·申购一折 · 仅权益类 · 在市 3 只")
         expect(concl).to_contain_text("≥10 年 7.4%")
 
     def test_fee_mode_switches_table_and_stats(self, servers, page, mock_dca):
@@ -344,14 +406,14 @@ class TestFundDcaPage:
         concl = page.locator(".dca-conclusion")
         page.locator("button[data-fee='gross']").click()
         page.locator("button[data-fee='nom']").click()
-        expect(concl).to_contain_text("含费·申购名义 · 在市 3 只")
+        expect(concl).to_contain_text("含费·申购名义 · 仅权益类 · 在市 3 只")
         expect(concl).to_contain_text("≥10 年 6.8%")
         # 迟到的 gross 响应此时才到达 → 必须被 seq 守卫丢弃
         assert held, "gross 请求应被扣住"
         held[0].fulfill(status=200, content_type="application/json",
                         body=json.dumps(_scatter_body_for("gross")))
         page.wait_for_timeout(800)
-        expect(concl).to_contain_text("含费·申购名义 · 在市 3 只")
+        expect(concl).to_contain_text("含费·申购名义 · 仅权益类 · 在市 3 只")
         expect(concl).to_contain_text("≥10 年 6.8%")
 
     def test_rounds_dialog_on_row_click(self, servers, page, mock_dca):
@@ -511,6 +573,72 @@ class TestFundDcaPage:
         _, frontend_port = servers
         page.goto(f"http://127.0.0.1:{frontend_port}/data/fund-dca")
         expect(page.locator(".browse-pv .browse-empty")).to_contain_text("暂无回测数据")
+
+
+class TestDcaEquityFilter:
+    def test_default_equity_on(self, servers, page):
+        """E2E-419：默认仅权益类——首个列表请求带 equity=true、开关 active、
+        权益外类型行（债券型）不可见。"""
+        _, frontend_port = servers
+        list_calls, _ = mock_dca_equity(page)
+        open_dca(page, frontend_port)
+        assert list_calls and "equity=true" in list_calls[0], list_calls
+        expect(page.locator('button[data-table-cat="equity"]')
+              ).to_have_class(re.compile("active"))
+        expect(page.locator(".browse-pv tbody tr",
+                            has_text=EQUITY_BOND_NAME)).to_have_count(0)
+
+    def test_toggle_all_market_and_back(self, servers, page):
+        """E2E-420：切「全市场」→ equity=false、债券型行出现、散点请求同步；
+        切回「仅权益类」→ equity=true 且债券行消失。"""
+        _, frontend_port = servers
+        list_calls, scatter_calls = mock_dca_equity(page)
+        open_dca(page, frontend_port)
+        page.locator('button[data-table-cat="all"]').click()
+        expect(page.locator(".browse-pv tbody tr",
+                            has_text=EQUITY_BOND_NAME)).to_be_visible()
+        assert any("equity=false" in u for u in list_calls), list_calls
+        assert any("equity=false" in u for u in scatter_calls), scatter_calls
+        page.locator('button[data-table-cat="equity"]').click()
+        expect(page.locator(".browse-pv tbody tr",
+                            has_text=EQUITY_BOND_NAME)).to_have_count(0)
+        assert list_calls[-1].split("equity=")[1].split("&")[0] == "true"
+
+    def test_deeplink_equity_off(self, servers, page):
+        """E2E-421：深链接 /data/fund-dca?equity=0 → 首个请求即带
+        equity=false，债券型行可见。"""
+        _, frontend_port = servers
+        list_calls, _ = mock_dca_equity(page)
+        page.goto(f"http://127.0.0.1:{frontend_port}/data/fund-dca?equity=0")
+        expect(page.get_by_role("heading", name="定投止盈回测")).to_be_visible()
+        expect(page.locator(".browse-pv tbody tr",
+                            has_text=EQUITY_BOND_NAME)).to_be_visible()
+        assert list_calls and "equity=false" in list_calls[0], list_calls
+
+    def test_fee_and_equity_params_coexist(self, servers, page):
+        """E2E-422：费用口径与权益开关独立生效——切「不含费」后列表请求
+        同时带 fee=gross 与 equity=true（旧费率流程无回归）。"""
+        _, frontend_port = servers
+        list_calls, _ = mock_dca_equity(page)
+        open_dca(page, frontend_port)
+        page.locator('button[data-table-fee="gross"]').first.click()
+        expect(page.locator(".browse-pv tbody tr",
+                            has_text=EQUITY_BOND_NAME)).to_have_count(0)
+        last = list_calls[-1]
+        assert "fee=gross" in last and "equity=true" in last, last
+
+    def test_scatter_badge_follows_equity(self, servers, page):
+        """E2E-423：散点结论徽标与散点区按钮随类型口径切换
+        （仅权益类 ↔ 全市场）。"""
+        _, frontend_port = servers
+        mock_dca_equity(page)
+        open_dca(page, frontend_port)
+        badge = page.locator(".dca-conclusion .dc-badge")
+        expect(badge).to_contain_text("仅权益类")
+        page.locator('button[data-scatter-cat="all"]').click()
+        expect(badge).to_contain_text("全市场")
+        expect(page.locator('button[data-scatter-cat="all"]')
+              ).to_have_class(re.compile("active"))
 
 # 用例表确认门说明：本功能在自主开发模式下进行，测试计划与用例表未单独
 # 走 e2e-test-writer 确认门 1，与前端过目（确认门 2）合并由用户一并确认。

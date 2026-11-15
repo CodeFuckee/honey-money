@@ -27,8 +27,9 @@ backend/            Python 后端（FastAPI）
   app/backtest_api.py 回测 API（策略/区间/撮合模式/成本，降级 200 约定）
   app/dca_store.py    定投止盈回测快照存储（fund_dca_result / fund_dca_meta 两表；
                       python -m app.dca_store <csv> 导入 scripts 离线回测产物，幂等）
-  app/dca_api.py      /api/funds/dca 回测排行 API（搜索/在市过滤/排序白名单/
-                      分页 + 在市全集分位统计 + 口径 meta，降级 200 约定）
+  app/dca_api.py      /api/funds/dca 回测排行 API（搜索/在市/年限/规模/权益类
+                      （EQUITY_TYPES 白名单）过滤/排序白名单/分页 + 在市全集
+                      分位统计 + 口径 meta，降级 200 约定）
   tests/              离线 pytest 用例（API 骨架 + 爬虫 + 任务调度）
 frontend/           Vue3 + Vite 前端
   src/App.vue         服务仪表盘（Carbon 风格）：四状态（加载骨架/空态插画/
@@ -40,6 +41,9 @@ frontend/           Vue3 + Vite 前端
                       离线回测排行：7 张统计卡 + 服务端排序表格，费率口径
                       三档切换联动排行/统计/散点/详情（默认含费·申购名义；
                       不含费/含费·申购一折可选，搜索栏与散点区各有开关），
+                      权益类筛选默认仅权益类（股票型/偏股·灵活·平衡混合/
+                      股票指数/海外权益 8 类白名单，搜索栏与散点区可切
+                      全市场，排行/统计/散点/分箱联动），
                       搜索/运作年限与规模输入过滤（>N 年 / >N 亿）/分页/排序
                       同步 URL + 止盈间隔列 + 「详情」按钮，弹窗看每轮
                       止盈日/复权净值/投入/申购赎回费/净收益/累计净收益

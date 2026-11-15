@@ -33,11 +33,15 @@ def _write_json(path: Path, body) -> None:
 
 
 def export_list(dsn: str, out_dir: Path, *, log=print) -> dict:
-    """排行全量行（翻页拉全）+ 首页的 stats/meta（全局口径）。"""
+    """排行全量行（翻页拉全）+ 首页的 stats/meta（全局口径）。
+
+    equity=False 恒导全市场：静态站无后端，权益类开关由前端按行内
+    fund_type 客户端过滤，快照必须含全部类型。
+    """
     rows, stats, meta, total = [], None, None, 0
     offset = 0
     while True:
-        body = fetch_dca_list(dsn, limit=PAGE, offset=offset)
+        body = fetch_dca_list(dsn, limit=PAGE, offset=offset, equity=False)
         if body.get("status") != "up":
             raise RuntimeError(f"DB 不可达：{body.get('detail')}")
         rows.extend(body["rows"])
@@ -55,7 +59,8 @@ def export_list(dsn: str, out_dir: Path, *, log=print) -> dict:
 
 def export_scatter(dsn: str, out_dir: Path, *, log=print) -> None:
     for fee in FEES:
-        body = fetch_dca_scatter(dsn, fee=fee)
+        # equity=False 恒导全市场散点（含分箱），权益过滤在客户端做
+        body = fetch_dca_scatter(dsn, fee=fee, equity=False)
         if body.get("status") != "up":
             raise RuntimeError(f"scatter {fee} 失败：{body.get('detail')}")
         _write_json(out_dir / "funds" / "dca" / f"scatter.{fee}.json", body)

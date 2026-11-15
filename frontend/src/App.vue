@@ -88,6 +88,7 @@ function buildQuery() {
     if (dcaAlive.value !== 'true') q.set('alive', dcaAlive.value)
     if (dcaAge.value) q.set('age', dcaAge.value)
     if (dcaScale.value) q.set('scale', dcaScale.value)
+    if (dcaEquity.value) q.set('equity', '1')
     if (dcaSort.value !== 'w10_xirr') q.set('sort', dcaSort.value)
     if (dcaOrder.value !== 'desc') q.set('order', dcaOrder.value)
   }
@@ -190,12 +191,14 @@ function applyUrl() {
   // 定投止盈回测排行
   if (NAV_BY_PATH[u.pathname] === 'fundDca' &&
       (q.get('q') != null || q.get('page') || q.get('alive') != null
-       || q.get('age') || q.get('scale') || q.get('sort') || q.get('order'))) {
+       || q.get('age') || q.get('scale') || q.get('equity') != null
+       || q.get('sort') || q.get('order'))) {
     dcaQuery.value = q.get('q') ?? ''
     dcaPage.value = +q.get('page') || 0
     if (q.get('alive') != null) dcaAlive.value = q.get('alive')
     if (q.get('age') != null && /^\d+$/.test(q.get('age'))) dcaAge.value = +q.get('age')
     if (q.get('scale') != null && /^\d+(\.\d+)?$/.test(q.get('scale'))) dcaScale.value = +q.get('scale')
+    if (q.get('equity') != null) dcaEquity.value = ['1', 'true'].includes(q.get('equity'))
     if (DCA_SORTABLE.includes(q.get('sort'))) dcaSort.value = q.get('sort')
     if (['asc', 'desc'].includes(q.get('order'))) dcaOrder.value = q.get('order')
     loadDca()
@@ -387,6 +390,12 @@ const DCA_ALIVE_FILTERS = [
 const dcaAge = ref(null)
 // 规模筛选：N（亿）→ 只看规模 >N 亿的基金；0/留空 = 全部（含无规模披露）
 const dcaScale = ref(null)
+// 权益类筛选：true 仅权益类（默认，2026-11-15 用户确认口径）/ false 全市场。
+// 白名单=东财 fund_type 8 类（核心三类+灵活/平衡混合+海外权益），与后端
+// app.dca_api.EQUITY_TYPES 保持一致；静态模式用它做客户端过滤（快照恒为全市场）
+const DCA_EQUITY_TYPES = ['股票型', '混合型-偏股', '混合型-灵活', '混合型-平衡',
+  '指数型-股票', '指数型-海外股票', 'QDII-普通股票', 'QDII-混合偏股']
+const dcaEquity = ref(true)
 
 let dcaAllRows = []   // 静态模式：全量行一次加载，之后纯客户端过滤/排序/分页
 
@@ -397,8 +406,8 @@ function pctCont(sorted, p) {
   return sorted[f] + (sorted[c] - sorted[f]) * (k - f)
 }
 
-// 静态模式：alive/年限/规模过滤 + 排序 + 分页 + 统计卡（与 server 同语义：
-// stats 跟随 alive/age/scale 不随搜索词；基于当前费率口径年化非空行，
+// 静态模式：alive/年限/规模/权益过滤 + 排序 + 分页 + 统计卡（与 server 同语义：
+// stats 跟随 alive/age/scale/equity 不随搜索词；基于当前费率口径年化非空行，
 // 排序与统计取值都走 dcaFeeVal 按口径解析）
 function dcaStaticView() {
   const q = dcaQuery.value.trim().toLowerCase()
@@ -408,7 +417,8 @@ function dcaStaticView() {
   const base = dcaAllRows.filter(r =>
     (alive === '' || (alive === 'true' ? r.alive === true : r.alive === false))
     && (!ageN || (r.age_years != null && r.age_years > ageN))
-    && (!scaleN || (r.scale_yi != null && r.scale_yi > scaleN)))
+    && (!scaleN || (r.scale_yi != null && r.scale_yi > scaleN))
+    && (!dcaEquity.value || DCA_EQUITY_TYPES.includes(r.fund_type)))
   const rows = base.filter(r =>
     !q || r.code.toLowerCase().includes(q) || r.name.toLowerCase().includes(q))
   const key = dcaSort.value, dir = dcaOrder.value === 'asc' ? 1 : -1
@@ -457,6 +467,7 @@ async function loadDca() {
     const age = dcaAge.value ? `&min_age=${dcaAge.value}` : ''
     const sc = dcaScale.value ? `&min_scale=${dcaScale.value}` : ''
     const r = await fetch(`/api/funds/dca?q=${q}&alive=${dcaAlive.value}${age}${sc}`
+      + `&equity=${dcaEquity.value}`
       + `&sort=${dcaSort.value}&order=${dcaOrder.value}`
       + `&fee=${dcaFeeMode.value}`
       + `&limit=${DCA_PAGE_SIZE}&offset=${off}`)
@@ -514,15 +525,64 @@ function dcaFeeVal(row, f) {
   return v === undefined ? row[f] : v
 }
 
+// 静态模式散点权益过滤：快照恒为全市场（pages_export 导出 equity=False），
+// 在客户端按行内 fund_type 过滤点集并重算分箱——与服务端 compute_bands
+// 同口径（每基金落入唯一年限段×规模段格，均值/中位/正占比）。
+// 仅当权益开关打开时重算；全市场直接透传快照原分箱。
+function applyDcaEquity(sc) {
+  if (!dcaEquity.value || sc?.status !== 'up' || !Array.isArray(sc.points)) return sc
+  const pts = sc.points.filter(p => DCA_EQUITY_TYPES.includes(p[5]))
+  return { ...sc, points: pts, ...recomputeDcaBands(pts) }
+}
+
+// 分箱重算（与后端 dca_api.compute_bands 同口径；标签函数逐字对齐；
+// 段界常量复用下方 DCA_AGE_BANDS / DCA_SCALE_BANDS——函数只在调用时取值，
+// setup 自上而下执行完毕后才会被触发）
+const dcaAgeBandLabel = (lo, hi) => hi == null ? `≥${lo} 年` : `${lo}-${hi} 年`
+const dcaScaleBandLabel = (lo, hi) =>
+  hi == null ? `≥${lo} 亿` : (lo === 0 ? `<${hi} 亿` : `${lo}-${hi} 亿`)
+
+function recomputeDcaBands(points) {
+  const matrix = DCA_AGE_BANDS.map(() =>
+    DCA_SCALE_BANDS.map(() => ({ count: 0, xs: [], positive: 0 })))
+  for (const p of points) {
+    const [age, scale, xirr] = p
+    const ai = DCA_AGE_BANDS.findIndex(([lo, hi]) =>
+      age >= lo && (hi == null || age < hi))
+    const si = DCA_SCALE_BANDS.findIndex(([lo, hi]) =>
+      scale >= lo && (hi == null || scale < hi))
+    if (ai < 0 || si < 0) continue
+    const c = matrix[ai][si]
+    c.count++
+    c.xs.push(xirr)
+    if (xirr > 0) c.positive++
+  }
+  return {
+    age_bands: DCA_AGE_BANDS.map(([lo, hi]) => dcaAgeBandLabel(lo, hi)),
+    scale_bands: DCA_SCALE_BANDS.map(([lo, hi]) => dcaScaleBandLabel(lo, hi)),
+    matrix: matrix.map(row => row.map(c => {
+      const n = c.count
+      const xs = c.xs.slice().sort((a, b) => a - b)
+      return {
+        count: n,
+        mean_xirr: n ? +(xs.reduce((s, v) => s + v, 0) / n).toFixed(4) : null,
+        median_xirr: n ? +pctCont(xs, 0.5).toFixed(4) : null,
+        positive_share: n ? +(c.positive / n).toFixed(4) : null,
+      }
+    })),
+  }
+}
+
 async function loadDcaScatter() {
   const seq = ++dcaFeeReqSeq
   dcaFeeLoading.value = true
   try {
     const r = await fetch(STATIC_MODE
       ? `${DATA_BASE}/funds/dca/scatter.${dcaFeeMode.value}.json`
-      : `/api/funds/dca/scatter?fee=${dcaFeeMode.value}`)
+      : `/api/funds/dca/scatter?fee=${dcaFeeMode.value}&equity=${dcaEquity.value}`)
     const body = await r.json()
-    if (seq === dcaFeeReqSeq) dcaScatter.value = body   // 期间又切换过 → 丢弃旧响应
+    // 期间又切换过 → 丢弃旧响应；静态模式权益过滤在客户端做
+    if (seq === dcaFeeReqSeq) dcaScatter.value = STATIC_MODE ? applyDcaEquity(body) : body
   } catch (e) {
     if (seq === dcaFeeReqSeq)
       dcaScatter.value = { status: 'down', detail: String(e), points: [],
@@ -533,7 +593,8 @@ async function loadDcaScatter() {
   await nextTick()
   renderDcaScatterChart()
 }
-watch(dcaFeeMode, () => { loadDcaScatter(); loadDca() })
+// 费用口径与权益开关都联动散点+排行（权益切换时统计卡/分箱同步重算）
+watch([dcaFeeMode, dcaEquity], () => { loadDcaScatter(); loadDca() })
 
 function renderDcaScatterChart() {
   if (dcaScatterChart) { dcaScatterChart.destroy(); dcaScatterChart = null }
@@ -2430,6 +2491,16 @@ watch(
                 <div class="toolbar-right">
                   <span v-if="dcaFeeLoading" class="sub" style="margin-right: 8px">重算中…</span>
                   <div class="src-seg" :style="dcaFeeLoading ? 'opacity:.55' : ''">
+                    <button class="src-seg-btn"
+                            :class="{ active: dcaEquity }"
+                            @click="dcaEquity = true"
+                            data-scatter-cat="equity">仅权益类</button>
+                    <button class="src-seg-btn"
+                            :class="{ active: !dcaEquity }"
+                            @click="dcaEquity = false"
+                            data-scatter-cat="all">全市场</button>
+                  </div>
+                  <div class="src-seg" :style="dcaFeeLoading ? 'opacity:.55' : ''">
                     <button v-for="o in DCA_FEE_OPTIONS" :key="o.key"
                             class="src-seg-btn"
                             :class="{ active: dcaFeeMode === o.key }"
@@ -2449,7 +2520,7 @@ watch(
                   <div class="dca-conclusion" v-if="dcaScatterConclusion">
                     <div class="dc-head">
                       <b>结论</b>
-                      <span class="dc-badge">{{ dcaFeeLabel }} · 在市 {{ fmt(dcaScatter.points.length) }} 只 · 每基金只计一次</span>
+                      <span class="dc-badge">{{ dcaFeeLabel }} · {{ dcaEquity ? '仅权益类' : '全市场' }} · 在市 {{ fmt(dcaScatter.points.length) }} 只 · 每基金只计一次</span>
                     </div>
                     <div class="dc-grid">
                       <div class="dc-item">
@@ -2558,6 +2629,17 @@ watch(
                   placeholder="规模" aria-label="按资产规模过滤，大于该数值（亿元）" />
                 <span class="age-suffix">亿以上</span>
               </span>
+              <!-- 权益类筛选：与散点区同一状态（dcaEquity），排行/统计/散点联动 -->
+              <div class="src-seg" title="排行/统计/散点共用同一基金类型口径（默认仅权益类）">
+                <button class="src-seg-btn"
+                        :class="{ active: dcaEquity }"
+                        @click="dcaEquity = true"
+                        data-table-cat="equity">仅权益类</button>
+                <button class="src-seg-btn"
+                        :class="{ active: !dcaEquity }"
+                        @click="dcaEquity = false"
+                        data-table-cat="all">全市场</button>
+              </div>
               <!-- 费用口径：与散点区同一状态（dcaFeeMode），排行/统计/散点/详情联动 -->
               <div class="src-seg" title="排行/统计/散点/详情共用同一费用口径">
                 <button v-for="o in DCA_FEE_OPTIONS" :key="o.key"
@@ -2633,7 +2715,7 @@ watch(
                 </Column>
               </DataTable>
             </div>
-            <p class="note">口径：每月首个净值日投入固定金额，任一净值日持仓收益达止盈线即全仓赎回并重开新一轮（分红再投）；排行/统计/散点/详情共用同一费用口径，搜索栏或散点区可切换（不含费 / 含费·申购一折 / 含费·申购名义，赎回费各口径一致按持有天数阶梯收取） · 统计卡为在市全集分位，不随搜索变化 · 新基金（回测窗口 &lt;90 天）年化留空 · 数据为离线回测快照，重跑 scripts/fund_dca_backtest.py 并经 app.dca_store 导入后刷新 · 点行或「详情」查看每轮止盈明细</p>
+            <p class="note">口径：每月首个净值日投入固定金额，任一净值日持仓收益达止盈线即全仓赎回并重开新一轮（分红再投）；排行/统计/散点/详情共用同一费用口径，搜索栏或散点区可切换（不含费 / 含费·申购一折 / 含费·申购名义，赎回费各口径一致按持有天数阶梯收取）；排行/统计/散点共用同一基金类型口径，搜索栏或散点区可切换（默认仅权益类：股票型/偏股·灵活·平衡混合/股票指数/海外权益共 8 类，全市场可切回，债基·FOF·货币·偏债不在权益类内） · 统计卡为当前类型与在市口径全集分位，不随搜索变化 · 新基金（回测窗口 &lt;90 天）年化留空 · 数据为离线回测快照，重跑 scripts/fund_dca_backtest.py 并经 app.dca_store 导入后刷新 · 点行或「详情」查看每轮止盈明细</p>
 
 
             <!-- ===== 每次止盈明细弹窗（点排行行或「详情」按钮触发） ===== -->

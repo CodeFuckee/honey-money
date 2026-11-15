@@ -80,7 +80,7 @@ def fake_dsn(monkeypatch):
     return "postgresql://fake"
 
 
-def _fake_list(dsn, *, limit=0, offset=0):
+def _fake_list(dsn, *, limit=0, offset=0, equity=True):
     if offset:
         return {"status": "up", "total": 1, "rows": [], "stats": None,
                 "meta": {"generated_at": "2026-11-01T00:00:00+00:00"}}
@@ -94,8 +94,9 @@ def _fake_list(dsn, *, limit=0, offset=0):
             "meta": {"generated_at": "2026-11-01T00:00:00+00:00"}}
 
 
-def _fake_scatter(dsn, *, fee="disc"):
-    return {"status": "up", "fee": fee, "points": [[1.0, 1.0, 0.2, "000001"]],
+def _fake_scatter(dsn, *, fee="disc", equity=True):
+    return {"status": "up", "fee": fee, "equity": equity,
+            "points": [[1.0, 1.0, 0.2, "000001"]],
             "age_bands": [], "scale_bands": [], "matrix": []}
 
 
@@ -125,6 +126,27 @@ class TestExportAll:
         assert navs["d0"] == "2020-01-02" and navs["d"] == [0, 1, 4]
         assert navs["v"] == [10000, 10200, 10098]
         assert stats["nav_funds"] == 1
+
+    def test_export_snapshots_are_full_market(self, tmp_path, monkeypatch, fake_dsn):
+        """导出快照恒为全市场（equity=False）：静态站无后端，按权益开关
+        做客户端过滤，快照必须含全部 fund_type 行。"""
+        import app.pages_export as pe
+        seen = []
+
+        def _list(dsn, **kw):
+            seen.append(kw.get("equity"))
+            return _fake_list(dsn, limit=kw.get("limit", 0),
+                              offset=kw.get("offset", 0))
+
+        def _scatter(dsn, **kw):
+            seen.append(kw.get("equity"))
+            return _fake_scatter(dsn, fee=kw.get("fee", "disc"))
+
+        monkeypatch.setattr(pe, "fetch_dca_list", _list)
+        monkeypatch.setattr(pe, "fetch_dca_scatter", _scatter)
+        export_all(fake_dsn, tmp_path, log=lambda *a: None)
+        assert seen, "未捕获到任何导出调用"
+        assert all(v is False for v in seen)
 
 
 class TestPublish:
