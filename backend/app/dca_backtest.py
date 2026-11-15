@@ -18,6 +18,11 @@
 - scripts/fund_dca_backtest.py：CSV 离线驱动（手动全量重跑 → CSV → 导入）；
 - 本模块 `run_full_backtest()`：调度器日更（PG 拉数 → 算 → 内存行 → 直写
   fund_dca_result/fund_dca_rounds，见 scheduler 的 backtest 执行分支）。
+
+多止盈点市场级对比（2026-11-15 grilling 定案）：`run_backtest_tp()` /
+`run_full_backtest_tp()` 用 `simulate_multi()` 单遍扫六档阈值，产出带 tp
+维度的行（fund_dca_tp_* 新表）；旧口径行由其中 tp=0.20 一档派生，与
+`run_backtest()` 输出逐字段一致（测试锚定），日更同事务双写、旧表零改动。
 """
 
 import io
@@ -32,6 +37,9 @@ AMOUNT = 1000.0
 TAKE_PROFIT = 0.20
 WINDOW_10Y = pd.DateOffset(years=10)
 MIN_SPAN_DAYS = 90  # 窗口短于此天数的年化记 nan
+# 市场级阈值对比（2026-11-15 grilling 定案）：六档止盈点，API/排行切换与
+# fund_dca_tp_* 新表共用这一事实源
+TP_THRESHOLDS = (0.05, 0.10, 0.15, 0.20, 0.25, 0.30)
 
 
 # ===== 费用模型（典型档位近似，见模块 docstring） =====
@@ -150,95 +158,123 @@ def _net_redeem(lots: list[tuple[int, float]], dates: pd.DatetimeIndex,
                for bi, sh in lots)
 
 
+def _new_tp_state(tp: float) -> dict:
+    """单阈值策略的独立状态机（每档止盈线一套，互不干扰）。"""
+    return {"tp": tp, "months": set(),
+            "lots": [],            # (买入日下标, 份额)
+            "basis_units": 0.0,    # Σ 份额，市值 = basis_units*adj(t)
+            "invested": 0.0,
+            "round_sub_fee": 0.0,  # 本轮累计申购费（外扣法折损）
+            "rounds": 0, "realized": 0.0,
+            "flows": [], "round_events": [],
+            "round_start": None, "last_tp": None}
+
+
+def _finalize_tp_state(st: dict, dates: pd.DatetimeIndex, adj: np.ndarray,
+                       fee: FeeSchedule | None) -> dict:
+    """期末清算 + 结果组装（与原 simulate 尾部逐字段一致）。"""
+    if st["basis_units"] > 0:
+        end_value = _net_redeem(st["lots"], dates, len(dates) - 1, adj[-1], fee)
+        st["flows"].append((dates[-1], end_value))
+    else:
+        end_value = 0.0
+    invested_total = -sum(a for _, a in st["flows"] if a < 0)  # 正数口径
+    profit = (st["realized"] + (end_value - st["invested"])
+              if st["basis_units"] > 0 else st["realized"])
+    span = (dates[-1] - dates[0]).days
+    return {
+        "start": str(dates[0].date()),
+        "end": str(dates[-1].date()),
+        "months": len(st["months"]),
+        "rounds": st["rounds"],
+        "round_events": st["round_events"],
+        "flows": st["flows"],
+        "invested": round(invested_total, 2),
+        "final_value": round(invested_total + profit, 2),
+        "profit_rate": profit / invested_total if invested_total > 0 else None,
+        "xirr": xirr(st["flows"]) if span >= MIN_SPAN_DAYS else None,
+    }
+
+
+def simulate_multi(dates: pd.DatetimeIndex, adj: np.ndarray,
+                   fee: FeeSchedule | None = None,
+                   take_profits=TP_THRESHOLDS) -> dict:
+    """单基金单窗口单遍多阈值：同一净值序列上同时跑多档止盈。
+
+    每档阈值一个独立状态机（月度买入/日频触发线/轮次事件与 simulate
+    完全同逻辑，仅状态分离），返回 {tp: simulate 同构结果}——单档结果
+    与 simulate(take_profit=tp) 逐字段一致。相对跑 N 遍全量模拟，省掉的
+    只是窗口 prep/月检等共享开销；状态机本体仍是 N 倍工作量（日更多阈值
+    总计算量 ≈ 单阈值日更 ×N，见 run_backtest_tp docstring）。
+    """
+    states = [_new_tp_state(tp) for tp in take_profits]
+    months = dates.to_numpy().astype("datetime64[M]")
+    for i in range(len(dates)):
+        a = adj[i]
+        m = months[i]
+        for st in states:
+            if m not in st["months"]:
+                st["months"].add(m)
+                if st["basis_units"] == 0.0:
+                    st["round_start"] = dates[i]   # 新一轮从本轮首次买入起算
+                net_amount = AMOUNT if fee is None else AMOUNT / (1.0 + fee.sub_rate)
+                st["lots"].append((i, net_amount / a))
+                st["basis_units"] += net_amount / a
+                st["invested"] += AMOUNT
+                st["round_sub_fee"] += AMOUNT - net_amount
+                st["flows"].append((dates[i], -AMOUNT))
+            if (st["basis_units"] > 0
+                    and st["basis_units"] * a
+                    >= st["invested"] * (1.0 + st["tp"])):
+                value = st["basis_units"] * a
+                net = _net_redeem(st["lots"], dates, i, a, fee)
+                redeem_fee = value - net
+                st["realized"] += net - st["invested"]
+                st["rounds"] += 1
+                st["flows"].append((dates[i], net))
+                gap = ((dates[i] - st["last_tp"]).days
+                       if st["last_tp"] is not None
+                       else (dates[i] - st["round_start"]).days)
+                st["round_events"].append((
+                    str(dates[i].date()),
+                    ((dates[i] - st["round_start"]).days
+                     if st["round_start"] is not None else None),
+                    gap,
+                    round(value / st["invested"] - 1.0, 4),
+                    round(a, 4),                     # 止盈日复权净值
+                    round(st["invested"], 2),        # 本轮累计投入
+                    round(st["round_sub_fee"], 2),   # 本轮申购费合计
+                    round(redeem_fee, 2),            # 本轮赎回费
+                    round(net - st["invested"], 2),  # 本轮净收益（回款-投入）
+                ))
+                st["last_tp"] = dates[i]
+                st["lots"] = []
+                st["basis_units"] = 0.0
+                st["invested"] = 0.0
+                st["round_sub_fee"] = 0.0
+    return {st["tp"]: _finalize_tp_state(st, dates, adj, fee)
+            for st in states}
+
+
 def simulate(dates: pd.DatetimeIndex, adj: np.ndarray,
-             fee: FeeSchedule | None = None) -> dict:
-    """单基金单窗口：每月首个净值日买入，日频检查 20% 止盈。
+             fee: FeeSchedule | None = None,
+             take_profit: float = TAKE_PROFIT) -> dict:
+    """单基金单窗口单阈值：每月首个净值日买入，日频检查止盈。
 
     fee=None 为无费口径（原行为）；给定调度时申购按外扣法折份额
     （净申购 = 金额/(1+费率)，投入现金流仍记全额），止盈/期末清算的
-    回款现金流为扣赎回费后净额。止盈触发线按市值口径，与用户在
-    APP 里看到的一致，三场景共用。
+    回款现金流为扣赎回费后净额。止盈触发线按市值口径（持仓市值/已投入
+    -1 ≥ take_profit 即全仓赎回并开启新一轮），与用户在 APP 里看到的
+    一致。实现为 simulate_multi 单档委托，行为逐字段一致。
 
     res["flows"]：XIRR 现金流 [(日期, 金额)]。
     res["round_events"]：每轮止盈事件 (tp_date, round_days, gap_days,
     profit, tp_nav, invested, sub_fee, redeem_fee, net_profit)——
-    profit 为市值口径收益率（≥20%，含跳空越过部分）；tp_nav=止盈日
+    profit 为市值口径收益率（≥阈值，含跳空越过部分）；tp_nav=止盈日
     复权净值；invested=本轮累计投入；sub_fee/redeem_fee=本轮申购费
     合计/赎回费（无费场景为 0）；net_profit=本轮净收益（回款-投入）。
     """
-    months = dates.to_numpy().astype("datetime64[M]")
-    seen_months = set()
-    lots: list[tuple[int, float]] = []   # (买入日下标, 份额)
-    basis_units = 0.0                    # Σ 份额，市值 = basis_units*adj(t)
-    invested = 0.0
-    round_sub_fee = 0.0                  # 本轮累计申购费（外扣法折损）
-    rounds = 0
-    realized = 0.0
-    flows: list[tuple[pd.Timestamp, float]] = []
-    round_events: list[tuple] = []
-    round_start: pd.Timestamp | None = None
-    last_tp: pd.Timestamp | None = None
-
-    for i in range(len(dates)):
-        a = adj[i]
-        m = months[i]
-        if m not in seen_months:
-            seen_months.add(m)
-            if basis_units == 0.0:
-                round_start = dates[i]      # 新一轮从本轮首次买入起算
-            net_amount = AMOUNT if fee is None else AMOUNT / (1.0 + fee.sub_rate)
-            lots.append((i, net_amount / a))
-            basis_units += net_amount / a
-            invested += AMOUNT
-            round_sub_fee += AMOUNT - net_amount
-            flows.append((dates[i], -AMOUNT))
-        if basis_units > 0 and basis_units * a >= invested * (1.0 + TAKE_PROFIT):
-            value = basis_units * a
-            net = _net_redeem(lots, dates, i, a, fee)
-            redeem_fee = value - net
-            realized += net - invested
-            rounds += 1
-            flows.append((dates[i], net))
-            gap = (dates[i] - last_tp).days if last_tp is not None else \
-                (dates[i] - round_start).days
-            round_events.append((
-                str(dates[i].date()),
-                (dates[i] - round_start).days if round_start is not None else None,
-                gap,
-                round(value / invested - 1.0, 4),
-                round(a, 4),                     # 止盈日复权净值
-                round(invested, 2),              # 本轮累计投入
-                round(round_sub_fee, 2),         # 本轮申购费合计
-                round(redeem_fee, 2),            # 本轮赎回费
-                round(net - invested, 2),        # 本轮净收益（回款-投入）
-            ))
-            last_tp = dates[i]
-            lots = []
-            basis_units = 0.0
-            invested = 0.0
-            round_sub_fee = 0.0
-
-    if basis_units > 0:
-        end_value = _net_redeem(lots, dates, len(dates) - 1, adj[-1], fee)
-        flows.append((dates[-1], end_value))
-    else:
-        end_value = 0.0
-    invested_total = -sum(a for _, a in flows if a < 0)  # 正数口径
-    profit = realized + (end_value - invested) if basis_units > 0 else realized
-    span = (dates[-1] - dates[0]).days
-    res = {
-        "start": str(dates[0].date()),
-        "end": str(dates[-1].date()),
-        "months": len(seen_months),
-        "rounds": rounds,
-        "round_events": round_events,
-        "flows": flows,
-        "invested": round(invested_total, 2),
-        "final_value": round(invested_total + profit, 2),
-        "profit_rate": profit / invested_total if invested_total > 0 else None,
-        "xirr": xirr(flows) if span >= MIN_SPAN_DAYS else None,
-    }
-    return res
+    return simulate_multi(dates, adj, fee, [take_profit])[take_profit]
 
 
 def prep_window(df: pd.DataFrame, start: pd.Timestamp | None):
@@ -321,6 +357,81 @@ def run_backtest(nav: pd.DataFrame, basic: pd.DataFrame,
     return rows, rounds_rows
 
 
+def _or_none(res: dict | None, key: str):
+    return res[key] if res else None
+
+
+def run_backtest_tp(nav: pd.DataFrame, basic: pd.DataFrame,
+                    scale_map: dict, thresholds=TP_THRESHOLDS, *,
+                    end_ts=None, log=print) -> tuple[list[dict], list[tuple]]:
+    """多阈值纯计算编排：每基金每窗口每口径一次 simulate_multi 扫描。
+
+    nav/basic/scale_map 同 run_backtest；end_ts：10y 窗口右端（缺省=数据集
+    最新净值日）。返回 (result_rows, rounds_rows)：
+    - 结果行 = run_backtest 行结构 + "tp" 字段（每基金 × 每阈值一行）；
+    - 轮次行 = (code, tp, fee, seq, *ev)，w10 窗口口径与旧表同一约定；
+    - tp=TAKE_PROFIT 的行/轮次与 run_backtest 输出逐字段一致（测试锚定），
+      旧表写入即由该档派生。
+    """
+    if end_ts is None:
+        end_ts = pd.Timestamp(nav["nav_date"].max())
+    rows, rounds_rows = [], []
+    n_funds = 0
+    for code, g in nav.groupby("code", sort=True):
+        g = g.sort_values("nav_date")
+        full_p = prep_window(g, None)
+        w10_p = prep_window(g, end_ts - WINDOW_10Y)
+        if full_p is None and w10_p is None:
+            continue
+        fee = fee_schedules_for(basic["name"].get(code, ""),
+                                basic["fund_type"].get(code, ""))
+        base = {
+            "code": code,
+            "name": basic["name"].get(code, ""),
+            "fund_type": basic["fund_type"].get(code, ""),
+            "delisted": (bool(basic["delisted"].get(code, False))
+                         if "delisted" in basic else False),
+            "scale_yi": scale_map.get(code, {}).get("scale_yi"),
+            "scale_date": scale_map.get(code, {}).get("scale_date"),
+        }
+        # per_tp_fee[tp][prefix][fee_name] → 该组合的 simulate 结果
+        per_tp_fee = {tp: {"full": {}, "w10": {}} for tp in thresholds}
+        for prefix, prep in (("full", full_p), ("w10", w10_p)):
+            for fee_name in ("gross", "disc", "nom"):
+                multi = (simulate_multi(*prep, fee[fee_name], thresholds)
+                         if prep else None)
+                for tp in thresholds:
+                    per_tp_fee[tp][prefix][fee_name] = (
+                        multi[tp] if multi else None)
+        for tp in thresholds:
+            res = per_tp_fee[tp]
+            row = dict(base)
+            row["tp"] = tp
+            for prefix in ("full", "w10"):
+                p_res = res[prefix]
+                for k in COLS_FULL:
+                    row[f"{prefix}_{k}"] = _or_none(p_res["gross"], k)
+                row[f"{prefix}_xirr_disc"] = _or_none(p_res["disc"], "xirr")
+                row[f"{prefix}_xirr_nom"] = _or_none(p_res["nom"], "xirr")
+                row[f"{prefix}_rounds_disc"] = _or_none(p_res["disc"], "rounds")
+                row[f"{prefix}_rounds_nom"] = _or_none(p_res["nom"], "rounds")
+                row[f"{prefix}_profit_rate_disc"] = _or_none(p_res["disc"],
+                                                             "profit_rate")
+                row[f"{prefix}_profit_rate_nom"] = _or_none(p_res["nom"],
+                                                            "profit_rate")
+            rows.append(row)
+            # w10 三口径轮次明细全量入库（与旧表同一窗口口径）
+            for fee_name in ("gross", "disc", "nom"):
+                res_w = res["w10"].get(fee_name)
+                if res_w:
+                    for seq, ev in enumerate(res_w["round_events"], 1):
+                        rounds_rows.append((code, tp, fee_name, seq, *ev))
+        n_funds += 1
+        if n_funds % 1000 == 0:
+            log(f"  已回测 {n_funds:,} 只 × {len(thresholds)} 档阈值", flush=True)
+    return rows, rounds_rows
+
+
 # ===== 调度器日更：PG 拉数 → run_backtest → 内存结果行（直写 PG 由调用方做） =====
 
 _ALIVE_WINDOW_DAYS = 45   # 最后净值日距数据集最新净值日的在市窗口
@@ -393,6 +504,55 @@ def run_full_backtest(dsn: str, *, log=print) -> tuple[list[dict], list[tuple], 
              "window_end": str(all_end) if all_end else None}
     log(f"回测完成：{stats['fund_count']:,} 只 / 轮次 {stats['round_count']:,} 行")
     return rows, rounds_rows, stats
+
+
+def run_full_backtest_tp(dsn: str, *, thresholds=TP_THRESHOLDS,
+                         log=print) -> tuple[list[dict], list[tuple],
+                                             list[dict], list[tuple], dict]:
+    """日更全量回测（多阈值版）：PG 拉数一次 → run_backtest_tp → 派生旧口径行。
+
+    返回 (old_rows, old_rounds, tp_rows, tp_rounds, stats)：
+    - old_rows/old_rounds：tp=TAKE_PROFIT 派生的旧口径行（写
+      fund_dca_result / fund_dca_rounds，与旧引擎 run_backtest 输出一致）；
+    - tp_rows/tp_rounds：全阈值行（写 fund_dca_tp_* 新表）；
+    - alive 45 天新鲜度规则对两套行同一份（基金级，与阈值无关）。
+    纯 CPU，调用方放子进程跑；直写由调用方事务完成。
+    """
+    with psycopg.connect(dsn, connect_timeout=10) as conn:
+        codes = _load_codes(conn)
+        log(f"有净值的基金：{len(codes):,} 只")
+        if not codes:
+            raise SystemExit("fund_nav 为空，无从回测")
+        basic = _load_basic(conn, codes)
+        scale_map = _load_scale(conn)
+        nav = _load_nav(conn, codes)
+    log(f"净值行：{len(nav):,}")
+    tp_rows, tp_rounds = run_backtest_tp(nav, basic, scale_map, thresholds,
+                                         log=log)
+    # 旧口径行 = tp=0.20 派生（去掉 tp 维度），与 run_backtest 输出一致
+    old_rows = [{k: v for k, v in r.items() if k != "tp"}
+                for r in tp_rows if r["tp"] == TAKE_PROFIT]
+    old_rounds = [t[:1] + t[2:] for t in tp_rounds if t[1] == TAKE_PROFIT]
+    # alive：full_end 距数据集最新净值日 45 天内（场内 ETF 的 delisted 标记
+    # 不可直接用，见 dca_store 同款口径）
+    all_end = max((r["full_end"] for r in old_rows if r["full_end"]),
+                  default=None)
+    cutoff = (pd.Timestamp(all_end) - pd.Timedelta(days=_ALIVE_WINDOW_DAYS)) \
+        if all_end else None
+    alive_by_code = {}
+    for r in old_rows:
+        r["alive"] = bool(cutoff and r["full_end"]
+                          and pd.Timestamp(r["full_end"]) >= cutoff)
+        alive_by_code[r["code"]] = r["alive"]
+    for r in tp_rows:
+        r["alive"] = alive_by_code.get(r["code"], False)
+    stats = {"fund_count": len(old_rows), "round_count": len(old_rounds),
+             "tp_round_count": len(tp_rounds),
+             "thresholds": [float(t) for t in thresholds],
+             "window_end": str(all_end) if all_end else None}
+    log(f"回测完成：{stats['fund_count']:,} 只 / 旧口径轮次 "
+        f"{stats['round_count']:,} 行 / 多阈值轮次 {stats['tp_round_count']:,} 行")
+    return old_rows, old_rounds, tp_rows, tp_rounds, stats
 
 
 def import_scale_csv(csv_path: str, dsn: str, *, log=print) -> int:

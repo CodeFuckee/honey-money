@@ -100,8 +100,11 @@ class PgAdvisoryLock:
 
 async def _run_backtest_job(dsn: str, task: dict, progress,
                             stop_event: asyncio.Event) -> dict:
-    """定投回测日更：子进程全量重算（~20-30 分钟，纯 CPU 不占 API 进程）
-    → 事务直写 fund_dca_result/fund_dca_rounds → crawl_run 记录。
+    """定投回测日更：子进程全量重算（纯 CPU 不占 API 进程；六档止盈点
+    独立状态机，总计算量 ≈ 单阈值日更 ×6，夜窗 23:00 起跑约 2-3h）
+    → 事务直写 fund_dca_result/fund_dca_rounds（tp=0.20 派生，与旧引擎
+    一致）+ fund_dca_tp_*（5%~30% 六档，见 dca_backtest TP_THRESHOLDS）
+    → crawl_run 记录。
 
     前置只做净值新鲜度告警不阻断（跑最新可得数据，爬取失败次日自愈）；
     stop_event 无法中断子进程，仅在各阶段间生效；kill/重启丢弃当日运行
@@ -141,8 +144,9 @@ async def _run_backtest_job(dsn: str, task: dict, progress,
         # "Can't get local object" 崩掉子进程任务）
         with concurrent.futures.ProcessPoolExecutor(max_workers=1,
                                                     mp_context=ctx) as pool:
-            result_rows, rounds_rows, stats = await loop.run_in_executor(
-                pool, dca_backtest.run_full_backtest, dsn)
+            old_rows, old_rounds, tp_rows, tp_rounds, stats = \
+                await loop.run_in_executor(
+                    pool, dca_backtest.run_full_backtest_tp, dsn)
     except Exception as exc:
         with psycopg.connect(dsn) as conn:
             store.finish_run(conn, run_id, total_stocks=0, ok_stocks=0,
@@ -167,16 +171,24 @@ async def _run_backtest_job(dsn: str, task: dict, progress,
     params = {"amount": 1000.0, "take_profit": 0.2, "frequency": "monthly",
               "window_end": stats.get("window_end"), "min_age_years": None,
               "scale_min_yi": None, "source": "scheduler/backtest"}
+    tp_params = {"amount": 1000.0, "frequency": "monthly",
+                 "thresholds": stats.get("thresholds", []),
+                 "window_end": stats.get("window_end"),
+                 "source": "scheduler/backtest"}
     with psycopg.connect(dsn) as conn:
-        dca_store.import_rows(conn, result_rows, params=params)
-        dca_store.import_rounds(conn, rounds_rows)
+        dca_store.ensure_tp_schema(conn)          # 三新表幂等建表
+        dca_store.import_rows(conn, old_rows, params=params)
+        dca_store.import_rounds(conn, old_rounds)
+        dca_store.import_tp_rows(conn, tp_rows, params=tp_params)
+        dca_store.import_tp_rounds(conn, tp_rounds)
         store.finish_run(conn, run_id, total_stocks=stats["fund_count"],
                          ok_stocks=stats["fund_count"], failed_stocks=0,
                          bars_upserted=stats["round_count"], failures=[],
                          aborted=False)
         conn.commit()
     print(f"[backtest] 日更完成：{stats['fund_count']:,} 只 / "
-          f"轮次 {stats['round_count']:,} 行，窗口截至 {stats.get('window_end')}")
+          f"旧口径轮次 {stats['round_count']:,} 行 / 多阈值轮次 "
+          f"{stats['tp_round_count']:,} 行，窗口截至 {stats.get('window_end')}")
 
     # Pages 自动发布（可选）：PAGES_REPO_URL 配置了含 token 的仓库 URL 才启用；
     # 失败只告警不回滚——回测结果是主交付物，公开页保持上一份快照次日自愈

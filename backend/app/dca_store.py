@@ -138,6 +138,8 @@ ON CONFLICT (id) DO UPDATE SET
 """
 
 
+
+
 def _cell(col: str, raw: str):
     """CSV 文本 → 目标类型；空串/坏值 → None（坏日期记 None 而非炸导入）。"""
     raw = (raw or "").strip()
@@ -235,6 +237,141 @@ def import_rounds(conn, rows: list[tuple]) -> int:
         cur.execute(_APPLY_GAP)
     return len(rows)
 
+
+
+# ===== 多止盈点回测存储（市场级阈值对比，与旧表完全隔离；2026-11-15 定案） =====
+# 列结构与旧表逐列一致 + tp 维度；旧表/旧导出/旧测试零改动，静态通道可复活。
+
+TP_DDL = """
+CREATE TABLE IF NOT EXISTS fund_dca_tp_result (
+  tp              DOUBLE PRECISION NOT NULL,
+  code            VARCHAR(10) NOT NULL,
+  name            VARCHAR(128) NOT NULL,
+  fund_type       VARCHAR(64),
+  alive           BOOLEAN NOT NULL DEFAULT FALSE,
+  scale_yi        DOUBLE PRECISION,
+  scale_date      DATE,
+  w10_start       DATE, w10_end       DATE,
+  w10_months      INTEGER, w10_rounds INTEGER,
+  w10_invested    DOUBLE PRECISION, w10_final_value DOUBLE PRECISION,
+  w10_profit_rate DOUBLE PRECISION, w10_xirr        DOUBLE PRECISION,
+  full_start      DATE, full_end      DATE,
+  full_months     INTEGER, full_rounds INTEGER,
+  full_invested   DOUBLE PRECISION, full_final_value DOUBLE PRECISION,
+  full_profit_rate DOUBLE PRECISION, full_xirr        DOUBLE PRECISION,
+  w10_xirr_disc DOUBLE PRECISION, w10_xirr_nom DOUBLE PRECISION,
+  full_xirr_disc DOUBLE PRECISION, full_xirr_nom DOUBLE PRECISION,
+  w10_rounds_disc INTEGER, w10_rounds_nom INTEGER,
+  full_rounds_disc INTEGER, full_rounds_nom INTEGER,
+  w10_profit_rate_disc DOUBLE PRECISION, w10_profit_rate_nom DOUBLE PRECISION,
+  full_profit_rate_disc DOUBLE PRECISION, full_profit_rate_nom DOUBLE PRECISION,
+  gap_avg_days DOUBLE PRECISION, gap_min_days INTEGER, gap_max_days INTEGER,
+  gap_avg_days_disc DOUBLE PRECISION, gap_avg_days_nom DOUBLE PRECISION,
+  PRIMARY KEY (code, tp)
+);
+CREATE INDEX IF NOT EXISTS idx_fund_dca_tp_alive ON fund_dca_tp_result (alive);
+CREATE INDEX IF NOT EXISTS idx_fund_dca_tp_tp ON fund_dca_tp_result (tp, w10_xirr);
+
+CREATE TABLE IF NOT EXISTS fund_dca_tp_rounds (
+  tp         DOUBLE PRECISION NOT NULL,
+  code       VARCHAR(10) NOT NULL,
+  fee        VARCHAR(8)  NOT NULL DEFAULT 'gross',
+  seq        INTEGER NOT NULL,
+  tp_date    DATE NOT NULL,
+  round_days INTEGER,
+  gap_days   INTEGER,
+  profit     DOUBLE PRECISION,
+  tp_nav     DOUBLE PRECISION,
+  invested   DOUBLE PRECISION,
+  sub_fee    DOUBLE PRECISION,
+  redeem_fee DOUBLE PRECISION,
+  net_profit DOUBLE PRECISION,
+  PRIMARY KEY (code, tp, fee, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_fund_dca_tp_rounds_code
+  ON fund_dca_tp_rounds (code, tp);
+
+CREATE TABLE IF NOT EXISTS fund_dca_tp_meta (
+  id           BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
+  generated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  fund_count   INTEGER,
+  params       JSONB
+);
+"""
+
+_TP_COLS = ["tp"] + _COLS
+_TP_INSERT = f"""
+INSERT INTO fund_dca_tp_result ({", ".join(_TP_COLS)})
+VALUES ({", ".join(["%s"] * len(_TP_COLS))})
+"""
+
+# 列序必须与引擎元组 (code, tp, fee, seq, *ev) 逐位对齐——PG 隐式类型
+# 转换会把错位写入"成功"（'000001'→tp 列 1.0），只能靠列清单对齐防错
+_TP_ROUNDS_COLS = _ROUNDS_COLS[:1] + ["tp"] + _ROUNDS_COLS[1:]
+_TP_UPSERT_ROUND = f"""
+INSERT INTO fund_dca_tp_rounds ({", ".join(_TP_ROUNDS_COLS)})
+VALUES ({", ".join(["%s"] * len(_TP_ROUNDS_COLS))})
+"""
+
+_TP_META_UPSERT = """
+INSERT INTO fund_dca_tp_meta (id, generated_at, fund_count, params)
+VALUES (TRUE, now(), %s, %s::jsonb)
+ON CONFLICT (id) DO UPDATE SET
+  generated_at = now(), fund_count = EXCLUDED.fund_count,
+  params = EXCLUDED.params
+"""
+
+_RESET_GAP_TP = """
+UPDATE fund_dca_tp_result SET gap_avg_days = NULL, gap_min_days = NULL,
+  gap_max_days = NULL, gap_avg_days_disc = NULL, gap_avg_days_nom = NULL
+"""
+
+_APPLY_GAP_TP = """
+UPDATE fund_dca_tp_result r SET
+  gap_avg_days = t.g_avg, gap_min_days = t.g_min, gap_max_days = t.g_max,
+  gap_avg_days_disc = t.d_avg, gap_avg_days_nom = t.n_avg
+FROM (SELECT code, tp,
+             avg(gap_days) FILTER (WHERE fee = 'gross') AS g_avg,
+             min(gap_days) FILTER (WHERE fee = 'gross') AS g_min,
+             max(gap_days) FILTER (WHERE fee = 'gross') AS g_max,
+             avg(gap_days) FILTER (WHERE fee = 'disc')  AS d_avg,
+             avg(gap_days) FILTER (WHERE fee = 'nom')   AS n_avg
+      FROM fund_dca_tp_rounds GROUP BY code, tp) t
+WHERE r.code = t.code AND r.tp = t.tp
+"""
+
+
+def ensure_tp_schema(conn) -> None:
+    """三新表幂等建表（调度器日更首跑前调用；与旧表 DDL 互不影响）。"""
+    with conn.cursor() as cur:
+        cur.execute(TP_DDL)
+
+
+def import_tp_rows(conn, rows: list[dict], *, params: dict | None = None) -> int:
+    """多阈值结果快照整体替换（DELETE+INSERT）+ meta 单行 upsert。
+
+    meta.fund_count 为去重基金数（行数 = 基金 × 阈值）；事务由调用方提交。
+    """
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM fund_dca_tp_result")
+        if rows:
+            cur.executemany(_TP_INSERT,
+                            [tuple(r[c] for c in _TP_COLS) for r in rows])
+        n_funds = len({r["code"] for r in rows})
+        cur.execute(_TP_META_UPSERT,
+                    (n_funds, json.dumps(params or {}, ensure_ascii=False)))
+    return len(rows)
+
+
+def import_tp_rounds(conn, rows: list[tuple]) -> int:
+    """多阈值轮次整表替换 + 按 (code, tp) 刷新结果表间隔汇总列。"""
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM fund_dca_tp_rounds")
+        if rows:
+            cur.executemany(_TP_UPSERT_ROUND, rows)
+        cur.execute(_RESET_GAP_TP)
+        cur.execute(_APPLY_GAP_TP)
+    return len(rows)
 
 def import_rows(conn, rows: list[dict], *, params: dict | None = None) -> int:
     """快照整体替换（DELETE+INSERT）+ meta 单行 upsert；单事务由调用方提交。"""

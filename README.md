@@ -25,11 +25,17 @@ backend/            Python 后端（FastAPI）
   app/adjust.py       复权因子（懒加载入库；后/前复权合成；降级不复权）
   app/backtest/       vectorbt 回测引擎（信号/指标纯 pandas，六大经典策略）
   app/backtest_api.py 回测 API（策略/区间/撮合模式/成本，降级 200 约定）
-  app/dca_store.py    定投止盈回测快照存储（fund_dca_result / fund_dca_meta 两表；
+  app/dca_store.py    定投止盈回测快照存储（fund_dca_result / fund_dca_meta 两表 +
+                      fund_dca_tp_result / fund_dca_tp_rounds / fund_dca_tp_meta
+                      多阈值三表（5%~30% 六档，与旧表同构 + tp 维度，完全隔离）；
                       python -m app.dca_store <csv> 导入 scripts 离线回测产物，幂等）
   app/dca_api.py      /api/funds/dca 回测排行 API（搜索/在市/年限/规模/权益类
                       （EQUITY_TYPES 白名单）过滤/排序白名单/分页 + 在市全集
-                      分位统计 + 口径 meta，降级 200 约定）
+                      分位统计 + 口径 meta，降级 200 约定）+
+                      /api/funds/dca/tp（多阈值排行，tp 白名单回落 0.2）+
+                      /api/funds/dca/tp/compare（六档止盈点市场级对比聚合，
+                      权益类+商品池）+ /api/funds/dca/tp/{code}/rounds
+                      （单基金单阈值轮次明细）
   tests/              离线 pytest 用例（API 骨架 + 爬虫 + 任务调度）
 frontend/           Vue3 + Vite 前端
   src/App.vue         服务仪表盘（Carbon 风格）：四状态（加载骨架/空态插画/
@@ -37,8 +43,12 @@ frontend/           Vue3 + Vite 前端
                       数据源子页（新浪/东财来源筛选变体）+ 基金净值子页
                       （列表含类型/最新单位净值/日增长率/净值条数/区间，
                       点行进净值详情：单位+累计净值双线走势 + 分页明细）+
-                      定投止盈回测子页（全市场公募基金「月定投+20% 止盈」
-                      离线回测排行：7 张统计卡 + 服务端排序表格，费率口径
+                      定投止盈回测子页（全市场公募基金「月定投+止盈」
+                      离线回测排行：止盈点 5%~30% 六档切换（默认 20%，排行/
+                      统计/明细跟随，散点/分箱固定 20%）+「止盈点对比」
+                      市场级区块（六档中位/均值年化、正收益占比、止盈成功率、
+                      平均轮次与间隔 + SVG 折线，权益类+商品池，点击行/圆点
+                      切换排行阈值）+ 7 张统计卡 + 服务端排序表格，费率口径
                       三档切换联动排行/统计/散点/详情（默认含费·申购名义；
                       不含费/含费·申购一折可选，搜索栏与散点区各有开关），
                       权益类筛选默认仅权益类（股票型/偏股·灵活·平衡混合/
@@ -47,7 +57,8 @@ frontend/           Vue3 + Vite 前端
                       搜索/运作年限与规模输入过滤（>N 年 / >N 亿）/分页/排序
                       同步 URL + 止盈间隔列 + 「详情」按钮，弹窗看每轮
                       止盈日/复权净值/投入/申购赎回费/净收益/累计净收益
-                      （fund_dca_rounds 表三口径 102k 轮，费用口径随
+                      （明细跟随所选阈值：fund_dca_rounds 三口径 102k 轮
+                      + fund_dca_tp_rounds 六阈值×三口径轮次，费用口径随
                       全页开关联动）；下方「年限 × 规模 × 年化」
                       可旋转三维散点，年化口径三档切换（默认含费·申购
                       名义；不含费/含费·申购一折可选——申赎费用建模见
@@ -87,7 +98,9 @@ scripts/            离线研究/数据管道脚本（不入 CI）：fund_scale_
                     全集差集同步——ETF 等）/ fund_dca_backtest.py（定投+止盈
                     全市场回测 → scripts/data/*.csv，gitignore，经 app.dca_store
                     导入后页面可见；含申赎费用三场景建模：gross 不含费/
-                    disc 申购一折/nom 申购名义，赎回费按每笔持有天数阶梯）
+                    disc 申购一折/nom 申购名义，赎回费按每笔持有天数阶梯；
+                    simulate_multi 单遍多阈值状态机供日更 run_full_backtest_tp
+                    六档止盈点共用，tp=0.20 档与旧引擎逐字段一致）
 ```
 
 ## MCP server（agent 接入回测与行情）
