@@ -355,6 +355,12 @@ def register_fund_dca_routes(app):
                                    fee=fee.strip().lower(),
                                    tp=_parse_tp(tp.strip().lower()))
 
+    @app.get("/api/funds/dca/tp/{code}/summary")
+    def funds_dca_tp_summary(code: str):
+        """单基金全阈值总收益率/年化汇总（近 10 年窗口，每阈值一行恒带
+        三口径字段——前端弹窗按当前费率口径取值）。降级约定同 /api/funds/dca。"""
+        return fetch_dca_tp_summary(config.DATABASE_URL, code.strip())
+
 
 
 # ===== 三维散点（每基金一点）+ 年限段 × 规模段 分箱统计 =====
@@ -737,3 +743,36 @@ def fetch_dca_tp_rounds(dsn: str, code: str, fee: str = "nom",
                 "rounds": out, "totals": totals}
     return _safe(run, {"status": "down", "detail": "pg unreachable",
                        "code": code, "tp": tp, "rounds": [], "totals": {}})
+
+
+_TP_SUMMARY_SQL = """
+SELECT tp, w10_profit_rate, w10_xirr,
+       w10_profit_rate_disc, w10_xirr_disc,
+       w10_profit_rate_nom, w10_xirr_nom
+FROM fund_dca_tp_result WHERE code = %s ORDER BY tp
+"""
+
+
+def fetch_dca_tp_summary(dsn: str, code: str) -> dict:
+    """单基金全阈值总收益率/年化汇总（fund_dca_tp_result，w10 窗口）。
+
+    每阈值一行，恒带三口径字段（gross 原列 / _disc / _nom 后缀）——前端
+    弹窗按当前费率口径取值，切口径无需重拉。降级约定同旧端点。
+    """
+
+    def run():
+        with psycopg.connect(dsn, connect_timeout=3) as conn:
+            with conn.cursor() as cur:
+                cur.execute(_TP_SUMMARY_SQL, (code,))
+                rows = cur.fetchall()
+        out = [{"tp": r[0],
+                "w10_profit_rate": round(r[1], 4) if r[1] is not None else None,
+                "w10_xirr": round(r[2], 4) if r[2] is not None else None,
+                "w10_profit_rate_disc": round(r[3], 4) if r[3] is not None else None,
+                "w10_xirr_disc": round(r[4], 4) if r[4] is not None else None,
+                "w10_profit_rate_nom": round(r[5], 4) if r[5] is not None else None,
+                "w10_xirr_nom": round(r[6], 4) if r[6] is not None else None}
+               for r in rows]
+        return {"status": "up", "code": code, "rows": out}
+    return _safe(run, {"status": "down", "detail": "pg unreachable",
+                       "code": code, "rows": []})

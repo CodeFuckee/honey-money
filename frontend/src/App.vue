@@ -419,6 +419,10 @@ const dcaRoundsAll = ref({})
 const DCA_TP_COLORS = { 0.05: '#E69F00', 0.10: '#56B4E9', 0.15: '#009E73',
   0.20: '#D55E00', 0.25: '#CC79A7', 0.30: '#0072B2',
   0.35: '#999999', 0.40: '#111111' }
+const dcaRoundsFee = ref('nom')          // 弹窗局部费率口径（初始随页面）
+const dcaRoundsFeeLabel = computed(() =>
+  (DCA_FEE_OPTIONS.find(o => o.key === dcaRoundsFee.value) || {}).label || '')
+const dcaRoundsSummary = ref(null)       // 单基金全阈值汇总（总收益率/年化，恒带三口径）
 
 let dcaAllRows = []   // 静态模式：全量行一次加载，之后纯客户端过滤/排序/分页
 
@@ -733,9 +737,18 @@ function openDcaRounds(e) {
   dcaRounds.value = { status: 'loading', rounds: [] }
   dcaRoundsNavs.value = []
   dcaRoundsTp.value = dcaTp.value        // 弹窗局部阈值从页面当前档位起步
+  dcaRoundsFee.value = dcaFeeMode.value  // 弹窗局部费率口径同起步
   dcaRoundsAll.value = {}
+  dcaRoundsSummary.value = null
   disposeDcaRoundsChart()
   dcaRoundsVisible.value = true
+  fetch(`/api/funds/dca/tp/${data.code}/summary`)
+    .then(r => r.json())
+    .then(body => {
+      dcaRoundsSummary.value = (body && body.status === 'up'
+        && Array.isArray(body.rows)) ? body.rows : null
+    })
+    .catch(() => { dcaRoundsSummary.value = null })
   const emptyRounds = () => ({ status: 'up', code: data.code, fee: dcaFeeMode.value,
                                rounds: [], totals: { rounds: 0 } })
   if (STATIC_MODE) {
@@ -788,7 +801,7 @@ function openDcaRounds(e) {
 // 只写 dcaRoundsAll 不动 dcaRounds——弹窗统计/轮次表始终跟随 dcaRoundsTp。
 function loadDcaRoundsAll(code) {
   Promise.all(DCA_TP_OPTIONS.map(tp =>
-    fetch(`/api/funds/dca/tp/${code}/rounds?fee=${dcaFeeMode.value}&tp=${tp}`)
+    fetch(`/api/funds/dca/tp/${code}/rounds?fee=${dcaRoundsFee.value}&tp=${tp}`)
       .then(r => r.json()).then(b => [tp, (b && b.rounds) || []])
       .catch(() => [tp, []])
   )).then(entries => {
@@ -803,7 +816,7 @@ function onDcaRoundsTpChange(tp) {
   dcaRoundsTp.value = tp
   const code = dcaRoundsFund.value.code
   dcaRounds.value = { status: 'loading', rounds: [] }
-  fetch(`/api/funds/dca/tp/${code}/rounds?fee=${dcaFeeMode.value}&tp=${tp}`)
+  fetch(`/api/funds/dca/tp/${code}/rounds?fee=${dcaRoundsFee.value}&tp=${tp}`)
     .then(r => r.json())
     .then(body => {
       dcaRounds.value = body
@@ -811,6 +824,34 @@ function onDcaRoundsTpChange(tp) {
     })
     .catch(err => { dcaRounds.value = { status: 'down', detail: String(err), rounds: [] } })
 }
+
+// 弹窗内切换费率口径：轮次表/费用字段随口径重拉（份额折损使轮次位移），
+// 全档位叠加同步重拉；summary 行内恒带三口径字段，卡值直接换列无需重拉
+function onDcaRoundsFeeChange(fee) {
+  if (dcaRoundsFee.value === fee || !dcaRoundsFund.value) return
+  dcaRoundsFee.value = fee
+  const code = dcaRoundsFund.value.code
+  dcaRounds.value = { status: 'loading', rounds: [] }
+  fetch(`/api/funds/dca/tp/${code}/rounds?fee=${fee}&tp=${dcaRoundsTp.value}`)
+    .then(r => r.json())
+    .then(body => {
+      dcaRounds.value = body
+      nextTick(() => renderDcaRoundsChart())
+    })
+    .catch(err => { dcaRounds.value = { status: 'down', detail: String(err), rounds: [] } })
+  loadDcaRoundsAll(code)
+}
+
+// summary 行按弹窗费率口径取值（同 dcaFeeVal 约定：gross 原列，disc/nom 后缀）
+function summaryFeeVal(row, f) {
+  if (!row) return null
+  if (dcaRoundsFee.value === 'gross') return row[f]
+  const v = row[`${f}_${dcaRoundsFee.value}`]
+  return v === undefined ? row[f] : v
+}
+// 当前弹窗档位的汇总行（总收益率/年化卡数据源）
+const dcaRoundsSummaryRow = computed(() =>
+  (dcaRoundsSummary.value || []).find(r => r && r.tp === dcaRoundsTp.value) || null)
 
 // 弹窗轮次行：附加累计净收益（按 seq 累加，已了结轮次口径）
 const dcaRoundsRows = computed(() => {
@@ -2906,7 +2947,7 @@ watch(
               :header="dcaRoundsFund ? `${dcaRoundsFund.code} ${dcaRoundsFund.name} · 每次止盈明细` : '每次止盈明细'"
               :style="{ width: '1000px' }" @hide="disposeDcaRoundsChart">
               <p class="sub" style="margin: 0 0 8px">
-                统计口径：近 10 年窗口 · 止盈线 <b>{{ dcaTpLabel(dcaRoundsTp) }}</b> · 费用口径：<b>{{ dcaFeeLabel }}</b>（申购费外扣折份额、赎回费按每笔持有天数阶梯，与排行/散点同一开关联动）· 间隔=距上次止盈天数（首次止盈从本轮首次买入起算）· 实际收益率为市值口径（含跳空越过 {{ dcaTpLabel(dcaRoundsTp) }} 的部分）
+                统计口径：近 10 年窗口 · 止盈线 <b>{{ dcaTpLabel(dcaRoundsTp) }}</b> · 费用口径：<b>{{ dcaRoundsFeeLabel }}</b>（申购费外扣折份额、赎回费按每笔持有天数阶梯）· 间隔=距上次止盈天数（首次止盈从本轮首次买入起算）· 实际收益率为市值口径（含跳空越过 {{ dcaTpLabel(dcaRoundsTp) }} 的部分）
               <div class="src-seg" v-if="!STATIC_MODE" style="margin: 0 0 10px"
                    title="切换止盈线：下方统计与轮次表跟随；曲线同时叠加全部档位止盈点（颜色=档位，实心大三角=当前查看档位）；不影响页面排行阈值">
                 <button v-for="t in DCA_TP_OPTIONS" :key="t"
@@ -2915,24 +2956,41 @@ watch(
                         @click="onDcaRoundsTpChange(t)"
                         :data-modal-tp="t">{{ dcaTpLabel(t) }}</button>
               </div>
+              <div class="src-seg" v-if="!STATIC_MODE" style="margin: 0 0 10px"
+                   title="切换费率口径：轮次表/费用字段/总收益率与年化跟随（份额随申购费折损，轮次可能位移）；不影响页面费率开关">
+                <button v-for="o in DCA_FEE_OPTIONS" :key="o.key"
+                        class="src-seg-btn"
+                        :class="{ active: dcaRoundsFee === o.key }"
+                        @click="onDcaRoundsFeeChange(o.key)"
+                        :data-modal-fee="o.key">{{ o.label }}</button>
+              </div>
               </p>
-              <div v-if="dcaRounds.totals?.rounds" class="dc-grid"
-                style="grid-template-columns: repeat(4, 1fr); margin: 0 0 12px">
+              <div class="dc-grid" style="grid-template-columns: repeat(3, 1fr); margin: 0 0 12px">
                 <div class="dc-item">
-                  <div class="dc-label">已止盈轮次</div>
-                  <div class="dc-value">{{ dcaRounds.totals.rounds }} 轮</div>
+                  <div class="dc-label">已止盈轮次<span class="dc-hint">已了结</span></div>
+                  <div class="dc-value">{{ dcaRounds.totals?.rounds || 0 }} 轮</div>
                 </div>
                 <div class="dc-item">
                   <div class="dc-label">累计投入（已了结轮次）</div>
-                  <div class="dc-value">{{ fmt(dcaRounds.totals.invested) }} 元</div>
+                  <div class="dc-value">{{ fmt(dcaRounds.totals?.invested) }} 元</div>
                 </div>
                 <div class="dc-item">
                   <div class="dc-label">累计净收益（扣费后）</div>
-                  <div class="dc-value"><b :class="dcaRounds.totals.net_profit >= 0 ? 'pos' : 'neg'">{{ fmt(dcaRounds.totals.net_profit) }}</b> 元</div>
+                  <div class="dc-value"><b :class="(dcaRounds.totals?.net_profit || 0) >= 0 ? 'pos' : 'neg'">{{ fmt(dcaRounds.totals?.net_profit) }}</b> 元</div>
                 </div>
                 <div class="dc-item">
                   <div class="dc-label">费用合计（申购+赎回）</div>
-                  <div class="dc-value">{{ fmt(dcaRounds.totals.sub_fee) }} + {{ fmt(dcaRounds.totals.redeem_fee) }} 元</div>
+                  <div class="dc-value">{{ fmt(dcaRounds.totals?.sub_fee) }} + {{ fmt(dcaRounds.totals?.redeem_fee) }} 元</div>
+                </div>
+                <div class="dc-item">
+                  <div class="dc-label">总收益率·近10年<span class="dc-hint">{{ dcaRoundsFeeLabel }}</span></div>
+                  <div class="dc-value"><span v-if="summaryFeeVal(dcaRoundsSummaryRow, 'w10_profit_rate') != null"
+                    :class="summaryFeeVal(dcaRoundsSummaryRow, 'w10_profit_rate') >= 0 ? 'chg-up' : 'chg-down'">{{ pct1(summaryFeeVal(dcaRoundsSummaryRow, 'w10_profit_rate')) }}</span><span v-else>—</span></div>
+                </div>
+                <div class="dc-item">
+                  <div class="dc-label">年化 XIRR·近10年<span class="dc-hint">{{ dcaRoundsFeeLabel }}</span></div>
+                  <div class="dc-value"><span v-if="summaryFeeVal(dcaRoundsSummaryRow, 'w10_xirr') != null"
+                    :class="summaryFeeVal(dcaRoundsSummaryRow, 'w10_xirr') >= 0 ? 'chg-up' : 'chg-down'">{{ pct1(summaryFeeVal(dcaRoundsSummaryRow, 'w10_xirr')) }}</span><span v-else>—</span></div>
                 </div>
               </div>
               <div v-show="dcaRoundsNavs.length" ref="dcaRoundsChartEl"

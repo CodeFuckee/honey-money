@@ -14,7 +14,10 @@
 - E2E-431 弹窗内档位切换：弹窗按钮组切 15% → tp rounds 请求 + 统计/表跟随，
   页面级阈值不变（弹窗局部状态）；
 - E2E-432 全档位止盈点叠加：净值曲线 scatter series 仅含有轮次档位（15%/20%）、
-  颜色互不相同（__dcaRoundsChart 钩子断言 option）。
+  颜色互不相同（__dcaRoundsChart 钩子断言 option）；
+- E2E-433 弹窗总收益率/年化卡：显示当前档位+费率口径的 w10 值，切档位/费率跟随；
+- E2E-434 弹窗费率切换：切 gross → rounds 请求带 fee=gross、卡值取原列，
+  页面级费率按钮不受波及（弹窗局部状态）。
 运行：python -m pytest tests/e2e/test_fund_dca_tp_page.py
 """
 
@@ -115,6 +118,39 @@ def _rounds_body_for(tp: float) -> dict:
             "rounds": [], "totals": dict(_EMPTY_ROUNDS)}
 
 
+# 单基金全阈值总收益率/年化汇总（gross 原列 / _disc / _nom 后缀，w10 窗口）；
+# 15%/20% 取不同值供切换断言
+TP_SUMMARY_BODY = {
+    "status": "up", "code": "019387",
+    "rows": [
+        {"tp": 0.05, "w10_profit_rate": 0.30, "w10_xirr": 0.40,
+         "w10_profit_rate_disc": 0.29, "w10_xirr_disc": 0.38,
+         "w10_profit_rate_nom": 0.28, "w10_xirr_nom": 0.36},
+        {"tp": 0.10, "w10_profit_rate": 0.22, "w10_xirr": 0.60,
+         "w10_profit_rate_disc": 0.21, "w10_xirr_disc": 0.57,
+         "w10_profit_rate_nom": 0.20, "w10_xirr_nom": 0.55},
+        {"tp": 0.15, "w10_profit_rate": 0.16, "w10_xirr": 0.90,
+         "w10_profit_rate_disc": 0.158, "w10_xirr_disc": 0.885,
+         "w10_profit_rate_nom": 0.155, "w10_xirr_nom": 0.87},
+        {"tp": 0.20, "w10_profit_rate": 0.18, "w10_xirr": 1.003,
+         "w10_profit_rate_disc": 0.175, "w10_xirr_disc": 0.96,
+         "w10_profit_rate_nom": 0.17, "w10_xirr_nom": 0.92},
+        {"tp": 0.25, "w10_profit_rate": 0.12, "w10_xirr": 0.70,
+         "w10_profit_rate_disc": 0.115, "w10_xirr_disc": 0.68,
+         "w10_profit_rate_nom": 0.11, "w10_xirr_nom": 0.65},
+        {"tp": 0.30, "w10_profit_rate": None, "w10_xirr": None,
+         "w10_profit_rate_disc": None, "w10_xirr_disc": None,
+         "w10_profit_rate_nom": None, "w10_xirr_nom": None},
+        {"tp": 0.35, "w10_profit_rate": None, "w10_xirr": None,
+         "w10_profit_rate_disc": None, "w10_xirr_disc": None,
+         "w10_profit_rate_nom": None, "w10_xirr_nom": None},
+        {"tp": 0.40, "w10_profit_rate": None, "w10_xirr": None,
+         "w10_profit_rate_disc": None, "w10_xirr_disc": None,
+         "w10_profit_rate_nom": None, "w10_xirr_nom": None},
+    ],
+}
+
+
 @pytest.fixture
 def mock_tp(page):
     """mock /api/funds/dca/tp*（排行/对比/轮次三端点，记录请求 URL 供参数断言）。
@@ -127,7 +163,10 @@ def mock_tp(page):
         url = route.request.url
         calls.append(url)
         qs = parse_qs(urlparse(url).query)
-        if "/api/funds/dca/tp/compare" in url:
+        if re.search(r"/api/funds/dca/tp/[^/?]+/summary", url):
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps(TP_SUMMARY_BODY))
+        elif "/api/funds/dca/tp/compare" in url:
             body = {**TP_COMPARE_BODY,
                     "fee": (qs.get("fee") or ["nom"])[0]}
             route.fulfill(status=200, content_type="application/json",
@@ -311,3 +350,51 @@ class TestDcaTp:
             "colors: s.map(x => x.itemStyle && x.itemStyle.color) }; })()")
         assert set(info["names"]) == {"15%", "20%"}, info
         assert len(info["colors"]) == 2 and info["colors"][0] != info["colors"][1], info
+
+    def test_modal_summary_cards_follow_tp_and_fee(self, servers, page,
+                                                   mock_dca, mock_tp,
+                                                   mock_rounds_navs):
+        """E2E-433：弹窗总收益率/年化卡显示当前档位+费率口径的 w10 值，
+        切档位、切费率均跟随。"""
+        _, frontend_port = servers
+        open_dca(page, frontend_port)
+        page.locator(".browse-pv tbody tr", has_text="019387") \
+            .locator(".detail-btn").click()
+        dlg = page.locator(".p-dialog", has_text="每次止盈明细")
+        expect(dlg).to_be_visible()
+        grid = dlg.locator(".dc-grid").first
+        # 初始：页面 tp=20% + 弹窗费率 nom → 0.20 行 nom 后缀
+        expect(grid).to_contain_text("总收益率·近10年")
+        expect(grid).to_contain_text("+17.0%")
+        expect(grid).to_contain_text("年化 XIRR·近10年")
+        expect(grid).to_contain_text("+92.0%")
+        # 切弹窗档位 15% → 0.15 行 nom
+        dlg.locator('button[data-modal-tp="0.15"]').click()
+        expect(grid).to_contain_text("+15.5%", timeout=10_000)
+        expect(grid).to_contain_text("+87.0%")
+        # 切弹窗费率 gross → 0.15 行原列
+        dlg.locator('button[data-modal-fee="gross"]').click()
+        expect(grid).to_contain_text("+16.0%", timeout=10_000)
+        expect(grid).to_contain_text("+90.0%")
+
+    def test_modal_fee_switcher_local(self, servers, page, mock_dca, mock_tp,
+                                      mock_rounds_navs):
+        """E2E-434：弹窗内切 gross → rounds 请求带 fee=gross；
+        页面级费率按钮（data-table-fee=nom）active 不变。"""
+        _, frontend_port = servers
+        open_dca(page, frontend_port)
+        page.locator(".browse-pv tbody tr", has_text="019387") \
+            .locator(".detail-btn").click()
+        dlg = page.locator(".p-dialog", has_text="每次止盈明细")
+        expect(dlg).to_be_visible()
+        expect(dlg.locator('button[data-modal-fee="nom"]')
+              ).to_have_class(re.compile("active"))
+        dlg.locator('button[data-modal-fee="gross"]').click()
+        expect(dlg.locator('button[data-modal-fee="gross"]')
+              ).to_have_class(re.compile("active"), timeout=10_000)
+        rounds_calls = [u for u in mock_tp
+                        if re.search(r"/api/funds/dca/tp/[^/?]+/rounds", u)
+                        and "fee=gross" in u]
+        assert rounds_calls, mock_tp
+        page_fee_btn = page.locator('button[data-table-fee="nom"]')
+        expect(page_fee_btn).to_have_class(re.compile("active"))

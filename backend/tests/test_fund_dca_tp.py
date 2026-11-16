@@ -429,6 +429,35 @@ class TestDcaTpRoutes:
                           params={"tp": "0.99"})
         assert resp.json()["tp"] == 0.2
 
+    def test_tp_summary_degrades(self, client, monkeypatch):
+        """summary 端点：PG 不可达仍 200 down（降级约定同旧端点）。"""
+        monkeypatch.setattr("app.config.DATABASE_URL", DEAD_DSN)
+        resp = client.get("/api/funds/dca/tp/000001/summary")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "down" and body["rows"] == []
+        assert body["code"] == "000001"
+
+    def test_tp_summary_sql_and_rows(self, client, monkeypatch):
+        """summary SQL 形状：WHERE code 精确匹配 ORDER BY tp；行映射带
+        三口径总收益率/年化字段并四舍五入。"""
+        import app.dca_api as dca_mod
+        row = (0.15, 0.20, 0.12, 0.19, 0.11, 0.18, 0.10)
+        conn = FakeConnOne(None, rows=[row])
+        _patch_connect(monkeypatch, dca_mod, conn)
+        resp = client.get("/api/funds/dca/tp/000001/summary")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "up" and body["code"] == "000001"
+        r = body["rows"][0]
+        assert r["tp"] == 0.15
+        assert r["w10_profit_rate"] == 0.20 and r["w10_xirr"] == 0.12
+        assert r["w10_profit_rate_disc"] == 0.19
+        assert r["w10_xirr_nom"] == 0.10
+        assert "tp = %s" not in "".join(conn.executed)
+        assert any("WHERE code = %s" in sql and "ORDER BY tp" in sql
+                   for sql in conn.executed)
+
 
 class FakeConnOne:
     """fetchone/fetchall 可配置的最小连接桩（psycopg.connect 替身）。"""
