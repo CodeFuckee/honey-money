@@ -600,6 +600,30 @@ function onDcaTimingSort(e) {
   dcaTimingPage.value = 0
   loadDcaTiming()
 }
+
+// ===== 起点条件回测区块（假设验证统计：不同起点开始定投的结果差异；
+// 静态快照 fund_dip_validation，验证重跑后刷新，不随口径变化）
+const dcaDipReport = ref(null)
+async function loadDcaDipReport() {
+  if (STATIC_MODE) return
+  try {
+    const r = await fetch('/api/funds/dca/dip-report')
+    dcaDipReport.value = await r.json()
+  } catch (e) {
+    dcaDipReport.value = { status: 'down', detail: String(e), groups: [],
+                           buckets: [], years: [] }
+  }
+}
+const dipDay = v => v == null ? '—' : Math.round(v).toLocaleString() + ' 天'
+const dipPct = v => v == null ? '—' : (v * 100).toFixed(1) + '%'
+const DIP_BUCKET_LABELS = { '20-25': '回撤 -20%~-25%', '25-30': '回撤 -25%~-30%', '30+': '回撤 -30% 以上' }
+function dipRowLabel(r) {
+  if (r.bucket === 'all') {
+    return { SYS: '随机起点（基线）', NODIP: '非深回撤起点', DIP: '深回撤起点（≥20%）' }[r.grp] || r.grp
+  }
+  if (r.grp === 'DIP') return DIP_BUCKET_LABELS[r.bucket] || r.bucket
+  return `${r.bucket} 年起`
+}
 // 年限/规模输入即时生效：model 随键入更新，但 InputNumber 在值未再变时回车不发
 // change 事件（清空后回车失灵实测）——对两个输入防抖 400ms 直接触发搜索
 let _dcaFilterTimer = null
@@ -1141,7 +1165,7 @@ const _onFundResize = () => fundChartInstance && fundChartInstance.resize()
 
 watch(activeNav, (nav, prev) => {
   if (nav === 'funds') loadFunds()
-  if (nav === 'fundDca') { loadDca(); loadDcaScatter(); loadDcaTpCompare(); loadDcaTiming() }
+  if (nav === 'fundDca') { loadDca(); loadDcaScatter(); loadDcaTpCompare(); loadDcaTiming(); loadDcaDipReport() }
   if (nav === 'fund' && fund.value) {
     loadFundChart()
     loadFundDetail()
@@ -2951,6 +2975,48 @@ watch(
                 </DataTable>
               </div>
               <p class="note" style="margin: 10px 0 0">当前回撤 = 复权净值距历史最高的跌幅（日更顺带刷新）· 「甜蜜点」结论来自 2015~2026 权益基金 98 万起点历史模拟（-25~-30% 回撤起定投首轮止盈中位 582 天、成功率 63.2%、年化 32.0%，20% 止盈线含费口径）· 历史统计不构成任何操作建议 · 点行「详情」查看该基金每轮止盈明细（与排行共用弹窗）</p>
+            </div>
+
+            <!-- ===== 起点条件回测（不同起点开始定投的结果差异；假设验证统计静态快照） ===== -->
+            <div class="card dip-report-block" v-if="!STATIC_MODE && dcaDipReport" style="margin-top: 16px; padding: 14px 16px 18px">
+              <div class="toolbar" style="margin: 0 0 6px">
+                <div>
+                  <h2 class="h1" style="font-size: 18px">起点条件回测：什么时候开始定投，结果差多少？</h2>
+                  <p class="sub">同一「月定投 + 止盈重来」策略从不同起点开始（权益基金 2015~2026 全历史、98 万个起点、每起点独立模拟到首轮止盈）· 每行 = 首轮止盈天数分位 / 3 年内止盈成功率 / 首轮资金加权年化（XIRR）· 无费口径 · 静态验证快照（重跑后刷新）</p>
+                </div>
+              </div>
+              <div v-if="dcaDipReport.status === 'down'" class="browse-empty">
+                起点条件回测数据不可用：{{ dcaDipReport.detail || '数据库连接失败' }}
+              </div>
+              <template v-else>
+                <template v-for="sec in [
+                    { key: 'groups', title: '起点位置三组对照（止盈线 20%）' },
+                    { key: 'buckets', title: '深回撤起点：按最大回撤深度分桶（止盈线 20%）' },
+                    { key: 'years', title: '起点年份（随机起点，止盈线 20%）' }]">
+                  <h3 style="font-size: 14px; margin: 12px 0 6px">{{ sec.title }}</h3>
+                  <div style="overflow-x: auto">
+                    <table class="dca-matrix" style="width: 100%; min-width: 560px">
+                      <thead><tr>
+                        <th>起点条件</th><th>样本数</th><th>首轮止盈中位</th><th>P25</th><th>P75</th><th>3 年内止盈成功率</th><th>首轮年化中位</th><th>年化 P25</th><th>年化 P75</th>
+                      </tr></thead>
+                      <tbody>
+                        <tr v-for="r in dcaDipReport[sec.key]" :key="r.grp + r.bucket + r.tp">
+                          <td>{{ dipRowLabel(r) }}</td>
+                          <td>{{ r.n == null ? '—' : r.n.toLocaleString() }}</td>
+                          <td>{{ dipDay(r.days_median) }}</td>
+                          <td>{{ dipDay(r.days_p25) }}</td>
+                          <td>{{ dipDay(r.days_p75) }}</td>
+                          <td>{{ dipPct(r.success_rate) }}</td>
+                          <td>{{ dipPct(r.xirr_median) }}</td>
+                          <td>{{ dipPct(r.xirr_p25) }}</td>
+                          <td>{{ dipPct(r.xirr_p75) }}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </template>
+                <p class="note" style="margin: 10px 0 0">口径：每月首个净值日投 1000 元（无费口径），任一净值日市值 ≥ 投入×(1+止盈线) 即首轮止盈并结束该次模拟；「3 年内止盈成功率」分母含数据结束仍未触发者（"起不来"如实计入）· 深回撤起点 = 回撤进入 ≥20% 的首日（不知是否谷底）· 「甜蜜点」在 -25%~-30% 桶（快/成功率高/年化高），&gt;-30% 超深回撤显著变差 · 历史统计不构成任何操作建议</p>
+              </template>
             </div>
             <p class="note" v-if="STATIC_MODE && dca.meta?.generated_at"
               style="margin: 0 0 8px">静态快照（GitHub Pages）· 数据生成于 {{ dca.meta.generated_at.slice(0, 10) }} · 明细不含净值曲线 · 实时数据以内网部署为准</p>

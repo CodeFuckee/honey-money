@@ -386,6 +386,13 @@ def register_fund_dca_routes(app):
                                 fee=fee.strip().lower(),
                                 equity=_parse_equity(equity))
 
+    @app.get("/api/funds/dca/dip-report")
+    def funds_dca_dip_report():
+        """起点条件回测报告（假设验证统计：三组对照/回撤深度梯度/起点年份，
+        各组首轮止盈天数分位、3 年成功率、首轮年化分位）。静态快照，验证
+        重跑后刷新。历史统计不构成操作建议。降级约定同 /api/funds/dca。"""
+        return fetch_dca_dip_report(config.DATABASE_URL)
+
 
 
 # ===== 三维散点（每基金一点）+ 年限段 × 规模段 分箱统计 =====
@@ -933,3 +940,47 @@ def fetch_dca_timing(dsn: str, *, tp: float = TAKE_PROFIT, band: str = "25-30",
                        "tp": tp, "band": band, "total": 0, "limit": limit,
                        "offset": offset, "equity": bool(equity),
                        "rows": []})
+
+
+_DIP_REPORT_SQL = """
+SELECT grp, bucket, tp, n, days_median, days_p25, days_p75,
+       success_rate, xirr_median, xirr_p25, xirr_p75
+FROM fund_dip_validation ORDER BY grp, bucket, tp
+"""
+
+
+def fetch_dca_dip_report(dsn: str) -> dict:
+    """起点条件回测报告（假设验证统计，scratch/dip_validation.py 落库）。
+
+    按 grp+bucket 形态分拣：groups = 三组对照（SYS 随机基线 / NODIP 非深
+    回撤 / DIP 深回撤，bucket='all'）；buckets = DIP 按事件最大回撤分桶；
+    years = SYS 按起点年份。静态统计快照（验证重跑后刷新），只读全表。
+    降级约定同旧端点。
+    """
+
+    def run():
+        with psycopg.connect(dsn, connect_timeout=3) as conn:
+            with conn.cursor() as cur:
+                cur.execute(_DIP_REPORT_SQL)
+                rows = cur.fetchall()
+        groups, buckets, years, tp_list = [], [], [], []
+        for (grp, bucket, tp, n, dm, dp, dp75, sr, xm, xp, xp75) in rows:
+            item = {"grp": grp, "bucket": bucket, "tp": tp, "n": n,
+                    "days_median": dm, "days_p25": dp, "days_p75": dp75,
+                    "success_rate": round(sr, 4) if sr is not None else None,
+                    "xirr_median": round(xm, 4) if xm is not None else None,
+                    "xirr_p25": round(xp, 4) if xp is not None else None,
+                    "xirr_p75": round(xp75, 4) if xp75 is not None else None}
+            if bucket == "all" and grp in ("SYS", "NODIP", "DIP"):
+                groups.append(item)
+            elif grp == "DIP":
+                buckets.append(item)
+            elif grp == "SYS":
+                years.append(item)
+            if tp not in tp_list:
+                tp_list.append(tp)
+        return {"status": "up", "tp_list": sorted(tp_list),
+                "groups": groups, "buckets": buckets, "years": years}
+    return _safe(run, {"status": "down", "detail": "pg unreachable",
+                       "tp_list": [], "groups": [], "buckets": [],
+                       "years": []})

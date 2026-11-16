@@ -307,6 +307,22 @@ CREATE TABLE IF NOT EXISTS fund_dip_timing (
   computed_at     DATE
 );
 CREATE INDEX IF NOT EXISTS idx_fund_dip_band ON fund_dip_timing (dip_band);
+
+-- 起点条件回测报告（假设验证统计落库：三组对照/深度桶/起点年份 × 止盈线）
+CREATE TABLE IF NOT EXISTS fund_dip_validation (
+  grp             VARCHAR(8) NOT NULL,
+  bucket          VARCHAR(16) NOT NULL,
+  tp              DOUBLE PRECISION NOT NULL,
+  n               INTEGER,
+  days_median     INTEGER,
+  days_p25        INTEGER,
+  days_p75        INTEGER,
+  success_rate    DOUBLE PRECISION,
+  xirr_median     DOUBLE PRECISION,
+  xirr_p25        DOUBLE PRECISION,
+  xirr_p75        DOUBLE PRECISION,
+  PRIMARY KEY (grp, bucket, tp)
+);
 """
 
 _TP_COLS = ["tp"] + _COLS
@@ -397,6 +413,25 @@ def import_timing(conn, rows: list[tuple]) -> int:
         cur.execute("DELETE FROM fund_dip_timing")
         if rows:
             cur.executemany(_TIMING_INSERT, rows)
+    return len(rows)
+
+
+_VALIDATION_COLS = ["grp", "bucket", "tp", "n", "days_median", "days_p25",
+                    "days_p75", "success_rate", "xirr_median", "xirr_p25",
+                    "xirr_p75"]
+_VALIDATION_INSERT = f"""
+INSERT INTO fund_dip_validation ({", ".join(_VALIDATION_COLS)})
+VALUES ({", ".join(["%s"] * len(_VALIDATION_COLS))})
+"""
+
+
+def import_dip_validation(conn, rows: list[tuple]) -> int:
+    """验证报告整表替换（三维度共用一张表，重跑后旧数据不得残留）；
+    事务由调用方提交。"""
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM fund_dip_validation")
+        if rows:
+            cur.executemany(_VALIDATION_INSERT, rows)
     return len(rows)
 
 
