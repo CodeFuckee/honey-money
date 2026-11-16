@@ -11,6 +11,10 @@
   （旧端点，无 tp 查询参数）；
 - E2E-429 深链接：/data/fund-dca?tp=0.25 → 首个列表请求即带 tp=0.25；
 - E2E-430 费率口径联动：切「不含费」→ 对比请求带 fee=gross。
+- E2E-431 弹窗内档位切换：弹窗按钮组切 15% → tp rounds 请求 + 统计/表跟随，
+  页面级阈值不变（弹窗局部状态）；
+- E2E-432 全档位止盈点叠加：净值曲线 scatter series 仅含有轮次档位（15%/20%）、
+  颜色互不相同（__dcaRoundsChart 钩子断言 option）。
 运行：python -m pytest tests/e2e/test_fund_dca_tp_page.py
 """
 
@@ -85,6 +89,31 @@ TP_ROUNDS_BODY = {
                "sub_fee": 4.43, "redeem_fee": 15.0},
 }
 
+# 20% 档独立形状（日期/轮次不同，供多档位叠加与切换断言区分）
+TP_ROUNDS_20_BODY = {
+    "status": "up", "code": "019387", "fee": "nom", "tp": 0.20,
+    "rounds": [
+        {"seq": 1, "tp_date": "2024-06-20", "round_days": 171, "gap_days": 171,
+         "profit": 0.243, "tp_nav": 1.243, "invested": 6000.0,
+         "sub_fee": 8.86, "redeem_fee": 30.0, "net_profit": 1420.4},
+    ],
+    "totals": {"rounds": 1, "invested": 6000.0, "net_profit": 1420.4,
+               "sub_fee": 8.86, "redeem_fee": 30.0},
+}
+
+_EMPTY_ROUNDS = {"rounds": 0, "invested": 0, "net_profit": 0,
+                 "sub_fee": 0, "redeem_fee": 0}
+
+
+def _rounds_body_for(tp: float) -> dict:
+    """按 tp 返回独立形状：15%/20% 各有 1 轮（多档位叠加断言），其余档空。"""
+    if tp == 0.15:
+        return TP_ROUNDS_BODY
+    if tp == 0.20:
+        return TP_ROUNDS_20_BODY
+    return {"status": "up", "code": "019387", "fee": "nom", "tp": tp,
+            "rounds": [], "totals": dict(_EMPTY_ROUNDS)}
+
 
 @pytest.fixture
 def mock_tp(page):
@@ -104,8 +133,7 @@ def mock_tp(page):
             route.fulfill(status=200, content_type="application/json",
                           body=json.dumps(body))
         elif re.search(r"/api/funds/dca/tp/[^/?]+/rounds", url):
-            body = {**TP_ROUNDS_BODY,
-                    "tp": float((qs.get("tp") or ["0.2"])[0])}
+            body = _rounds_body_for(float((qs.get("tp") or ["0.2"])[0]))
             route.fulfill(status=200, content_type="application/json",
                           body=json.dumps(body))
         else:
@@ -131,6 +159,10 @@ def mock_rounds_navs(page):
             "status": "up", "code": "019387", "navs": [
                 {"date": "2023-11-28", "unit_nav": 1.0, "accum_nav": 1.0,
                  "pct_chg": 0, "unit_money": None, "source": "fund_em"},
+                {"date": "2024-03-05", "unit_nav": 1.163, "accum_nav": 1.163,
+                 "pct_chg": 1.0, "unit_money": None, "source": "fund_em"},
+                {"date": "2024-06-20", "unit_nav": 1.243, "accum_nav": 1.243,
+                 "pct_chg": 1.0, "unit_money": None, "source": "fund_em"},
                 {"date": "2026-10-28", "unit_nav": 1.1, "accum_nav": 1.1,
                  "pct_chg": 0.2, "unit_money": None, "source": "fund_em"}]})))
 
@@ -191,7 +223,8 @@ class TestDcaTp:
         expect(dlg).to_contain_text("16.3%")       # 轮次市值口径收益
         rounds_calls = [u for u in mock_tp
                         if re.search(r"/api/funds/dca/tp/[^/?]+/rounds", u)]
-        assert rounds_calls and "tp=0.15" in rounds_calls[-1], mock_tp
+        # 弹窗打开会并发拉全档位 rounds；只断言“存在当前档位请求”
+        assert any("tp=0.15" in u for u in rounds_calls), mock_tp
 
     def test_switch_back_uses_legacy_endpoint(self, servers, page, mock_dca,
                                               mock_tp, mock_rounds_navs):
@@ -231,3 +264,50 @@ class TestDcaTp:
               ).to_contain_text("20%", timeout=10_000)
         compare_calls = [u for u in mock_tp if "/compare" in u]
         assert compare_calls and "fee=gross" in compare_calls[-1], mock_tp
+
+    def test_modal_tp_switcher_local(self, servers, page, mock_dca, mock_tp,
+                                     mock_rounds_navs):
+        """E2E-431：弹窗内按钮组切 15% → tp rounds 请求 + 表跟随；
+        页面级阈值仍为 20%（弹窗局部状态独立）。"""
+        _, frontend_port = servers
+        open_dca(page, frontend_port)
+        page.locator(".browse-pv tbody tr", has_text="019387") \
+            .locator(".detail-btn").click()
+        dlg = page.locator(".p-dialog", has_text="每次止盈明细")
+        expect(dlg).to_be_visible()
+        expect(dlg.locator('button[data-modal-tp="0.15"]')).to_be_visible()
+        expect(dlg).to_contain_text("止盈线 20%")     # 初始 = 页面阈值
+        dlg.locator('button[data-modal-tp="0.15"]').click()
+        expect(dlg).to_contain_text("止盈线 15%", timeout=10_000)
+        expect(dlg).to_contain_text("第 1 次")          # 15% 轮次表有数据
+        rounds_calls = [u for u in mock_tp
+                        if re.search(r"/api/funds/dca/tp/[^/?]+/rounds", u)]
+        assert any("tp=0.15" in u for u in rounds_calls), mock_tp
+        # 页面级阈值未被弹窗切换波及
+        page_btn = page.locator('button[data-tp="0.2"]')
+        expect(page_btn).to_have_class(re.compile("active"))
+
+    def test_modal_chart_overlays_all_thresholds(self, servers, page,
+                                                 mock_dca, mock_tp,
+                                                 mock_rounds_navs):
+        """E2E-432：净值曲线同时叠加全部有轮次档位的止盈三角且颜色互不相同
+        （15%/20% mock 有数据 → scatter series = 2）。"""
+        _, frontend_port = servers
+        open_dca(page, frontend_port)
+        page.locator(".browse-pv tbody tr", has_text="019387") \
+            .locator(".detail-btn").click()
+        dlg = page.locator(".p-dialog", has_text="每次止盈明细")
+        expect(dlg).to_be_visible()
+        # 全档位 rounds（8 并发）到达后重渲染：scatter series = 15%/20% 两档
+        page.wait_for_function(
+            "window.__dcaRoundsChart && "
+            "window.__dcaRoundsChart.getOption().series"
+            ".filter(s => s.type === 'scatter').length >= 2",
+            timeout=15_000)
+        info = page.evaluate(
+            "(() => { const s = window.__dcaRoundsChart.getOption().series"
+            ".filter(x => x.type === 'scatter');"
+            "return { names: s.map(x => x.name),"
+            "colors: s.map(x => x.itemStyle && x.itemStyle.color) }; })()")
+        assert set(info["names"]) == {"15%", "20%"}, info
+        assert len(info["colors"]) == 2 and info["colors"][0] != info["colors"][1], info

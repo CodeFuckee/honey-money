@@ -412,6 +412,13 @@ const dcaTp = ref(0.20)
 const dcaTpCompare = ref(null)
 const dcaTpLoading = ref(false)
 const dcaTpLabel = tp => (tp * 100).toFixed(0) + '%'
+// 弹窗局部阈值（独立于页面级 dcaTp：弹窗内切换只改本弹窗的统计/轮次表，
+// 不波及排行）；dcaRoundsAll 为全档位轮次（图上叠加全部止盈点，颜色按档位）
+const dcaRoundsTp = ref(0.20)
+const dcaRoundsAll = ref({})
+const DCA_TP_COLORS = { 0.05: '#E69F00', 0.10: '#56B4E9', 0.15: '#009E73',
+  0.20: '#D55E00', 0.25: '#CC79A7', 0.30: '#0072B2',
+  0.35: '#999999', 0.40: '#111111' }
 
 let dcaAllRows = []   // 静态模式：全量行一次加载，之后纯客户端过滤/排序/分页
 
@@ -693,6 +700,7 @@ const dcaRoundsChartEl = ref(null)
 
 function disposeDcaRoundsChart() {
   if (dcaRoundsChart) { dcaRoundsChart.dispose(); dcaRoundsChart = null }
+  window.__dcaRoundsChart = null
 }
 
 // 复权净值链（与回测同口径：pct_chg 已是分红再投；缺失用单位净值比兜底）
@@ -724,6 +732,8 @@ function openDcaRounds(e) {
   dcaRoundsFund.value = { code: data.code, name: data.name }
   dcaRounds.value = { status: 'loading', rounds: [] }
   dcaRoundsNavs.value = []
+  dcaRoundsTp.value = dcaTp.value        // 弹窗局部阈值从页面当前档位起步
+  dcaRoundsAll.value = {}
   disposeDcaRoundsChart()
   dcaRoundsVisible.value = true
   const emptyRounds = () => ({ status: 'up', code: data.code, fee: dcaFeeMode.value,
@@ -771,6 +781,35 @@ function openDcaRounds(e) {
       nextTick(() => renderDcaRoundsChart())
     })
     .catch(() => { dcaRoundsNavs.value = [] })
+  loadDcaRoundsAll(data.code)
+}
+
+// 全档位轮次（8 并发，图上叠加全部止盈点三角）；到达后重渲染曲线。
+// 只写 dcaRoundsAll 不动 dcaRounds——弹窗统计/轮次表始终跟随 dcaRoundsTp。
+function loadDcaRoundsAll(code) {
+  Promise.all(DCA_TP_OPTIONS.map(tp =>
+    fetch(`/api/funds/dca/tp/${code}/rounds?fee=${dcaFeeMode.value}&tp=${tp}`)
+      .then(r => r.json()).then(b => [tp, (b && b.rounds) || []])
+      .catch(() => [tp, []])
+  )).then(entries => {
+    dcaRoundsAll.value = Object.fromEntries(entries)
+    nextTick(() => renderDcaRoundsChart())
+  })
+}
+
+// 弹窗内切换止盈点：统计卡与轮次表跟随（tp 端点），图上当前档位三角高亮
+function onDcaRoundsTpChange(tp) {
+  if (dcaRoundsTp.value === tp || !dcaRoundsFund.value) return
+  dcaRoundsTp.value = tp
+  const code = dcaRoundsFund.value.code
+  dcaRounds.value = { status: 'loading', rounds: [] }
+  fetch(`/api/funds/dca/tp/${code}/rounds?fee=${dcaFeeMode.value}&tp=${tp}`)
+    .then(r => r.json())
+    .then(body => {
+      dcaRounds.value = body
+      nextTick(() => renderDcaRoundsChart())
+    })
+    .catch(err => { dcaRounds.value = { status: 'down', detail: String(err), rounds: [] } })
 }
 
 // 弹窗轮次行：附加累计净收益（按 seq 累加，已了结轮次口径）
@@ -789,16 +828,41 @@ function buildDcaRoundsChart() {
   const dates = chain.map(p => p.date)
   const adj = chain.map(p => p.value)
   const tpMap = new Map(chain.map(p => [p.date, p.value]))
-  const rounds = dcaRounds.value.rounds || []
-  const tpPts = rounds
-    .filter(r => r.tp_date && tpMap.has(r.tp_date))
-    .map(r => ({ value: [r.tp_date, tpMap.get(r.tp_date)],
-                 profit: r.profit, seq: r.seq, gap: r.gap_days }))
+  // 全档位止盈点叠加（静态冻结站只有 20% 单档数据 → 回落现状单档）
+  const all = (!STATIC_MODE && Object.keys(dcaRoundsAll.value).length)
+    ? dcaRoundsAll.value
+    : { [dcaRoundsTp.value]: dcaRounds.value.rounds || [] }
+  const tpSeries = DCA_TP_OPTIONS
+    .map(tp => {
+      const pts = (all[tp] || [])
+        .filter(r => r.tp_date && tpMap.has(r.tp_date))
+        .map(r => ({ value: [r.tp_date, tpMap.get(r.tp_date)],
+                     profit: r.profit, seq: r.seq, gap: r.gap_days }))
+      return { tp, pts }
+    })
+    .filter(({ pts }) => pts.length)
+    .map(({ tp, pts }) => {
+      const active = tp === dcaRoundsTp.value
+      return {
+        name: dcaTpLabel(tp), type: 'scatter', data: pts,
+        symbol: 'triangle', symbolSize: active ? 12 : 8, z: active ? 5 : 3,
+        itemStyle: { color: DCA_TP_COLORS[tp] || '#da1e28',
+                     opacity: active ? 1 : 0.35 },
+        tooltip: { formatter: (p) => {
+          const d = p.data
+          return `<b>${p.seriesName} · 第 ${d.seq} 次止盈</b><br/>${d.value[0]}<br/>` +
+            `实际收益率：${(d.profit * 100).toFixed(1)}%` +
+            (d.gap != null ? `<br/>距上次止盈：${d.gap} 天` : '')
+        } },
+      }
+    })
+  const hasPts = tpSeries.length > 0
   return {
     animation: false,
     tooltip: { trigger: 'axis' },
-    legend: rounds.length ? { data: ['复权净值', '止盈点'], top: 0 } : null,
-    grid: { left: 56, right: 16, top: rounds.length ? 30 : 16, bottom: 46 },
+    legend: hasPts ? { data: ['复权净值', ...tpSeries.map(x => x.name)],
+                       top: 0, itemWidth: 14, textStyle: { fontSize: 11 } } : null,
+    grid: { left: 56, right: 16, top: hasPts ? 30 : 16, bottom: 46 },
     dataZoom: [{ type: 'inside' }],
     xAxis: { type: 'category', data: dates, boundary: false,
              axisLabel: { fontSize: 10 } },
@@ -806,14 +870,7 @@ function buildDcaRoundsChart() {
     series: [
       { name: '复权净值', type: 'line', data: adj, showSymbol: false,
         lineStyle: { width: 1.3, color: '#0f62fe' } },
-      ...(rounds.length ? [{ name: '止盈点', type: 'scatter', data: tpPts,
-        symbol: 'triangle', symbolSize: 11, itemStyle: { color: '#da1e28' },
-        tooltip: { formatter: (p) => {
-          const d = p.data
-          return `<b>第 ${d.seq} 次止盈</b><br/>${d.value[0]}<br/>` +
-            `实际收益率：${(d.profit * 100).toFixed(1)}%` +
-            (d.gap != null ? `<br/>距上次止盈：${d.gap} 天` : '')
-        } } }] : []),
+      ...tpSeries,
     ],
   }
 }
@@ -824,6 +881,7 @@ function renderDcaRoundsChart() {
   if (!opt || !dcaRoundsChartEl.value) return
   dcaRoundsChart = echarts.init(dcaRoundsChartEl.value)
   dcaRoundsChart.setOption(opt)
+  window.__dcaRoundsChart = dcaRoundsChart      // E2E 断言钩子（series 检查）
 }
 const gapLabel = d => d == null ? '—' : `${d} 天（≈${(d / 30.44).toFixed(1)} 月）`
 
@@ -2848,7 +2906,15 @@ watch(
               :header="dcaRoundsFund ? `${dcaRoundsFund.code} ${dcaRoundsFund.name} · 每次止盈明细` : '每次止盈明细'"
               :style="{ width: '1000px' }" @hide="disposeDcaRoundsChart">
               <p class="sub" style="margin: 0 0 8px">
-                统计口径：近 10 年窗口 · 止盈线 <b>{{ dcaTpLabel(dcaTp) }}</b> · 费用口径：<b>{{ dcaFeeLabel }}</b>（申购费外扣折份额、赎回费按每笔持有天数阶梯，与排行/散点同一开关联动）· 间隔=距上次止盈天数（首次止盈从本轮首次买入起算）· 实际收益率为市值口径（含跳空越过 {{ dcaTpLabel(dcaTp) }} 的部分）
+                统计口径：近 10 年窗口 · 止盈线 <b>{{ dcaTpLabel(dcaRoundsTp) }}</b> · 费用口径：<b>{{ dcaFeeLabel }}</b>（申购费外扣折份额、赎回费按每笔持有天数阶梯，与排行/散点同一开关联动）· 间隔=距上次止盈天数（首次止盈从本轮首次买入起算）· 实际收益率为市值口径（含跳空越过 {{ dcaTpLabel(dcaRoundsTp) }} 的部分）
+              <div class="src-seg" v-if="!STATIC_MODE" style="margin: 0 0 10px"
+                   title="切换止盈线：下方统计与轮次表跟随；曲线同时叠加全部档位止盈点（颜色=档位，实心大三角=当前查看档位）；不影响页面排行阈值">
+                <button v-for="t in DCA_TP_OPTIONS" :key="t"
+                        class="src-seg-btn"
+                        :class="{ active: dcaRoundsTp === t }"
+                        @click="onDcaRoundsTpChange(t)"
+                        :data-modal-tp="t">{{ dcaTpLabel(t) }}</button>
+              </div>
               </p>
               <div v-if="dcaRounds.totals?.rounds" class="dc-grid"
                 style="grid-template-columns: repeat(4, 1fr); margin: 0 0 12px">
@@ -2873,10 +2939,10 @@ watch(
                 style="width: 100%; height: 300px; margin-bottom: 10px"></div>
               <p class="note" style="margin: 0 0 8px"
                 v-if="dcaRounds.rounds?.length && dcaRoundsNavs.length">
-                ▲ = 每轮止盈卖点 · 曲线为复权净值（分红再投，窗口起点=1，与回测同口径）
+                ▲ = 每轮止盈卖点（颜色对应止盈线档位，实心大三角=当前查看档位）· 曲线为复权净值（分红再投，窗口起点=1，与回测同口径）
               </p>
               <p class="note" style="margin: 0 0 8px" v-else-if="dcaRoundsNavs.length">
-                曲线为复权净值（分红再投，窗口起点=1，与回测同口径）· 该基金尚未止盈，仍可观察其净值走势
+                曲线为复权净值（分红再投，窗口起点=1，与回测同口径）· 该基金在该止盈线下尚未止盈，仍可观察其净值走势与其他档位止盈点
               </p>
               <div v-if="dcaRounds.status === 'down'" class="browse-empty">
                 明细不可用：{{ dcaRounds.detail || '数据库连接失败' }}
@@ -2903,7 +2969,7 @@ watch(
                 </table>
               </div>
               <div v-else-if="dcaRounds.status === 'loading'" class="browse-empty">加载中…</div>
-              <div v-else class="browse-empty">该基金在统计窗口内没有止盈记录（从未达到 +{{ dcaTpLabel(dcaTp) }}）</div>
+              <div v-else class="browse-empty">该基金在统计窗口内没有止盈记录（从未达到 +{{ dcaTpLabel(dcaRoundsTp) }}）</div>
             </Dialog>
 
             <!-- ===== 分箱格点击 → 格内基金清单 ===== -->
