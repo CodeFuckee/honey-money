@@ -144,7 +144,7 @@ async def _run_backtest_job(dsn: str, task: dict, progress,
         # "Can't get local object" 崩掉子进程任务）
         with concurrent.futures.ProcessPoolExecutor(max_workers=1,
                                                     mp_context=ctx) as pool:
-            old_rows, old_rounds, tp_rows, tp_rounds, stats = \
+            old_rows, old_rounds, tp_rows, tp_rounds, timing_rows, stats = \
                 await loop.run_in_executor(
                     pool, dca_backtest.run_full_backtest_tp, dsn)
     except Exception as exc:
@@ -181,6 +181,7 @@ async def _run_backtest_job(dsn: str, task: dict, progress,
         dca_store.import_rounds(conn, old_rounds)
         dca_store.import_tp_rows(conn, tp_rows, params=tp_params)
         dca_store.import_tp_rounds(conn, tp_rounds)
+        dca_store.import_timing(conn, timing_rows)
         store.finish_run(conn, run_id, total_stocks=stats["fund_count"],
                          ok_stocks=stats["fund_count"], failed_stocks=0,
                          bars_upserted=stats["round_count"], failures=[],

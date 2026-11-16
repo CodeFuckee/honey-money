@@ -297,6 +297,16 @@ CREATE TABLE IF NOT EXISTS fund_dca_tp_meta (
   fund_count   INTEGER,
   params       JSONB
 );
+
+-- 定投时机（当前回撤桶，2026-11-16 假设验证：-25~-30% 为甜蜜点、30%+ 警戒）
+CREATE TABLE IF NOT EXISTS fund_dip_timing (
+  code            VARCHAR(10) PRIMARY KEY,
+  dd_current      DOUBLE PRECISION,
+  days_since_peak INTEGER,
+  dip_band        VARCHAR(16),
+  computed_at     DATE
+);
+CREATE INDEX IF NOT EXISTS idx_fund_dip_band ON fund_dip_timing (dip_band);
 """
 
 _TP_COLS = ["tp"] + _COLS
@@ -372,6 +382,23 @@ def import_tp_rounds(conn, rows: list[tuple]) -> int:
         cur.execute(_RESET_GAP_TP)
         cur.execute(_APPLY_GAP_TP)
     return len(rows)
+
+_TIMING_COLS = ["code", "dd_current", "days_since_peak", "dip_band",
+                "computed_at"]
+_TIMING_INSERT = f"""
+INSERT INTO fund_dip_timing ({", ".join(_TIMING_COLS)})
+VALUES ({", ".join(["%s"] * len(_TIMING_COLS))})
+"""
+
+
+def import_timing(conn, rows: list[tuple]) -> int:
+    """时机表整体替换（DELETE+INSERT，日更顺带刷新）；事务由调用方提交。"""
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM fund_dip_timing")
+        if rows:
+            cur.executemany(_TIMING_INSERT, rows)
+    return len(rows)
+
 
 def import_rows(conn, rows: list[dict], *, params: dict | None = None) -> int:
     """快照整体替换（DELETE+INSERT）+ meta 单行 upsert；单事务由调用方提交。"""

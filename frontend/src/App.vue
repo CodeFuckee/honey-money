@@ -90,6 +90,7 @@ function buildQuery() {
     if (dcaScale.value) q.set('scale', dcaScale.value)
     if (dcaEquity.value) q.set('equity', '1')
     if (dcaTp.value !== 0.20) q.set('tp', dcaTp.value)
+    if (dcaTimingBand.value !== '25-30') q.set('tband', dcaTimingBand.value)
     if (dcaSort.value !== 'w10_xirr') q.set('sort', dcaSort.value)
     if (dcaOrder.value !== 'desc') q.set('order', dcaOrder.value)
   }
@@ -193,7 +194,7 @@ function applyUrl() {
   if (NAV_BY_PATH[u.pathname] === 'fundDca' &&
       (q.get('q') != null || q.get('page') || q.get('alive') != null
        || q.get('age') || q.get('scale') || q.get('equity') != null
-       || q.get('tp') != null
+       || q.get('tp') != null || q.get('tband') != null
        || q.get('sort') || q.get('order'))) {
     dcaQuery.value = q.get('q') ?? ''
     dcaPage.value = +q.get('page') || 0
@@ -204,6 +205,10 @@ function applyUrl() {
     if (q.get('tp') != null) {
       const v = parseFloat(q.get('tp'))
       if (DCA_TP_OPTIONS.includes(v)) dcaTp.value = v
+    }
+    if (q.get('tband') != null
+        && DCA_TIMING_BANDS.some(b => b.value === q.get('tband'))) {
+      dcaTimingBand.value = q.get('tband')
     }
     if (DCA_SORTABLE.includes(q.get('sort'))) dcaSort.value = q.get('sort')
     if (['asc', 'desc'].includes(q.get('order'))) dcaOrder.value = q.get('order')
@@ -517,6 +522,7 @@ function onDcaTpChange(tp) {
   dcaTp.value = tp
   dcaPage.value = 0
   loadDca()
+  loadDcaTiming()
 }
 // 六档对比聚合（权益类+商品池；跟随费用口径，不随权益开关——池口径独立）
 async function loadDcaTpCompare() {
@@ -548,6 +554,52 @@ const dcaTpChart = computed(() => {
     zeroY: sy(0),
   }
 })
+
+// ===== 定投时机区块（2026-11-16 假设验证：-25~-30% 回撤起定投首轮止盈最快/
+// 成功率与年化最高；30%+ 超深回撤起不来风险）——查 fund_dip_timing ×
+// fund_dca_tp_result（当前 tp/fee 口径），日更顺带刷新
+const DCA_TIMING_BANDS = [
+  { label: '甜蜜点 -25~-30%', value: '25-30' },
+  { label: '-20~-25%', value: '20-25' },
+  { label: '-30%+ 警戒', value: '30+' },
+  { label: '全部', value: '' },
+]
+const dcaTiming = ref({ status: 'loading', total: 0, rows: [] })
+const dcaTimingBand = ref('25-30')
+const dcaTimingSort = ref('w10_xirr')
+const dcaTimingOrder = ref('desc')
+const dcaTimingPage = ref(0)
+const dcaTimingLoading = ref(false)
+const ddpct = v => v == null ? '—' : (v * 100).toFixed(1) + '%'
+async function loadDcaTiming() {
+  if (STATIC_MODE) return
+  dcaTimingLoading.value = true
+  try {
+    const off = dcaTimingPage.value * DCA_PAGE_SIZE
+    const r = await fetch(`/api/funds/dca/timing?band=${encodeURIComponent(dcaTimingBand.value)}`
+      + `&tp=${dcaTp.value}&fee=${dcaFeeMode.value}&equity=${dcaEquity.value}`
+      + `&sort=${dcaTimingSort.value}&order=${dcaTimingOrder.value}`
+      + `&limit=${DCA_PAGE_SIZE}&offset=${off}`)
+    dcaTiming.value = await r.json()
+  } catch (e) {
+    dcaTiming.value = { status: 'down', detail: String(e), total: 0, rows: [] }
+  } finally {
+    dcaTimingLoading.value = false
+  }
+}
+function onDcaTimingBandChange(v) {
+  if (dcaTimingBand.value === v) return
+  dcaTimingBand.value = v
+  dcaTimingPage.value = 0
+  loadDcaTiming()
+}
+function onDcaTimingPage(e) { dcaTimingPage.value = e.page; loadDcaTiming() }
+function onDcaTimingSort(e) {
+  dcaTimingSort.value = e.sortField
+  dcaTimingOrder.value = e.sortOrder === 1 ? 'asc' : 'desc'
+  dcaTimingPage.value = 0
+  loadDcaTiming()
+}
 // 年限/规模输入即时生效：model 随键入更新，但 InputNumber 在值未再变时回车不发
 // change 事件（清空后回车失灵实测）——对两个输入防抖 400ms 直接触发搜索
 let _dcaFilterTimer = null
@@ -663,7 +715,7 @@ async function loadDcaScatter() {
 }
 // 费用口径与权益开关都联动散点+排行（权益切换时统计卡/分箱同步重算）；
 // 费用口径同时联动止盈点对比区块
-watch([dcaFeeMode, dcaEquity], () => { loadDcaScatter(); loadDca(); loadDcaTpCompare() })
+watch([dcaFeeMode, dcaEquity], () => { loadDcaScatter(); loadDca(); loadDcaTpCompare(); loadDcaTiming() })
 
 function renderDcaScatterChart() {
   if (dcaScatterChart) { dcaScatterChart.destroy(); dcaScatterChart = null }
@@ -1089,7 +1141,7 @@ const _onFundResize = () => fundChartInstance && fundChartInstance.resize()
 
 watch(activeNav, (nav, prev) => {
   if (nav === 'funds') loadFunds()
-  if (nav === 'fundDca') { loadDca(); loadDcaScatter(); loadDcaTpCompare() }
+  if (nav === 'fundDca') { loadDca(); loadDcaScatter(); loadDcaTpCompare(); loadDcaTiming() }
   if (nav === 'fund' && fund.value) {
     loadFundChart()
     loadFundDetail()
@@ -2818,6 +2870,87 @@ watch(
                 <p class="note" style="margin: 10px 0 0">口径：权益类+商品池（权益 8 类白名单 + QDII-商品/商品；债基·FOF·货币·偏债·REITs 不在内——债基货基波动小到连 5% 都难触发，进平均会稀释阈值间差异）· 近 10 年窗口为主口径，「全史」自基金成立起 · 「曾止盈」= 窗口内触发过至少一轮止盈的基金占比 · 平均间隔按费用口径轮次聚合 · 点击表格行或折线圆点，排行表格切换到该止盈点；散点/分箱固定 20% 口径 · 本区块为历史回测统计，不构成任何操作建议</p>
               </template>
               <div v-else class="browse-empty">多阈值对比数据尚未生成（日更回测首次写入后可用）</div>
+            </div>
+
+            <!-- ===== 定投时机（当前回撤桶 × 历史止盈素质；验证结论：-25~-30% 甜蜜点） ===== -->
+            <div class="card timing-block" v-if="!STATIC_MODE" style="margin-top: 16px; padding: 14px 16px 18px">
+              <div class="toolbar" style="margin: 0 0 6px">
+                <div>
+                  <h2 class="h1" style="font-size: 18px">定投时机：现在开始定投，谁在最好的位置？</h2>
+                  <p class="sub">按「当前回撤深度」分桶看在市权益基金（历史 98 万起点验证：从 -25%~-30% 回撤开始定投，首轮止盈最快、成功率与年化最高；&gt;-30% 超深回撤起不来风险升高）· 素质列为该基金「月定投+{{ dcaTpLabel(dcaTp) }}止盈」历史回测（{{ dcaFeeLabel }}，近 10 年）· {{ dcaTiming.total ?? 0 }} 只</p>
+                </div>
+                <div class="toolbar-right">
+                  <span v-if="dcaTimingLoading" class="sub">加载中…</span>
+                  <div class="src-seg" :style="dcaTimingLoading ? 'opacity:.55' : ''">
+                    <button v-for="b in DCA_TIMING_BANDS" :key="b.value"
+                            class="src-seg-btn"
+                            :class="{ active: dcaTimingBand === b.value }"
+                            @click="onDcaTimingBandChange(b.value)"
+                            :data-timing-band="b.value">{{ b.label }}</button>
+                  </div>
+                </div>
+              </div>
+              <div v-if="dcaTiming.status === 'down'" class="browse-empty">
+                时机数据不可用：{{ dcaTiming.detail || '数据库连接失败' }}
+              </div>
+              <div class="browse-pv" v-else>
+                <DataTable :value="dcaTiming.rows || []" lazy paginator :rows="DCA_PAGE_SIZE"
+                  :first="dcaTimingPage * DCA_PAGE_SIZE"
+                  :totalRecords="dcaTiming.total || 0" :loading="dcaTimingLoading"
+                  dataKey="code" stripedRows size="small"
+                  :sortField="dcaTimingSort" :sortOrder="dcaTimingOrder === 'asc' ? 1 : -1"
+                  @page="onDcaTimingPage" @sort="onDcaTimingSort">
+                  <template #empty>
+                    <div class="browse-empty">
+                      {{ dcaTiming.status === 'loading' ? '加载中…'
+                        : '该回撤桶暂无在市权益基金（切「全部」查看）' }}
+                    </div>
+                  </template>
+                  <Column field="code" header="代码" style="width: 90px">
+                    <template #body="{ data }"><span class="mono">{{ data.code }}</span></template>
+                  </Column>
+                  <Column field="name" header="名称" />
+                  <Column field="fund_type" header="类型" style="width: 120px">
+                    <template #body="{ data }">{{ data.fund_type || '—' }}</template>
+                  </Column>
+                  <Column field="dd_current" header="当前回撤" style="width: 92px" sortable bodyClass="num-col">
+                    <template #body="{ data }">
+                      <span v-if="data.dd_current != null" :class="data.dd_current <= -0.3 ? 'neg' : ''"
+                            :title="data.dip_band === '25-30' ? '甜蜜点：历史上从该位置开始定投首轮止盈最快' : ''">{{ ddpct(data.dd_current) }}</span>
+                      <span v-else>—</span>
+                    </template>
+                  </Column>
+                  <Column field="days_since_peak" header="距前高" style="width: 88px" sortable bodyClass="num-col">
+                    <template #body="{ data }">{{ data.days_since_peak != null ? data.days_since_peak + ' 天' : '—' }}</template>
+                  </Column>
+                  <Column field="gap_avg_days" header="止盈间隔" style="width: 96px" sortable bodyClass="num-col">
+                    <template #body="{ data }">{{ dcaFeeVal(data, 'gap_avg_days') != null ? '≈' + (dcaFeeVal(data, 'gap_avg_days') / 30.44).toFixed(1) + ' 月/次' : '—' }}</template>
+                  </Column>
+                  <Column field="w10_rounds" header="止盈次数" style="width: 84px" sortable bodyClass="num-col">
+                    <template #body="{ data }">{{ dcaFeeVal(data, 'w10_rounds') ?? '—' }}</template>
+                  </Column>
+                  <Column field="w10_xirr" header="年化·近10年" style="width: 108px" sortable bodyClass="num-col">
+                    <template #body="{ data }">
+                      <span v-if="dcaFeeVal(data, 'w10_xirr') != null"
+                            :class="dcaFeeVal(data, 'w10_xirr') >= 0 ? 'chg-up' : 'chg-down'">{{ pct1(dcaFeeVal(data, 'w10_xirr')) }}</span>
+                      <span v-else>—</span>
+                    </template>
+                  </Column>
+                  <Column field="w10_profit_rate" header="总收益率" style="width: 96px" sortable bodyClass="num-col">
+                    <template #body="{ data }">
+                      <span v-if="dcaFeeVal(data, 'w10_profit_rate') != null"
+                            :class="dcaFeeVal(data, 'w10_profit_rate') >= 0 ? 'chg-up' : 'chg-down'">{{ pct1(dcaFeeVal(data, 'w10_profit_rate')) }}</span>
+                      <span v-else>—</span>
+                    </template>
+                  </Column>
+                  <Column header="操作" style="width: 72px">
+                    <template #body="{ data }">
+                      <button class="detail-btn" @click="openDcaRounds(data)">详情</button>
+                    </template>
+                  </Column>
+                </DataTable>
+              </div>
+              <p class="note" style="margin: 10px 0 0">当前回撤 = 复权净值距历史最高的跌幅（日更顺带刷新）· 「甜蜜点」结论来自 2015~2026 权益基金 98 万起点历史模拟（-25~-30% 回撤起定投首轮止盈中位 582 天、成功率 63.2%、年化 32.0%，20% 止盈线含费口径）· 历史统计不构成任何操作建议 · 点行「详情」查看该基金每轮止盈明细（与排行共用弹窗）</p>
             </div>
             <p class="note" v-if="STATIC_MODE && dca.meta?.generated_at"
               style="margin: 0 0 8px">静态快照（GitHub Pages）· 数据生成于 {{ dca.meta.generated_at.slice(0, 10) }} · 明细不含净值曲线 · 实时数据以内网部署为准</p>

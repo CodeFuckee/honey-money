@@ -361,6 +361,31 @@ def register_fund_dca_routes(app):
         三口径字段——前端弹窗按当前费率口径取值）。降级约定同 /api/funds/dca。"""
         return fetch_dca_tp_summary(config.DATABASE_URL, code.strip())
 
+    @app.get("/api/funds/dca/timing")
+    def funds_dca_timing(tp: str = "0.2", band: str = "25-30", q: str = "",
+                         alive: str = "true", sort: str = "w10_xirr",
+                         order: str = "desc", min_age: float = 0.0,
+                         min_scale: float = 0.0, limit: int = 50,
+                         offset: int = 0, fee: str = "gross",
+                         equity: str = "true"):
+        """定投时机列表（当前回撤桶 × 历史止盈素质）。
+
+        band 选回撤桶：25-30 默认（假设验证甜蜜点：该位置开始定投首轮止盈
+        最快、成功率与年化最高）/ 20-25 / 30+（超深回撤警戒）/ 其他值=全部；
+        tp/fee/equity 与排序口径同 /api/funds/dca/tp。历史统计，不构成操作
+        建议。降级约定同 /api/funds/dca。
+        """
+        return fetch_dca_timing(config.DATABASE_URL,
+                                tp=_parse_tp(tp.strip().lower()),
+                                band=band.strip(), q=q,
+                                alive=alive.strip().lower(),
+                                sort=sort, order=order.strip().lower(),
+                                min_age=max(0.0, min_age),
+                                min_scale=max(0.0, min_scale),
+                                limit=limit, offset=offset,
+                                fee=fee.strip().lower(),
+                                equity=_parse_equity(equity))
+
 
 
 # ===== 三维散点（每基金一点）+ 年限段 × 规模段 分箱统计 =====
@@ -776,3 +801,135 @@ def fetch_dca_tp_summary(dsn: str, code: str) -> dict:
         return {"status": "up", "code": code, "rows": out}
     return _safe(run, {"status": "down", "detail": "pg unreachable",
                        "code": code, "rows": []})
+
+
+_TIMING_SQL = """
+SELECT t.code, r.name, r.fund_type, r.alive, t.dd_current,
+       t.days_since_peak, t.dip_band, r.scale_yi,
+       r.w10_start, r.w10_end, r.w10_rounds, r.gap_avg_days,
+       r.w10_xirr, r.full_xirr, r.w10_profit_rate,
+       r.w10_rounds_disc, r.w10_rounds_nom,
+       r.w10_xirr_disc, r.w10_xirr_nom,
+       r.full_xirr_disc, r.full_xirr_nom,
+       r.w10_profit_rate_disc, r.w10_profit_rate_nom,
+       r.gap_avg_days_disc, r.gap_avg_days_nom
+FROM fund_dip_timing t
+JOIN fund_dca_tp_result r ON r.code = t.code AND r.tp = %s
+WHERE (%s = '' OR t.code ILIKE %s OR r.name ILIKE %s)
+  AND {band_clause}
+  AND {alive_clause}
+  AND {age_clause}
+  AND {scale_clause}
+  AND {equity_clause}
+ORDER BY {sort_col} {order_dir} NULLS LAST, t.code
+LIMIT %s OFFSET %s
+"""
+
+_TIMING_COUNT_SQL = """
+SELECT count(*) FROM fund_dip_timing t
+JOIN fund_dca_tp_result r ON r.code = t.code AND r.tp = %s
+WHERE (%s = '' OR t.code ILIKE %s OR r.name ILIKE %s)
+  AND {band_clause}
+  AND {alive_clause}
+  AND {age_clause}
+  AND {scale_clause}
+  AND {equity_clause}
+"""
+
+# 时机桶白名单（25-30 为验证结论甜蜜点；'' = 全部）
+_TIMING_BANDS = ("20-25", "25-30", "30+")
+_TIMING_COLS = ["code", "name", "fund_type", "alive", "dd_current",
+                "days_since_peak", "dip_band", "scale_yi",
+                "w10_start", "w10_end", "w10_rounds", "gap_avg_days",
+                "w10_xirr", "full_xirr", "w10_profit_rate",
+                "w10_rounds_disc", "w10_rounds_nom",
+                "w10_xirr_disc", "w10_xirr_nom",
+                "full_xirr_disc", "full_xirr_nom",
+                "w10_profit_rate_disc", "w10_profit_rate_nom",
+                "gap_avg_days_disc", "gap_avg_days_nom"]
+_TIMING_SORTABLE = {"w10_xirr", "full_xirr", "w10_profit_rate",
+                    "w10_rounds", "gap_avg_days", "dd_current",
+                    "days_since_peak", "scale_yi", "code"}
+
+
+def fetch_dca_timing(dsn: str, *, tp: float = TAKE_PROFIT, band: str = "25-30",
+                     q: str = "", alive: str = "true", sort: str = "w10_xirr",
+                     order: str = "desc", min_age: float = 0.0,
+                     min_scale: float = 0.0, limit: int = 50, offset: int = 0,
+                     fee: str = "gross", equity: bool = True) -> dict:
+    """定投时机列表：fund_dip_timing（当前回撤桶）× fund_dca_tp_result（历史
+    素质字段，tp/fee 口径同排行端点）。band 白名单（20-25/25-30/30+，'' = 全部，
+    乱值回落全部）；排序白名单含 dd_current/days_since_peak（fee 口径字段随
+    fee 切后缀）。降级约定同旧端点。
+
+    band 语义（2026-11-16 假设验证）：25-30 = 历史上从该位置开始定投首轮
+    止盈最快/成功率与年化最高的"甜蜜点"；30+ = 超深回撤警戒（起不来风险）。
+    """
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+    like = f"%{q}%"
+    fee_val = fee if fee in _LIST_FEE_SUFFIX else "gross"
+    suffix = _LIST_FEE_SUFFIX[fee_val]
+    band_val = band if band in _TIMING_BANDS else ""
+    sort_base = sort if sort in _TIMING_SORTABLE else "w10_xirr"
+    # 素质字段在 r 表（fee 口径字段带后缀），时机字段在 t 表
+    sort_col = (f"r.{sort_base}{suffix}" if sort_base in _FEE_SORTABLE
+                else f"t.{sort_base}")
+    order_dir = "ASC" if order.lower() == "asc" else "DESC"
+    alive_clause = ("true" if alive not in ("true", "false")
+                    else f"r.alive = {alive.upper()}")
+    band_clause = ("true" if not band_val else "t.dip_band = %s")
+    equity_clause = "r.fund_type = ANY(%s)" if equity else "true"
+    equity_param = list(EQUITY_TYPES) if equity else None
+
+    def run():
+        with psycopg.connect(dsn, connect_timeout=3) as conn:
+            with conn.cursor() as cur:
+                cur.execute(_DCA_REF_SQL)
+                ref = cur.fetchone()[0]
+                age_clause, cutoff = "true", None
+                if min_age and ref:
+                    cutoff = ref - dt.timedelta(days=365.25 * min_age)
+                    age_clause = "r.full_start < %s"
+                scale_clause = "r.scale_yi > %s" if min_scale else "true"
+                scale_param = min_scale if min_scale else None
+                sql = (_TIMING_SQL.replace("{band_clause}", band_clause)
+                       .replace("{alive_clause}", alive_clause)
+                       .replace("{age_clause}", age_clause)
+                       .replace("{scale_clause}", scale_clause)
+                       .replace("{equity_clause}", equity_clause)
+                       .replace("{sort_col}", sort_col)
+                       .replace("{order_dir}", order_dir))
+                count_sql = (_TIMING_COUNT_SQL
+                             .replace("{band_clause}", band_clause)
+                             .replace("{alive_clause}", alive_clause)
+                             .replace("{age_clause}", age_clause)
+                             .replace("{scale_clause}", scale_clause)
+                             .replace("{equity_clause}", equity_clause))
+                base = ([tp, q, like, like]
+                        + ([band_val] if band_val else [])
+                        + ([cutoff] if cutoff else [])
+                        + ([scale_param] if scale_param else [])
+                        + ([equity_param] if equity_param else []))
+                cur.execute(sql, (*base, limit, offset))
+                rows = cur.fetchall()
+                cur.execute(count_sql, base)
+                total = cur.fetchone()[0]
+        out = [dict(zip(_TIMING_COLS, r)) for r in rows]
+        for r in out:
+            r["tp"] = tp
+            for k in _LIST_ROUND4:
+                if k in r:
+                    r[k] = round(r[k], 4) if r[k] is not None else None
+            r["scale_yi"] = (round(r["scale_yi"], 2)
+                             if r["scale_yi"] is not None else None)
+            for k in ("w10_start", "w10_end"):
+                if r.get(k):
+                    r[k] = r[k].isoformat()
+        return {"status": "up", "tp": tp, "band": band_val, "total": total,
+                "limit": limit, "offset": offset, "fee": fee_val,
+                "equity": bool(equity), "rows": out}
+    return _safe(run, {"status": "down", "detail": "pg unreachable",
+                       "tp": tp, "band": band, "total": 0, "limit": limit,
+                       "offset": offset, "equity": bool(equity),
+                       "rows": []})

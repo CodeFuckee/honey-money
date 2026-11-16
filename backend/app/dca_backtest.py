@@ -506,15 +506,46 @@ def run_full_backtest(dsn: str, *, log=print) -> tuple[list[dict], list[tuple], 
     return rows, rounds_rows, stats
 
 
+def compute_dip_timing(dates: pd.DatetimeIndex, adj: np.ndarray) -> dict:
+    """单基金当前时机指标（定投时机视图，2026-11-16 假设验证结论）。
+
+    dd_current：复权口径当前回撤 = adj[-1]/历史最高 - 1（负数）；
+    dip_band 回撤桶（-25~-30% 为验证结论中的"甜蜜点"）：none（>-20%）/
+    20-25（-0.25 < dd ≤ -0.20）/ 25-30（-0.30 < dd ≤ -0.25）/ 30+（≤ -0.30）；
+    days_since_peak：最后触及历史最高的自然日到末日；净值不足返回空字段。
+    """
+    if len(adj) < 2:
+        return {"dd_current": None, "dip_band": "none",
+                "days_since_peak": None}
+    cummax = np.maximum.accumulate(adj)
+    dd = adj[-1] / cummax[-1] - 1.0
+    if not np.isfinite(dd):
+        return {"dd_current": None, "dip_band": "none",
+                "days_since_peak": None}
+    dd = round(float(dd), 4)          # 分桶与存储同精度，消浮点边界
+    if dd > -0.20:
+        band = "none"
+    elif dd > -0.25:
+        band = "20-25"
+    elif dd > -0.30:
+        band = "25-30"
+    else:
+        band = "30+"
+    peak_idx = int(np.where(adj == cummax[-1])[0][-1])
+    return {"dd_current": dd, "dip_band": band,
+            "days_since_peak": int((dates[-1] - dates[peak_idx]).days)}
+
+
 def run_full_backtest_tp(dsn: str, *, thresholds=TP_THRESHOLDS,
                          log=print) -> tuple[list[dict], list[tuple],
                                              list[dict], list[tuple], dict]:
     """日更全量回测（多阈值版）：PG 拉数一次 → run_backtest_tp → 派生旧口径行。
 
-    返回 (old_rows, old_rounds, tp_rows, tp_rounds, stats)：
+    返回 (old_rows, old_rounds, tp_rows, tp_rounds, timing_rows, stats)：
     - old_rows/old_rounds：tp=TAKE_PROFIT 派生的旧口径行（写
       fund_dca_result / fund_dca_rounds，与旧引擎 run_backtest 输出一致）；
     - tp_rows/tp_rounds：全阈值行（写 fund_dca_tp_* 新表）；
+    - timing_rows：当前回撤时机行（写 fund_dip_timing，定投时机视图）；
     - alive 45 天新鲜度规则对两套行同一份（基金级，与阈值无关）。
     纯 CPU，调用方放子进程跑；直写由调用方事务完成。
     """
@@ -533,6 +564,20 @@ def run_full_backtest_tp(dsn: str, *, thresholds=TP_THRESHOLDS,
     old_rows = [{k: v for k, v in r.items() if k != "tp"}
                 for r in tp_rows if r["tp"] == TAKE_PROFIT]
     old_rounds = [t[:1] + t[2:] for t in tp_rounds if t[1] == TAKE_PROFIT]
+    # 时机行（定投时机视图，见 compute_dip_timing）：alive 基金独立二次遍历，
+    # 纯 cummax 计算（在市过滤同 alive_by_code）
+    timing_rows = []
+    for code, g in nav.groupby("code", sort=True):
+        if not alive_by_code.get(code):
+            continue
+        g = g.sort_values("nav_date")
+        prep = prep_window(g, None)
+        if prep is None:
+            continue
+        t = compute_dip_timing(*prep)
+        timing_rows.append((code, t["dd_current"], t["days_since_peak"],
+                            t["dip_band"],
+                            str(all_end)[:10] if all_end else None))
     # alive：full_end 距数据集最新净值日 45 天内（场内 ETF 的 delisted 标记
     # 不可直接用，见 dca_store 同款口径）
     all_end = max((r["full_end"] for r in old_rows if r["full_end"]),
@@ -548,11 +593,13 @@ def run_full_backtest_tp(dsn: str, *, thresholds=TP_THRESHOLDS,
         r["alive"] = alive_by_code.get(r["code"], False)
     stats = {"fund_count": len(old_rows), "round_count": len(old_rounds),
              "tp_round_count": len(tp_rounds),
+             "timing_count": len(timing_rows),
              "thresholds": [float(t) for t in thresholds],
              "window_end": str(all_end) if all_end else None}
     log(f"回测完成：{stats['fund_count']:,} 只 / 旧口径轮次 "
-        f"{stats['round_count']:,} 行 / 多阈值轮次 {stats['tp_round_count']:,} 行")
-    return old_rows, old_rounds, tp_rows, tp_rounds, stats
+        f"{stats['round_count']:,} 行 / 多阈值轮次 {stats['tp_round_count']:,} 行"
+        f" / 时机行 {stats['timing_count']:,}")
+    return old_rows, old_rounds, tp_rows, tp_rounds, timing_rows, stats
 
 
 def import_scale_csv(csv_path: str, dsn: str, *, log=print) -> int:
