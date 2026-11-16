@@ -258,7 +258,9 @@ class TestDcaTp:
             .locator(".detail-btn").click()
         dlg = page.locator(".p-dialog", has_text="每次止盈明细")
         expect(dlg).to_be_visible()
-        expect(dlg).to_contain_text("止盈线 15%")
+        # 副标题口径文字已删（2026-11-16 用户要求），状态以按钮 active 表达
+        expect(dlg.locator('button[data-modal-tp="0.15"]')
+              ).to_have_class(re.compile("active"))
         expect(dlg).to_contain_text("16.3%")       # 轮次市值口径收益
         rounds_calls = [u for u in mock_tp
                         if re.search(r"/api/funds/dca/tp/[^/?]+/rounds", u)]
@@ -315,9 +317,11 @@ class TestDcaTp:
         dlg = page.locator(".p-dialog", has_text="每次止盈明细")
         expect(dlg).to_be_visible()
         expect(dlg.locator('button[data-modal-tp="0.15"]')).to_be_visible()
-        expect(dlg).to_contain_text("止盈线 20%")     # 初始 = 页面阈值
+        expect(dlg.locator('button[data-modal-tp="0.2"]')
+              ).to_have_class(re.compile("active"))   # 初始 = 页面阈值
         dlg.locator('button[data-modal-tp="0.15"]').click()
-        expect(dlg).to_contain_text("止盈线 15%", timeout=10_000)
+        expect(dlg.locator('button[data-modal-tp="0.15"]')
+              ).to_have_class(re.compile("active"), timeout=10_000)
         expect(dlg).to_contain_text("第 1 次")          # 15% 轮次表有数据
         rounds_calls = [u for u in mock_tp
                         if re.search(r"/api/funds/dca/tp/[^/?]+/rounds", u)]

@@ -539,7 +539,7 @@ const dcaTpChart = computed(() => {
   const ys = rows.map(r => r.w10_median)
   const x0 = Math.min(...xs), x1 = Math.max(...xs)
   const y0 = Math.min(...ys, 0), y1 = Math.max(...ys, 0)
-  const W = 640, H = 150, padL = 56, padR = 16, padT = 14, padB = 26
+  const W = 640, H = 150, padL = 56, padR = 16, padT = 26, padB = 26
   const sx = v => padL + (v - x0) / ((x1 - x0) || 1) * (W - padL - padR)
   const sy = v => padT + (y1 - v) / ((y1 - y0) || 1) * (H - padT - padB)
   return {
@@ -2946,8 +2946,6 @@ watch(
             <Dialog v-model:visible="dcaRoundsVisible" modal
               :header="dcaRoundsFund ? `${dcaRoundsFund.code} ${dcaRoundsFund.name} · 每次止盈明细` : '每次止盈明细'"
               :style="{ width: '1000px' }" @hide="disposeDcaRoundsChart">
-              <p class="sub" style="margin: 0 0 8px">
-                统计口径：近 10 年窗口 · 止盈线 <b>{{ dcaTpLabel(dcaRoundsTp) }}</b> · 费用口径：<b>{{ dcaRoundsFeeLabel }}</b>（申购费外扣折份额、赎回费按每笔持有天数阶梯）· 间隔=距上次止盈天数（首次止盈从本轮首次买入起算）· 实际收益率为市值口径（含跳空越过 {{ dcaTpLabel(dcaRoundsTp) }} 的部分）
               <div class="src-seg" v-if="!STATIC_MODE" style="margin: 0 0 10px"
                    title="切换止盈线：下方统计与轮次表跟随；曲线同时叠加全部档位止盈点（颜色=档位，实心大三角=当前查看档位）；不影响页面排行阈值">
                 <button v-for="t in DCA_TP_OPTIONS" :key="t"
@@ -2964,7 +2962,6 @@ watch(
                         @click="onDcaRoundsFeeChange(o.key)"
                         :data-modal-fee="o.key">{{ o.label }}</button>
               </div>
-              </p>
               <div class="dc-grid" style="grid-template-columns: repeat(3, 1fr); margin: 0 0 12px">
                 <div class="dc-item">
                   <div class="dc-label">已止盈轮次<span class="dc-hint">已了结</span></div>
