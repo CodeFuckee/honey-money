@@ -27,7 +27,8 @@ backend/            Python 后端（FastAPI）
   app/backtest_api.py 回测 API（策略/区间/撮合模式/成本，降级 200 约定）
   app/dca_store.py    定投止盈回测快照存储（fund_dca_result / fund_dca_meta 两表 +
                       fund_dca_tp_result / fund_dca_tp_rounds / fund_dca_tp_meta
-                      多阈值三表（5%~40% 八档，与旧表同构 + tp 维度，完全隔离）；
+                      多阈值三表（5%~40% 八档，与旧表同构 + tp 维度，完全隔离）+
+                      fund_dip_timing 时机表（当前回撤/距前高/回撤桶，日更顺带刷新）；
                       python -m app.dca_store <csv> 导入 scripts 离线回测产物，幂等）
   app/dca_api.py      /api/funds/dca 回测排行 API（搜索/在市/年限/规模/权益类
                       （EQUITY_TYPES 白名单）过滤/排序白名单/分页 + 在市全集
@@ -35,7 +36,9 @@ backend/            Python 后端（FastAPI）
                       /api/funds/dca/tp（多阈值排行，tp 白名单回落 0.2）+
                       /api/funds/dca/tp/compare（八档止盈点市场级对比聚合，
                       权益类+商品池）+ /api/funds/dca/tp/{code}/rounds
-                      （单基金单阈值轮次明细）
+                      （单基金单阈值轮次明细）+ /api/funds/dca/tp/{code}/summary
+                      （单基金全阈值总收益率/年化汇总）+ /api/funds/dca/timing
+                      （定投时机：当前回撤桶 × 历史止盈素质，band 白名单）
   tests/              离线 pytest 用例（API 骨架 + 爬虫 + 任务调度）
 frontend/           Vue3 + Vite 前端
   src/App.vue         服务仪表盘（Carbon 风格）：四状态（加载骨架/空态插画/
@@ -48,7 +51,10 @@ frontend/           Vue3 + Vite 前端
                       统计/明细跟随，散点/分箱固定 20%）+「止盈点对比」
                       市场级区块（八档中位/均值年化、正收益占比、止盈成功率、
                       平均轮次与间隔 + SVG 折线，权益类+商品池，点击行/圆点
-                      切换排行阈值）+ 7 张统计卡 + 服务端排序表格，费率口径
+                      切换排行阈值）+「定投时机」区块（当前回撤桶筛选：
+                      -25~-30% 甜蜜点/-20~-25%/-30%+ 警戒/全部，素质列随
+                      止盈点+费率口径，服务端排序分页，详情复用止盈弹窗，
+                      URL tband 参数）+ 7 张统计卡 + 服务端排序表格，费率口径
                       三档切换联动排行/统计/散点/详情（默认含费·申购名义；
                       不含费/含费·申购一折可选，搜索栏与散点区各有开关），
                       权益类筛选默认仅权益类（股票型/偏股·灵活·平衡混合/
