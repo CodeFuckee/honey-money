@@ -37,9 +37,9 @@ AMOUNT = 1000.0
 TAKE_PROFIT = 0.20
 WINDOW_10Y = pd.DateOffset(years=10)
 MIN_SPAN_DAYS = 90  # 窗口短于此天数的年化记 nan
-# 市场级阈值对比（2026-11-15 grilling 定案）：六档止盈点，API/排行切换与
-# fund_dca_tp_* 新表共用这一事实源
-TP_THRESHOLDS = (0.05, 0.10, 0.15, 0.20, 0.25, 0.30)
+# 市场级阈值对比（2026-11-15 grilling 定案；同日追加 35%/40% → 八档）：
+# 止盈点清单，API/排行切换与 fund_dca_tp_* 新表共用这一事实源
+TP_THRESHOLDS = (0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40)
 
 
 # ===== 费用模型（典型档位近似，见模块 docstring） =====

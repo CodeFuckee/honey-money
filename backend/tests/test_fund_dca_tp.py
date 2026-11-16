@@ -352,7 +352,8 @@ class TestDcaTpRoutes:
         assert body["status"] == "down" and body["rows"] == []
 
     def test_tp_whitelist_fallback(self, client, monkeypatch):
-        """tp 非白名单（0.13/乱值）：回落 0.2 并回显实际使用的 tp。"""
+        """tp 非白名单（0.13/乱值）：回落 0.2 并回显实际使用的 tp；
+        全部八档（5%~40%）精确通过。"""
         import app.dca_api as dca_mod
         one = (None, None, None)
         conn = FakeConnOne(one)
@@ -362,8 +363,14 @@ class TestDcaTpRoutes:
         assert resp.json()["tp"] == 0.2
         resp = client.get("/api/funds/dca/tp", params={"tp": "abc"})
         assert resp.json()["tp"] == 0.2
-        resp = client.get("/api/funds/dca/tp", params={"tp": "0.25"})
-        assert resp.json()["tp"] == 0.25
+        for tp in ("0.05", "0.1", "0.15", "0.2", "0.25", "0.3", "0.35", "0.4"):
+            resp = client.get("/api/funds/dca/tp", params={"tp": tp})
+            assert resp.json()["tp"] == float(tp), tp
+
+    def test_tp_thresholds_pin_eight_values(self):
+        """阈值口径锚定：八档 5%~40%（2026-11-15 用户追加 35%/40%）。"""
+        from app.dca_backtest import TP_THRESHOLDS
+        assert TP_THRESHOLDS == (0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40)
 
     def test_tp_list_sql_targets_new_table(self, client, monkeypatch):
         """SQL 形状：查 fund_dca_tp_result 且带 tp 过滤；排序随费用口径后缀。"""

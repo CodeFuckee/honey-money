@@ -3,7 +3,7 @@
 用例表（确认门 1：自主开发模式并入最终前端过目，同 test_fund_dca_page 尾注约定）：
 - E2E-424 P0 阈值切换主流程：点搜索栏「15%」→ 列表请求 /api/funds/dca/tp?tp=0.15，
   副标题止盈线变 15%，表格渲染 tp 端点行；
-- E2E-425 对比区块渲染：六档表格（5%~30%）+ SVG 折线，默认 20% 行高亮；
+- E2E-425 对比区块渲染：八档表格（5%~40%）+ SVG 折线，默认 20% 行高亮；
 - E2E-426 对比行点击切换：点「30%」行 → 列表请求 tp=0.30，高亮行转移；
 - E2E-427 弹窗阈值跟随：15% 下点行「详情」→ 请求 /api/funds/dca/tp/{code}/rounds
   且带 tp=0.15，弹窗副标题显示止盈线 15%；
@@ -67,10 +67,11 @@ def _cmp_row(tp: float, med: float) -> dict:
 # 六档中位年化：非单调形状（5% 费耗拖累、30% 够不着），折线才有可读性
 TP_COMPARE_BODY = {
     "status": "up", "fee": "nom", "equity": True,
-    "thresholds": [0.05, 0.1, 0.15, 0.2, 0.25, 0.3],
+    "thresholds": [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4],
     "rows": [_cmp_row(0.05, 0.040), _cmp_row(0.10, 0.055),
              _cmp_row(0.15, 0.065), _cmp_row(0.20, 0.070),
-             _cmp_row(0.25, 0.068), _cmp_row(0.30, 0.062)],
+             _cmp_row(0.25, 0.068), _cmp_row(0.30, 0.062),
+             _cmp_row(0.35, 0.058), _cmp_row(0.40, 0.050)],
 }
 
 TP_ROUNDS_BODY = {
@@ -153,13 +154,13 @@ class TestDcaTp:
         """E2E-425：六档表格 + SVG 折线渲染，默认 20% 行高亮。"""
         _, frontend_port = servers
         open_dca(page, frontend_port)
-        expect(page.locator(".tp-compare tbody tr")).to_have_count(6)
-        for label in ("5%", "10%", "15%", "20%", "25%", "30%"):
+        expect(page.locator(".tp-compare tbody tr")).to_have_count(8)
+        for label in ("5%", "10%", "15%", "20%", "25%", "30%", "35%", "40%"):
             expect(page.locator(".tp-compare tbody tr td:first-child")
                   .filter(has_text=re.compile(rf"^{re.escape(label)}"))
                   ).to_be_visible()
         expect(page.locator(".tp-chart polyline")).to_have_count(1)
-        expect(page.locator(".tp-chart circle")).to_have_count(6)
+        expect(page.locator(".tp-chart circle")).to_have_count(8)
         expect(page.locator(".tp-compare tr.tp-row-active")
               ).to_contain_text("20%")
         expect(page.locator(".tp-compare")).to_contain_text("7.0%")
@@ -224,7 +225,7 @@ class TestDcaTp:
         """E2E-430：切「不含费」→ 对比请求带 fee=gross（口径联动对比区块）。"""
         _, frontend_port = servers
         open_dca(page, frontend_port)
-        expect(page.locator(".tp-compare tbody tr")).to_have_count(6)
+        expect(page.locator(".tp-compare tbody tr")).to_have_count(8)
         page.locator('button[data-table-fee="gross"]').click()
         expect(page.locator(".tp-compare tr.tp-row-active")
               ).to_contain_text("20%", timeout=10_000)

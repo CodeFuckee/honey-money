@@ -403,11 +403,11 @@ const DCA_EQUITY_TYPES = ['股票型', '混合型-偏股', '混合型-灵活', '
   '指数型-股票', '指数型-海外股票', 'QDII-普通股票', 'QDII-混合偏股']
 const dcaEquity = ref(true)
 
-// ===== 多止盈点市场级对比（2026-11-15 grilling 定案：5%~30% 六档） =====
+// ===== 多止盈点市场级对比（2026-11-15 grilling 定案，同日追加 35%/40% → 5%~40% 八档） =====
 // 阈值切换只改排行/统计/弹窗明细的数据源（tp≠0.2 走 /api/funds/dca/tp*，
 // 行结构同旧端点 + tp 一列）；散点/分箱固定 20% 口径不动；
 // 静态模式（冻结站点）无多阈值数据，切换器与对比区块整体隐藏
-const DCA_TP_OPTIONS = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
+const DCA_TP_OPTIONS = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40]
 const dcaTp = ref(0.20)
 const dcaTpCompare = ref(null)
 const dcaTpLoading = ref(false)

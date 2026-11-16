@@ -27,13 +27,13 @@ backend/            Python 后端（FastAPI）
   app/backtest_api.py 回测 API（策略/区间/撮合模式/成本，降级 200 约定）
   app/dca_store.py    定投止盈回测快照存储（fund_dca_result / fund_dca_meta 两表 +
                       fund_dca_tp_result / fund_dca_tp_rounds / fund_dca_tp_meta
-                      多阈值三表（5%~30% 六档，与旧表同构 + tp 维度，完全隔离）；
+                      多阈值三表（5%~40% 八档，与旧表同构 + tp 维度，完全隔离）；
                       python -m app.dca_store <csv> 导入 scripts 离线回测产物，幂等）
   app/dca_api.py      /api/funds/dca 回测排行 API（搜索/在市/年限/规模/权益类
                       （EQUITY_TYPES 白名单）过滤/排序白名单/分页 + 在市全集
                       分位统计 + 口径 meta，降级 200 约定）+
                       /api/funds/dca/tp（多阈值排行，tp 白名单回落 0.2）+
-                      /api/funds/dca/tp/compare（六档止盈点市场级对比聚合，
+                      /api/funds/dca/tp/compare（八档止盈点市场级对比聚合，
                       权益类+商品池）+ /api/funds/dca/tp/{code}/rounds
                       （单基金单阈值轮次明细）
   tests/              离线 pytest 用例（API 骨架 + 爬虫 + 任务调度）
@@ -44,9 +44,9 @@ frontend/           Vue3 + Vite 前端
                       （列表含类型/最新单位净值/日增长率/净值条数/区间，
                       点行进净值详情：单位+累计净值双线走势 + 分页明细）+
                       定投止盈回测子页（全市场公募基金「月定投+止盈」
-                      离线回测排行：止盈点 5%~30% 六档切换（默认 20%，排行/
+                      离线回测排行：止盈点 5%~40% 八档切换（默认 20%，排行/
                       统计/明细跟随，散点/分箱固定 20%）+「止盈点对比」
-                      市场级区块（六档中位/均值年化、正收益占比、止盈成功率、
+                      市场级区块（八档中位/均值年化、正收益占比、止盈成功率、
                       平均轮次与间隔 + SVG 折线，权益类+商品池，点击行/圆点
                       切换排行阈值）+ 7 张统计卡 + 服务端排序表格，费率口径
                       三档切换联动排行/统计/散点/详情（默认含费·申购名义；
@@ -100,7 +100,7 @@ scripts/            离线研究/数据管道脚本（不入 CI）：fund_scale_
                     导入后页面可见；含申赎费用三场景建模：gross 不含费/
                     disc 申购一折/nom 申购名义，赎回费按每笔持有天数阶梯；
                     simulate_multi 单遍多阈值状态机供日更 run_full_backtest_tp
-                    六档止盈点共用，tp=0.20 档与旧引擎逐字段一致）
+                    八档止盈点共用，tp=0.20 档与旧引擎逐字段一致）
 ```
 
 ## MCP server（agent 接入回测与行情）
