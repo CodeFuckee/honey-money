@@ -84,19 +84,22 @@ deploy-nas:
     # （nginx→backend 反代链路，不依赖任何宿主网络拓扑）。
     - |
       ok=""
-      for i in $(seq 1 20); do
+      # 2026-11-16 实测：NAS 负载高时 uvicorn lifespan 可超 60s（首轮部署
+      # healthz 20×3s=60s 压线误判 failed，容器实际部署成功且稍后自愈），
+      # 窗口加长到 40×3s=120s
+      for i in $(seq 1 40); do
         cid=$($DC -p honey-money ps -q frontend | head -1)
         if [ -n "$cid" ] && docker exec "$cid" wget -q -O /dev/null \
             http://127.0.0.1:80/healthz; then
-          echo "healthz[$i/20]: 200（frontend 容器内自探通过）"
+          echo "healthz[$i/40]: 200（frontend 容器内自探通过）"
           ok=1
           break
         fi
-        echo "healthz[$i/20]: 未就绪"
+        echo "healthz[$i/40]: 未就绪"
         sleep 3
       done
       if [ -n "$ok" ]; then echo "部署健康门通过"; exit 0; fi
-      echo "部署后 60s healthz 未就绪，判部署失败"; exit 1
+      echo "部署后 120s healthz 未就绪，判部署失败"; exit 1
     # 注：不做 docker image prune——群晖 daemon 上实测会挂起不返回（流水线 3080 卡 30min），
     # 镜像清理留给 NAS 定期任务（Container Manager 或计划任务手动清理）
   environment:
