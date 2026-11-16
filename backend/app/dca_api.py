@@ -780,7 +780,7 @@ def fetch_dca_tp_rounds(dsn: str, code: str, fee: str = "nom",
 _TP_SUMMARY_SQL = """
 SELECT tp, w10_profit_rate, w10_xirr,
        w10_profit_rate_disc, w10_xirr_disc,
-       w10_profit_rate_nom, w10_xirr_nom
+       w10_profit_rate_nom, w10_xirr_nom, full_start
 FROM fund_dca_tp_result WHERE code = %s ORDER BY tp
 """
 
@@ -795,6 +795,8 @@ def fetch_dca_tp_summary(dsn: str, code: str) -> dict:
     def run():
         with psycopg.connect(dsn, connect_timeout=3) as conn:
             with conn.cursor() as cur:
+                cur.execute(_DCA_REF_SQL)
+                ref = cur.fetchone()[0]
                 cur.execute(_TP_SUMMARY_SQL, (code,))
                 rows = cur.fetchall()
         out = [{"tp": r[0],
@@ -803,7 +805,10 @@ def fetch_dca_tp_summary(dsn: str, code: str) -> dict:
                 "w10_profit_rate_disc": round(r[3], 4) if r[3] is not None else None,
                 "w10_xirr_disc": round(r[4], 4) if r[4] is not None else None,
                 "w10_profit_rate_nom": round(r[5], 4) if r[5] is not None else None,
-                "w10_xirr_nom": round(r[6], 4) if r[6] is not None else None}
+                "w10_xirr_nom": round(r[6], 4) if r[6] is not None else None,
+                "w10_start_iso": r[7].isoformat() if r[7] else None,
+                "age_years": (round((ref - r[7]).days / 365.25, 1)
+                              if ref and r[7] else None)}
                for r in rows]
         return {"status": "up", "code": code, "rows": out}
     return _safe(run, {"status": "down", "detail": "pg unreachable",
@@ -812,7 +817,7 @@ def fetch_dca_tp_summary(dsn: str, code: str) -> dict:
 
 _TIMING_SQL = """
 SELECT t.code, r.name, r.fund_type, r.alive, t.dd_current,
-       t.days_since_peak, t.dip_band, r.scale_yi,
+       t.days_since_peak, t.dip_band, r.scale_yi, r.full_start,
        r.w10_start, r.w10_end, r.w10_rounds, r.gap_avg_days,
        r.w10_xirr, r.full_xirr, r.w10_profit_rate,
        r.w10_rounds_disc, r.w10_rounds_nom,
@@ -846,7 +851,7 @@ WHERE (%s = '' OR t.code ILIKE %s OR r.name ILIKE %s)
 # 时机桶白名单（25-30 为验证结论甜蜜点；'' = 全部）
 _TIMING_BANDS = ("20-25", "25-30", "30+")
 _TIMING_COLS = ["code", "name", "fund_type", "alive", "dd_current",
-                "days_since_peak", "dip_band", "scale_yi",
+                "days_since_peak", "dip_band", "scale_yi", "full_start",
                 "w10_start", "w10_end", "w10_rounds", "gap_avg_days",
                 "w10_xirr", "full_xirr", "w10_profit_rate",
                 "w10_rounds_disc", "w10_rounds_nom",
@@ -857,6 +862,8 @@ _TIMING_COLS = ["code", "name", "fund_type", "alive", "dd_current",
 _TIMING_SORTABLE = {"w10_xirr", "full_xirr", "w10_profit_rate",
                     "w10_rounds", "gap_avg_days", "dd_current",
                     "days_since_peak", "scale_yi", "code"}
+# r 表（tp_result）上的排序字段（非 fee 口径）；其余白名单字段在 t 表
+_TIMING_R_SORTABLE = {"full_start"}
 
 
 def fetch_dca_timing(dsn: str, *, tp: float = TAKE_PROFIT, band: str = "25-30",
@@ -880,8 +887,12 @@ def fetch_dca_timing(dsn: str, *, tp: float = TAKE_PROFIT, band: str = "25-30",
     band_val = band if band in _TIMING_BANDS else ""
     sort_base = sort if sort in _TIMING_SORTABLE else "w10_xirr"
     # 素质字段在 r 表（fee 口径字段带后缀），时机字段在 t 表
-    sort_col = (f"r.{sort_base}{suffix}" if sort_base in _FEE_SORTABLE
-                else f"t.{sort_base}")
+    if sort_base in _FEE_SORTABLE:
+        sort_col = f"r.{sort_base}{suffix}"
+    elif sort_base in _TIMING_R_SORTABLE:
+        sort_col = f"r.{sort_base}"
+    else:
+        sort_col = f"t.{sort_base}"
     order_dir = "ASC" if order.lower() == "asc" else "DESC"
     alive_clause = ("true" if alive not in ("true", "false")
                     else f"r.alive = {alive.upper()}")
@@ -930,6 +941,9 @@ def fetch_dca_timing(dsn: str, *, tp: float = TAKE_PROFIT, band: str = "25-30",
                     r[k] = round(r[k], 4) if r[k] is not None else None
             r["scale_yi"] = (round(r["scale_yi"], 2)
                              if r["scale_yi"] is not None else None)
+            r["age_years"] = (round((ref - r["full_start"]).days / 365.25, 1)
+                              if ref and r["full_start"] else None)
+            r.pop("full_start")
             for k in ("w10_start", "w10_end"):
                 if r.get(k):
                     r[k] = r[k].isoformat()

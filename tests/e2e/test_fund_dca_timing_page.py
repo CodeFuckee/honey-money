@@ -25,6 +25,7 @@ TIMING_BODY = {
         {"code": "019387", "name": "中欧时代共赢混合发起A1",
          "fund_type": "混合型-偏股", "alive": True, "dd_current": -0.2712,
          "days_since_peak": 340, "dip_band": "25-30", "scale_yi": 1.2,
+         "age_years": 10.4,
          "w10_start": "2016-11-14", "w10_end": "2026-11-13",
          "w10_rounds": 11, "gap_avg_days": 95.4, "w10_xirr": 0.92,
          "full_xirr": 1.003, "w10_profit_rate": 0.18,
@@ -81,6 +82,7 @@ class TestDcaTiming:
         row = page.locator(".timing-block tbody tr", has_text="019387")
         expect(row).to_contain_text("-27.1%")      # 当前回撤
         expect(row).to_contain_text("340 天")       # 距前高
+        expect(row).to_contain_text("10.4 年")      # 运作年限
         expect(row).to_contain_text("+98.0%")       # 年化 nom 后缀
 
     def test_timing_band_switch_and_sort_and_detail(self, servers, page,

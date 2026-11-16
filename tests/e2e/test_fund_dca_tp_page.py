@@ -164,8 +164,11 @@ def mock_tp(page):
         calls.append(url)
         qs = parse_qs(urlparse(url).query)
         if re.search(r"/api/funds/dca/tp/[^/?]+/summary", url):
+            body = {**TP_SUMMARY_BODY,
+                    "rows": [{**r, "age_years": 10.4}
+                             for r in TP_SUMMARY_BODY["rows"]]}
             route.fulfill(status=200, content_type="application/json",
-                          body=json.dumps(TP_SUMMARY_BODY))
+                          body=json.dumps(body))
         elif "/api/funds/dca/tp/compare" in url:
             body = {**TP_COMPARE_BODY,
                     "fee": (qs.get("fee") or ["nom"])[0]}
@@ -261,6 +264,7 @@ class TestDcaTp:
         # 副标题口径文字已删（2026-11-16 用户要求），状态以按钮 active 表达
         expect(dlg.locator('button[data-modal-tp="0.15"]')
               ).to_have_class(re.compile("active"))
+        expect(dlg).to_contain_text("运作 10.4 年")  # 弹窗 header 运作年限
         expect(dlg).to_contain_text("16.3%")       # 轮次市值口径收益
         rounds_calls = [u for u in mock_tp
                         if re.search(r"/api/funds/dca/tp/[^/?]+/rounds", u)]

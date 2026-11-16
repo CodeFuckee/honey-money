@@ -139,6 +139,37 @@ class TestDipReportRoutes:
         assert body["groups"] == [] and body["years"] == []
         assert body["tp_list"] == [0.2]
 
+    def test_summary_shape_has_full_start(self, client, monkeypatch):
+        """summary 行带 full_start（ISO）+ age_years（服务端按 ref 计算）——
+        弹窗显示运作年限的数据前提。"""
+        import datetime as dt
+
+        import app.dca_api as dca_mod
+        # summary SELECT 8 列：tp, w10_profit_rate, w10_xirr, _disc×2, _nom×2,
+        # full_start；fetchone 按调用序返回 ref → summary 行
+        row = (0.20, 0.18, 0.92, 0.175, 0.90, 0.17, 0.88,
+               dt.date(2016, 11, 16))
+        calls = {"i": 0}
+
+        class SeqConn(FakeConnOne):
+            def __init__(self):
+                super().__init__(None, rows=[row])
+                self.i = 0
+
+            def fetchone(self):
+                self.i += 1
+                return (dt.date(2026, 11, 16),) if self.i == 1 else row
+
+        conn = SeqConn()
+        _patch_connect(monkeypatch, dca_mod, conn)
+        resp = client.get("/api/funds/dca/tp/000001/summary")
+        body = resp.json()
+        assert body["status"] == "up"
+        r = body["rows"][0]
+        assert r["age_years"] == pytest.approx(10.0, abs=0.1)
+        assert r["w10_start_iso"] == "2016-11-16"
+        assert r["w10_xirr"] == 0.92 and r["w10_xirr_nom"] == 0.88
+
     def test_dip_report_dimension_split(self, client, monkeypatch):
         """groups=SYS/NODIP（bucket='all'）；buckets=DIP 深度桶；
         years=SYS 起点年份——按 grp+bucket 形态分拣。"""

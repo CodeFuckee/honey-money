@@ -212,14 +212,18 @@ class TestDcaTimingRoutes:
         assert any("r.tp = %s" in s for s in sqls)
         assert any("t.dip_band = %s" in s for s in sqls)
         assert any("ORDER BY r.w10_xirr_nom" in s for s in sqls)
+        assert any("r.full_start" in s for s in sqls)   # 运作年限数据源
 
     def test_timing_row_mapping(self, client, monkeypatch):
         """行映射：dd/band/素质字段齐全，年化收益率 round(4)。"""
         import app.dca_api as dca_mod
+        import datetime as dt
         row = ("000001", "成长先锋混合A", "混合型-偏股", True, -0.2712, 340,
-               "25-30", 12.5, None, None, 3, 95.4, 0.92, 1.003, 0.18,
+               "25-30", 12.5, dt.date(2026, 11, 16) - dt.timedelta(days=3653),
+               None, None, 3, 95.4, 0.92, 1.003, 0.18,
                3, 3, 0.90, 0.98, 0.98, 1.05, 0.175, 0.17, 94.0, 96.0)
-        conn = FakeConnOne((None, None, None), rows=[row])
+        import datetime as dt2
+        conn = FakeConnOne((dt2.date(2026, 11, 16),), rows=[row])
         _patch_connect(monkeypatch, dca_mod, conn)
         resp = client.get("/api/funds/dca/timing")
         body = resp.json()
@@ -228,5 +232,6 @@ class TestDcaTimingRoutes:
         assert r["code"] == "000001" and r["tp"] == 0.2
         assert r["dd_current"] == -0.2712 and r["dip_band"] == "25-30"
         assert r["days_since_peak"] == 340
+        assert r["age_years"] == pytest.approx(10.0, abs=0.1)  # 运作年限
         assert r["w10_xirr"] == 0.92 and r["w10_xirr_nom"] == 0.98
         assert r["w10_profit_rate_disc"] == 0.175

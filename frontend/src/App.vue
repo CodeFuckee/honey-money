@@ -809,7 +809,8 @@ function chainFromStatic(body) {
 
 function openDcaRounds(e) {
   const data = e.data ?? e
-  dcaRoundsFund.value = { code: data.code, name: data.name }
+  dcaRoundsFund.value = { code: data.code, name: data.name,
+                          age_years: data.age_years ?? null }
   dcaRounds.value = { status: 'loading', rounds: [] }
   dcaRoundsNavs.value = []
   dcaRoundsTp.value = dcaTp.value        // 弹窗局部阈值从页面当前档位起步
@@ -823,6 +824,11 @@ function openDcaRounds(e) {
     .then(body => {
       dcaRoundsSummary.value = (body && body.status === 'up'
         && Array.isArray(body.rows)) ? body.rows : null
+      if (dcaRoundsSummary.value?.length
+          && dcaRoundsFund.value?.code === data.code) {
+        dcaRoundsFund.value.age_years
+          = dcaRoundsSummary.value[0].age_years ?? null
+      }
     })
     .catch(() => { dcaRoundsSummary.value = null })
   const emptyRounds = () => ({ status: 'up', code: data.code, fee: dcaFeeMode.value,
@@ -2947,6 +2953,9 @@ watch(
                   <Column field="days_since_peak" header="距前高" style="width: 88px" sortable bodyClass="num-col">
                     <template #body="{ data }">{{ data.days_since_peak != null ? data.days_since_peak + ' 天' : '—' }}</template>
                   </Column>
+                  <Column field="age_years" sortField="full_start" header="运作年限" style="width: 88px" sortable bodyClass="num-col">
+                    <template #body="{ data }">{{ data.age_years != null ? data.age_years + ' 年' : '—' }}</template>
+                  </Column>
                   <Column field="gap_avg_days" header="止盈间隔" style="width: 96px" sortable bodyClass="num-col">
                     <template #body="{ data }">{{ dcaFeeVal(data, 'gap_avg_days') != null ? '≈' + (dcaFeeVal(data, 'gap_avg_days') / 30.44).toFixed(1) + ' 月/次' : '—' }}</template>
                   </Column>
@@ -3143,7 +3152,7 @@ watch(
 
             <!-- ===== 每次止盈明细弹窗（点排行行或「详情」按钮触发） ===== -->
             <Dialog v-model:visible="dcaRoundsVisible" modal
-              :header="dcaRoundsFund ? `${dcaRoundsFund.code} ${dcaRoundsFund.name} · 每次止盈明细` : '每次止盈明细'"
+              :header="dcaRoundsFund ? `${dcaRoundsFund.code} ${dcaRoundsFund.name} · 每次止盈明细${dcaRoundsFund.age_years != null ? '（运作 ' + dcaRoundsFund.age_years + ' 年）' : ''}` : '每次止盈明细'"
               :style="{ width: '1000px' }" @hide="disposeDcaRoundsChart">
               <div class="src-seg" v-if="!STATIC_MODE" style="margin: 0 0 10px"
                    title="切换止盈线：下方统计与轮次表跟随；曲线同时叠加全部档位止盈点（颜色=档位，实心大三角=当前查看档位）；不影响页面排行阈值">

@@ -442,8 +442,11 @@ class TestDcaTpRoutes:
         """summary SQL 形状：WHERE code 精确匹配 ORDER BY tp；行映射带
         三口径总收益率/年化字段并四舍五入。"""
         import app.dca_api as dca_mod
-        row = (0.15, 0.20, 0.12, 0.19, 0.11, 0.18, 0.10)
-        conn = FakeConnOne(None, rows=[row])
+        import datetime as dt
+        row = (0.15, 0.20, 0.12, 0.19, 0.11, 0.18, 0.10,
+               dt.date(2026, 11, 16) - dt.timedelta(days=3653))
+        # ref 查询先行（fetchone 给 ref；fetchall 走 rows）
+        conn = FakeConnOne((dt.date(2026, 11, 16),), rows=[row])
         _patch_connect(monkeypatch, dca_mod, conn)
         resp = client.get("/api/funds/dca/tp/000001/summary")
         assert resp.status_code == 200
