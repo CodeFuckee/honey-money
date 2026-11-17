@@ -108,6 +108,14 @@ class TestDcaTiming:
                                timeout=10_000)
         assert any("sort=w10_xirr" in u and "order=asc" in u
                    for u in mock_timing), mock_timing
+        # 运作年限列排序（2026-11-17 用户报告失效——后端白名单漏 full_start
+        # 已修）：列头点击后请求映射到成立日排序（full_start/age_years 别名）
+        page.locator(".timing-block th", has_text="运作年限").click()
+        expect(page.locator(".timing-block th", has_text="运作年限")
+               ).to_have_class(re.compile("p-datatable-column-sorted"),
+                               timeout=10_000)
+        assert any(("sort=full_start" in u or "sort=age_years" in u)
+                   for u in mock_timing), mock_timing
         page.locator(".timing-block tbody tr", has_text="161725") \
             .locator(".detail-btn").click()
         dlg = page.locator(".p-dialog", has_text="每次止盈明细")

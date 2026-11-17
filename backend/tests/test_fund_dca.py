@@ -124,6 +124,15 @@ class TestDcaSqlShapes:
         assert "alive = TRUE" in sql
         assert params[-2:] == (50, 0)
 
+    def test_sort_age_years_maps_full_start(self):
+        """排行运作年限列排序：age_years 别名 → ORDER BY full_start
+        （列 field=age_years/sortField=full_start 的事件值两端兼容；
+        2026-11-17 用户报告时机表格运作年限排序失效同源）。"""
+        body, conn = _fetch_dca(sort="age_years")
+        assert body["status"] == "up"
+        sqls = [sql for sql, _ in conn.cursor_obj.executed]
+        assert any("ORDER BY full_start" in s for s in sqls)
+
     def test_sort_whitelist_rejects_injection(self):
         """sort 非白名单值回落 w10_xirr——非法值不得进入 SQL（防注入）。"""
         body, conn = _fetch_dca(sort="w10_xirr; DROP TABLE fund_dca_result")

@@ -213,6 +213,15 @@ class TestDcaTimingRoutes:
         assert any("t.dip_band = %s" in s for s in sqls)
         assert any("ORDER BY r.w10_xirr_nom" in s for s in sqls)
         assert any("r.full_start" in s for s in sqls)   # 运作年限数据源
+        # 运作年限排序：sort=full_start（列 sortField）与 age_years（列 field）
+        # 两种事件值都必须映射到 ORDER BY r.full_start（2026-11-17 用户报告
+        # 时机表格按运作年限排序失效——白名单漏 full_start 回落年化）
+        for sort_val in ("full_start", "age_years"):
+            conn2 = FakeConnOne((None, None, None))
+            _patch_connect(monkeypatch, dca_mod, conn2)
+            client.get("/api/funds/dca/timing", params={"sort": sort_val})
+            assert any("ORDER BY r.full_start" in sql
+                       for sql in conn2.executed), sort_val
 
     def test_timing_row_mapping(self, client, monkeypatch):
         """行映射：dd/band/素质字段齐全，年化收益率 round(4)。"""

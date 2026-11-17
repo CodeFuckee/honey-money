@@ -70,7 +70,7 @@ _DCA_REF_SQL = "SELECT max(full_end) FROM fund_dca_result"
 _SORTABLE = {
     "w10_xirr", "full_xirr", "w10_profit_rate", "full_profit_rate",
     "w10_rounds", "full_rounds", "scale_yi", "code", "full_start",
-    "gap_avg_days",
+    "gap_avg_days", "age_years",   # 运作年限列 field 别名 → ORDER BY full_start
 }
 # 费用口径后缀（gross=不含费沿用原列；disc=申购一折；nom=申购名义）。
 # fee 只影响 ORDER BY 与统计卡的列替换；SELECT 恒返回全部口径列，
@@ -148,6 +148,8 @@ def fetch_dca_list(dsn: str, *, q: str = "", alive: str = "true",
     like = f"%{q}%"
     fee_val = fee if fee in _LIST_FEE_SUFFIX else "gross"
     suffix = _LIST_FEE_SUFFIX[fee_val]
+    if sort == "age_years":            # 运作年限列 field → 排序落库列成立日
+        sort = "full_start"
     sort_base = sort if sort in _SORTABLE else "w10_xirr"
     sort_col = (f"{sort_base}{suffix}" if sort_base in _FEE_SORTABLE
                 else sort_base)
@@ -861,9 +863,20 @@ _TIMING_COLS = ["code", "name", "fund_type", "alive", "dd_current",
                 "gap_avg_days_disc", "gap_avg_days_nom"]
 _TIMING_SORTABLE = {"w10_xirr", "full_xirr", "w10_profit_rate",
                     "w10_rounds", "gap_avg_days", "dd_current",
-                    "days_since_peak", "scale_yi", "code"}
-# r 表（tp_result）上的排序字段（非 fee 口径）；其余白名单字段在 t 表
-_TIMING_R_SORTABLE = {"full_start"}
+                    "days_since_peak", "scale_yi", "code",
+                    "full_start", "age_years"}
+# r 表（tp_result）上的排序字段（非 fee 口径）；其余白名单字段在 t 表；
+# age_years 是运作年限列的展示字段名（列 field），排序落库列即成立日
+_TIMING_R_SORTABLE = {"full_start", "age_years"}
+
+
+def _timing_sort_col(sort_base: str, suffix: str) -> str:
+    if sort_base in _FEE_SORTABLE:
+        return f"r.{sort_base}{suffix}"
+    if sort_base in _TIMING_R_SORTABLE:
+        return "r.full_start" if sort_base == "age_years" \
+            else f"r.{sort_base}"
+    return f"t.{sort_base}"
 
 
 def fetch_dca_timing(dsn: str, *, tp: float = TAKE_PROFIT, band: str = "25-30",
@@ -886,13 +899,7 @@ def fetch_dca_timing(dsn: str, *, tp: float = TAKE_PROFIT, band: str = "25-30",
     suffix = _LIST_FEE_SUFFIX[fee_val]
     band_val = band if band in _TIMING_BANDS else ""
     sort_base = sort if sort in _TIMING_SORTABLE else "w10_xirr"
-    # 素质字段在 r 表（fee 口径字段带后缀），时机字段在 t 表
-    if sort_base in _FEE_SORTABLE:
-        sort_col = f"r.{sort_base}{suffix}"
-    elif sort_base in _TIMING_R_SORTABLE:
-        sort_col = f"r.{sort_base}"
-    else:
-        sort_col = f"t.{sort_base}"
+    sort_col = _timing_sort_col(sort_base, suffix)
     order_dir = "ASC" if order.lower() == "asc" else "DESC"
     alive_clause = ("true" if alive not in ("true", "false")
                     else f"r.alive = {alive.upper()}")
