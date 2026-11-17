@@ -860,8 +860,6 @@ WHERE (%s = '' OR t.code ILIKE %s OR r.name ILIKE %s)
   AND {scale_clause}
   AND {equity_clause}
   AND {range_clause}
-ORDER BY {sort_col} {order_dir} NULLS LAST, t.code
-LIMIT %s OFFSET %s
 """
 
 # 时机桶白名单（25-30 为验证结论甜蜜点；'' = 全部）
@@ -965,10 +963,10 @@ def fetch_dca_timing(dsn: str, *, tp: float = TAKE_PROFIT, band: str = "25-30",
                 _between(f"r.w10_xirr{suffix}", xirr_min, xirr_max)
                 if dd_min is not None:
                     range_clauses.append("t.dd_current <= %s")
-                    range_params.append(-dd_min)
+                    range_params.append(-dd_min / 100.0)   # 25 → -0.25
                 if dd_max is not None:
                     range_clauses.append("t.dd_current >= %s")
-                    range_params.append(-dd_max)
+                    range_params.append(-dd_max / 100.0)
                 _between(f"r.w10_profit_rate{suffix}", pr_min, pr_max)
                 range_clause = (" AND ".join(range_clauses)
                                 if range_clauses else "true")

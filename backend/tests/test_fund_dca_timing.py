@@ -265,11 +265,12 @@ class TestDcaTimingRoutes:
         assert any("t.dd_current <= %s" in s for s in sqls)
         assert any("t.dd_current >= %s" in s for s in sqls)
         # dd 参数为用户输入取负（回撤幅度 → 负的 dd_current）
+        # dd 用户输入 25 → 参数 -0.25（小数比例，与 dd_current 同单位）
         _num = lambda ps, v: any(
             isinstance(x, (int, float)) and abs(x + v) < 1e-9 for x in (ps or []))
-        assert any(_num(ps, 25.0) for ps in conn.executed_params), \
+        assert any(_num(ps, 0.25) for ps in conn.executed_params), \
             conn.executed_params
-        assert any(_num(ps, 30.0) for ps in conn.executed_params), \
+        assert any(_num(ps, 0.30) for ps in conn.executed_params), \
             conn.executed_params
         # 部分筛选（只传年化 min）：只出现 >= 条件
         conn2 = FakeConnOne((None, None, None))
