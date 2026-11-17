@@ -29,6 +29,7 @@ LIST_BODY = {
     "rows": [
         {"code": "019387", "name": "中欧时代共赢混合发起A1", "fund_type": "混合型-偏股",
          "alive": True, "scale_yi": 1.2, "scale_date": "2026-09-30",
+         "dd_current": -0.2712, "days_since_peak": 340, "dip_band": "25-30",
          "age_years": 2.9,
          "w10_start": "2023-11-28", "w10_end": "2026-10-28", "w10_months": 36,
          "w10_rounds": 6, "w10_invested": 36000, "w10_final_value": 42480,
@@ -37,6 +38,7 @@ LIST_BODY = {
          "full_months": 36},
         {"code": "161725", "name": "招商中证白酒指数(LOF)A", "fund_type": "指数型-股票",
          "alive": True, "scale_yi": 209.0, "scale_date": "2026-09-30",
+         "dd_current": -0.625, "days_since_peak": 1380, "dip_band": "30+",
          "age_years": 10.4,
          "w10_start": "2016-10-31", "w10_end": "2026-10-28", "w10_months": 121,
          "w10_rounds": 7, "w10_invested": 121000, "w10_final_value": 102850,

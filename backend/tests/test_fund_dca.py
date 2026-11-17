@@ -120,8 +120,8 @@ class TestDcaSqlShapes:
         """缺省：alive 仅在市谓词 + ORDER BY w10_xirr DESC NULLS LAST。"""
         body, conn = _fetch_dca()
         sql, params = conn.cursor_obj.executed[1]
-        assert "ORDER BY w10_xirr DESC NULLS LAST" in sql
-        assert "alive = TRUE" in sql
+        assert "ORDER BY r.w10_xirr DESC NULLS LAST" in sql
+        assert "r.alive = TRUE" in sql
         assert params[-2:] == (50, 0)
 
     def test_sort_age_years_maps_full_start(self):
@@ -131,26 +131,26 @@ class TestDcaSqlShapes:
         body, conn = _fetch_dca(sort="age_years")
         assert body["status"] == "up"
         sqls = [sql for sql, _ in conn.cursor_obj.executed]
-        assert any("ORDER BY full_start" in s for s in sqls)
+        assert any("ORDER BY r.full_start" in s for s in sqls)
 
     def test_sort_whitelist_rejects_injection(self):
         """sort 非白名单值回落 w10_xirr——非法值不得进入 SQL（防注入）。"""
         body, conn = _fetch_dca(sort="w10_xirr; DROP TABLE fund_dca_result")
         sql, _ = conn.cursor_obj.executed[1]
         assert "DROP TABLE" not in sql
-        assert "ORDER BY w10_xirr DESC" in sql
+        assert "ORDER BY r.w10_xirr DESC" in sql
 
     def test_sort_and_order_mapping(self):
         """sort=full_xirr & order=asc → ORDER BY full_xirr ASC。"""
         body, conn = _fetch_dca(sort="full_xirr", order="asc")
         sql, _ = conn.cursor_obj.executed[1]
-        assert "ORDER BY full_xirr ASC NULLS LAST" in sql
+        assert "ORDER BY r.full_xirr ASC NULLS LAST" in sql
 
     def test_alive_empty_means_no_filter(self):
         """alive=''：全部（含清盘），WHERE 不含 alive 谓词（列名除外）。"""
         body, conn = _fetch_dca(alive="")
         sql, _ = conn.cursor_obj.executed[1]
-        assert "alive = TRUE" not in sql and "alive = FALSE" not in sql
+        assert "r.alive = TRUE" not in sql and "r.alive = FALSE" not in sql
 
     def test_search_params_include_like(self):
         """q 搜索：参数含两侧 % 通配（参数化 LIKE，无内联 %——psycopg3 坑）。"""
@@ -601,53 +601,155 @@ class TestDcaListFee:
         """缺省 fee=gross：排序沿用原列（行为与旧版一致）。"""
         body, conn = _fetch_dca()
         sql, _ = conn.cursor_obj.executed[1]
-        assert "ORDER BY w10_xirr DESC NULLS LAST" in sql
+        assert "ORDER BY r.w10_xirr DESC NULLS LAST" in sql
         stats_sql, _ = conn.cursor_obj.executed[3]
-        assert "w10_xirr IS NOT NULL" in stats_sql
-        assert "w10_rounds > 0" in stats_sql
+        assert "r.w10_xirr IS NOT NULL" in stats_sql
+        assert "r.w10_rounds > 0" in stats_sql
 
     def test_fee_nom_switches_sort_and_stats_columns(self):
         """fee=nom：排序/统计切到 _nom 后缀列。"""
         body, conn = _fetch_dca(fee="nom")
         sql, _ = conn.cursor_obj.executed[1]
-        assert "ORDER BY w10_xirr_nom DESC NULLS LAST" in sql
+        assert "ORDER BY r.w10_xirr_nom DESC NULLS LAST" in sql
         stats_sql, _ = conn.cursor_obj.executed[3]
-        assert "w10_xirr_nom IS NOT NULL" in stats_sql
-        assert "w10_rounds_nom > 0" in stats_sql
+        assert "r.w10_xirr_nom IS NOT NULL" in stats_sql
+        assert "r.w10_rounds_nom > 0" in stats_sql
         assert body["fee"] == "nom"
 
     def test_fee_nom_sort_by_rounds_and_gap(self):
         """fee=nom：轮次/间隔排序字段同样带后缀。"""
         body, conn = _fetch_dca(fee="nom", sort="w10_rounds")
         sql, _ = conn.cursor_obj.executed[1]
-        assert "ORDER BY w10_rounds_nom DESC NULLS LAST" in sql
+        assert "ORDER BY r.w10_rounds_nom DESC NULLS LAST" in sql
         body, conn = _fetch_dca(fee="disc", sort="gap_avg_days", order="asc")
         sql, _ = conn.cursor_obj.executed[1]
-        assert "ORDER BY gap_avg_days_disc ASC NULLS LAST" in sql
+        assert "ORDER BY r.gap_avg_days_disc ASC NULLS LAST" in sql
 
     def test_fee_disc_sort_by_profit_rate(self):
         """fee=disc：收益率排序切 _disc；非口径字段（规模）不受影响。"""
         body, conn = _fetch_dca(fee="disc", sort="w10_profit_rate")
         sql, _ = conn.cursor_obj.executed[1]
-        assert "ORDER BY w10_profit_rate_disc DESC NULLS LAST" in sql
+        assert "ORDER BY r.w10_profit_rate_disc DESC NULLS LAST" in sql
         body, conn = _fetch_dca(fee="nom", sort="scale_yi")
         sql, _ = conn.cursor_obj.executed[1]
-        assert "ORDER BY scale_yi DESC NULLS LAST" in sql
+        assert "ORDER BY r.scale_yi DESC NULLS LAST" in sql
 
     def test_fee_invalid_falls_back_to_gross(self):
         """非白名单 fee（含注入串）回落 gross，不得进入 SQL。"""
         body, conn = _fetch_dca(fee="nom; DROP TABLE fund_dca_result")
         sql, _ = conn.cursor_obj.executed[1]
         assert "DROP" not in sql
-        assert "ORDER BY w10_xirr DESC NULLS LAST" in sql
+        assert "ORDER BY r.w10_xirr DESC NULLS LAST" in sql
         assert body["fee"] == "gross"
 
     def test_select_columns_match_row_mapping(self):
         """SELECT 列数与 _LIST_COLS 一致（dict(zip) 静默错位防线）。"""
         from app.dca_api import _DCA_LIST_SQL, _LIST_COLS
         seg = _DCA_LIST_SQL.split("SELECT", 1)[1].split("FROM", 1)[0]
-        select_cols = [c.strip() for c in seg.split(",") if c.strip()]
+        # 列带表别名限定（r./t.），剥掉后与 _LIST_COLS 对齐
+        select_cols = [c.strip().split(".", 1)[-1]
+                       for c in seg.split(",") if c.strip()]
         assert select_cols == _LIST_COLS
+
+
+class TestDcaTimingJoin:
+    """表格合并（2026-11-17）：排行列表 LEFT JOIN fund_dip_timing 附时机列，
+    定投时机与排行共用一张表——旧时机区块专用端点不再被前端调用。"""
+
+    def test_list_sql_has_timing_join_and_columns(self):
+        """两个排行端点的列表 SQL 都带 LEFT JOIN 与时机三列；行映射同步。"""
+        from app.dca_api import (_DCA_LIST_SQL, _LIST_COLS, _TP_LIST_SQL,
+                                 _TP_LIST_COLS)
+        join = "LEFT JOIN fund_dip_timing t ON t.code = r.code"
+        assert join in _DCA_LIST_SQL and join in _TP_LIST_SQL
+        cols = "t.dd_current, t.days_since_peak, t.dip_band"
+        assert cols in _DCA_LIST_SQL and cols in _TP_LIST_SQL
+        assert _LIST_COLS[-3:] == ["dd_current", "days_since_peak", "dip_band"]
+        assert _TP_LIST_COLS == ["tp"] + _LIST_COLS
+
+    def test_sort_dd_current_maps_t_table(self):
+        """时机列排序落 t 表：sort=dd_current → ORDER BY t.dd_current。"""
+        body, conn = _fetch_dca(sort="dd_current", order="asc")
+        sql, _ = conn.cursor_obj.executed[1]
+        assert "ORDER BY t.dd_current ASC NULLS LAST" in sql
+        body, conn = _fetch_dca(sort="days_since_peak")
+        sql, _ = conn.cursor_obj.executed[1]
+        assert "ORDER BY t.days_since_peak DESC NULLS LAST" in sql
+
+    def test_dd_sort_whitelist_rejects_injection(self):
+        """sort 时机列同样受白名单保护：注入串回落 w10_xirr，不得进 SQL。"""
+        body, conn = _fetch_dca(sort="dd_current; DROP TABLE fund_dip_timing")
+        sql, _ = conn.cursor_obj.executed[1]
+        assert "DROP" not in sql
+        assert "ORDER BY r.w10_xirr DESC" in sql
+
+    def test_routes_accept_range_params_and_degrade(self, client, monkeypatch):
+        """两个排行路由接受五维度区间参数：PG 不可达仍 200 status=down。"""
+        monkeypatch.setattr("app.config.DATABASE_URL", DEAD_DSN)
+        rng = {"dd_min": 25, "dd_max": 30, "xirr_min": 0.3, "gap_max": 120,
+               "pr_min": -0.1, "age_min": 1, "age_max": 10}
+        for url in ("/api/funds/dca", "/api/funds/dca/tp"):
+            resp = client.get(url, params=rng)
+            assert resp.status_code == 200
+            assert resp.json()["status"] == "down"
+
+
+class TestDcaRangeFilters:
+    """五维度区间筛选（表格合并后排行端点承接时机区块筛选，语义同
+    timing 端点）：dd 输入正数幅度与负数 dd_current 比较；参数追加在
+    权益白名单之后、limit/offset 之前。"""
+
+    def test_xirr_range_clause_and_param(self):
+        body, conn = _fetch_dca(xirr_min=0.3, xirr_max=0.9)
+        sql, params = conn.cursor_obj.executed[1]
+        assert "r.w10_xirr BETWEEN %s AND %s" in sql
+        assert params[-4:-2] == (0.3, 0.9)
+        assert params[-2:] == (50, 0)
+
+    def test_dd_range_uses_negative_compare(self):
+        """回撤输入正数幅度（25 → dd_current <= -0.25），与 timing 端点同语义。"""
+        body, conn = _fetch_dca(dd_min=25, dd_max=30)
+        sql, params = conn.cursor_obj.executed[1]
+        assert "t.dd_current <= %s" in sql
+        assert "t.dd_current >= %s" in sql
+        assert params[-4:-2] == (-0.25, -0.30)
+
+    def test_gap_fee_suffix_column(self):
+        """gap 区间按费用口径后缀列（nom → r.gap_avg_days_nom）。"""
+        body, conn = _fetch_dca(fee="nom", gap_min=90)
+        sql, params = conn.cursor_obj.executed[1]
+        assert "r.gap_avg_days_nom >= %s" in sql
+        assert params[-3] == 90
+
+    def test_age_range_uses_full_start_offset(self):
+        """age 边界 → 成立日距参考日偏移（min=2 年 → full_start <= ref-2年）。"""
+        ref = dt.date(2026, 10, 29)
+        body, conn = _fetch_dca(age_min=2, age_max=10, one=(ref,))
+        sql, params = conn.cursor_obj.executed[1]
+        assert "r.full_start <= %s" in sql and "r.full_start >= %s" in sql
+        assert params[-4:-2] == (ref - dt.timedelta(days=365.25 * 2),
+                                 ref - dt.timedelta(days=365.25 * 10))
+
+    def test_count_follows_range_filters(self):
+        """count SQL 同步带区间谓词与参数（分页总数口径一致）。"""
+        body, conn = _fetch_dca(dd_min=20)
+        csql, cparams = conn.cursor_obj.executed[2]
+        assert "t.dd_current <= %s" in csql
+        assert cparams[-1] == -0.20   # count 不带 limit/offset，区间参数在末尾
+
+    def test_stats_ignores_range_filters(self):
+        """统计卡不受区间筛选影响（与「不随搜索变化」同约定）。"""
+        body, conn = _fetch_dca(xirr_min=0.3, dd_min=20)
+        ssql, sparams = conn.cursor_obj.executed[3]
+        assert "BETWEEN" not in ssql and "dd_current" not in ssql
+        assert not any(isinstance(p, float) for p in sparams)
+
+    def test_no_filters_param_count_unchanged(self):
+        """缺省（无区间筛选）：参数与合并前一致（q/like/like/权益/limit/offset）。"""
+        body, conn = _fetch_dca()
+        sql, params = conn.cursor_obj.executed[1]
+        assert "AND true" in sql        # 区间占位回落恒真
+        assert len(params) == 6
 
 
 def _fetch_scatter(**kw):

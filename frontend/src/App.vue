@@ -5,6 +5,7 @@ import Column from 'primevue/column'
 import InputText from 'primevue/inputtext'
 import InputNumber from 'primevue/inputnumber'
 import Select from 'primevue/select'
+import MultiSelect from 'primevue/multiselect'
 import Dialog from 'primevue/dialog'
 import Button from 'primevue/button'
 import Paginator from 'primevue/paginator'
@@ -90,7 +91,6 @@ function buildQuery() {
     if (dcaScale.value) q.set('scale', dcaScale.value)
     if (dcaEquity.value) q.set('equity', '1')
     if (dcaTp.value !== 0.20) q.set('tp', dcaTp.value)
-    if (dcaTimingBand.value !== '25-30') q.set('tband', dcaTimingBand.value)
     if (dcaSort.value !== 'w10_xirr') q.set('sort', dcaSort.value)
     if (dcaOrder.value !== 'desc') q.set('order', dcaOrder.value)
   }
@@ -194,7 +194,7 @@ function applyUrl() {
   if (NAV_BY_PATH[u.pathname] === 'fundDca' &&
       (q.get('q') != null || q.get('page') || q.get('alive') != null
        || q.get('age') || q.get('scale') || q.get('equity') != null
-       || q.get('tp') != null || q.get('tband') != null
+       || q.get('tp') != null
        || q.get('sort') || q.get('order'))) {
     dcaQuery.value = q.get('q') ?? ''
     dcaPage.value = +q.get('page') || 0
@@ -205,10 +205,6 @@ function applyUrl() {
     if (q.get('tp') != null) {
       const v = parseFloat(q.get('tp'))
       if (DCA_TP_OPTIONS.includes(v)) dcaTp.value = v
-    }
-    if (q.get('tband') != null
-        && DCA_TIMING_BANDS.some(b => b.value === q.get('tband'))) {
-      dcaTimingBand.value = q.get('tband')
     }
     if (DCA_SORTABLE.includes(q.get('sort'))) dcaSort.value = q.get('sort')
     if (['asc', 'desc'].includes(q.get('order'))) dcaOrder.value = q.get('order')
@@ -390,7 +386,8 @@ const dcaOrder = ref('desc')
 const dcaLoading = ref(false)
 const DCA_PAGE_SIZE = 50
 const DCA_SORTABLE = ['w10_xirr', 'full_xirr', 'w10_profit_rate',
-  'full_profit_rate', 'w10_rounds', 'scale_yi', 'code']
+  'full_profit_rate', 'w10_rounds', 'scale_yi', 'code',
+  'dd_current', 'days_since_peak']   // 时机列（2026-11-17 表格合并）
 const DCA_ALIVE_FILTERS = [
   { label: '仅在市', value: 'true' },
   { label: '仅清盘/退市', value: 'false' },
@@ -506,7 +503,7 @@ async function loadDca() {
       + `&equity=${dcaEquity.value}`
       + `&sort=${dcaSort.value}&order=${dcaOrder.value}`
       + `&fee=${dcaFeeMode.value}`
-      + `&limit=${DCA_PAGE_SIZE}&offset=${off}`)
+      + `&limit=${DCA_PAGE_SIZE}&offset=${off}${dcaRangeQuery()}`)
     dca.value = await r.json()
   } catch (e) {
     dca.value = { status: 'down', detail: String(e), total: 0, rows: [],
@@ -522,7 +519,6 @@ function onDcaTpChange(tp) {
   dcaTp.value = tp
   dcaPage.value = 0
   loadDca()
-  loadDcaTiming()
 }
 // 六档对比聚合（权益类+商品池；跟随费用口径，不随权益开关——池口径独立）
 async function loadDcaTpCompare() {
@@ -555,77 +551,59 @@ const dcaTpChart = computed(() => {
   }
 })
 
-// ===== 定投时机区块（2026-11-16 假设验证：-25~-30% 回撤起定投首轮止盈最快/
-// 成功率与年化最高；30%+ 超深回撤起不来风险）——查 fund_dip_timing ×
-// fund_dca_tp_result（当前 tp/fee 口径），日更顺带刷新
-const DCA_TIMING_BANDS = [
-  { label: '甜蜜点 -25~-30%', value: '25-30' },
-  { label: '-20~-25%', value: '20-25' },
-  { label: '-30%+ 警戒', value: '30+' },
-  { label: '全部', value: '' },
-]
-const dcaTiming = ref({ status: 'loading', total: 0, rows: [] })
-const dcaTimingBand = ref('25-30')
-const dcaTimingSort = ref('w10_xirr')
-const dcaTimingOrder = ref('desc')
-const dcaTimingPage = ref(0)
-const dcaTimingLoading = ref(false)
+// ===== 定投时机（2026-11-16 假设验证：-25~-30% 回撤起定投首轮止盈最快/
+// 成功率与年化最高；30%+ 超深回撤起不来风险）。2026-11-17 表格合并：
+// 时机列（当前回撤/距前高）由后端 LEFT JOIN fund_dip_timing 并入下方排行
+// 表，两张基金表合一；回撤桶按钮组删除（与区间筛选的当前回撤维度重复，
+// 用户确认保留区间筛选）；五维度区间筛选迁到排行区作用于统一表格
 const ddpct = v => v == null ? '—' : (v * 100).toFixed(1) + '%'
 // 五维度区间筛选（空=不筛；回撤输入正数幅度）。应用后服务端过滤（分页
 // 表格客户端筛当前页无意义）；筛选面板常显（2026-11-17 用户反馈，去折叠
 // 按钮）；会话内探索状态，不进 URL
-const emptyTimingFilters = () => ({ age_min: null, age_max: null,
+const emptyRangeFilters = () => ({ age_min: null, age_max: null,
   gap_min: null, gap_max: null, xirr_min: null, xirr_max: null,
   dd_min: null, dd_max: null, pr_min: null, pr_max: null })
-const dcaTimingFilters = ref(emptyTimingFilters())
-const dcaTimingFiltersActive = ref(false)
-async function loadDcaTiming() {
-  if (STATIC_MODE) return
-  dcaTimingLoading.value = true
-  try {
-    const off = dcaTimingPage.value * DCA_PAGE_SIZE
-    let fs = ''
-    if (dcaTimingFiltersActive.value) {
-      for (const [k, v] of Object.entries(dcaTimingFilters.value)) {
-        if (v != null && v !== '') fs += `&${k}=${v}`
-      }
+const dcaRangeFilters = ref(emptyRangeFilters())
+const dcaRangeFiltersActive = ref(false)
+// 区间筛选参数串：拼进统一表格 loadDca 的请求（旧端点与多阈值端点同支持）
+function dcaRangeQuery() {
+  let fs = ''
+  if (dcaRangeFiltersActive.value) {
+    for (const [k, v] of Object.entries(dcaRangeFilters.value)) {
+      if (v != null && v !== '') fs += `&${k}=${v}`
     }
-    const r = await fetch(`/api/funds/dca/timing?band=${encodeURIComponent(dcaTimingBand.value)}`
-      + `&tp=${dcaTp.value}&fee=${dcaFeeMode.value}&equity=${dcaEquity.value}`
-      + `&sort=${dcaTimingSort.value}&order=${dcaTimingOrder.value}`
-      + `&limit=${DCA_PAGE_SIZE}&offset=${off}${fs}`)
-    dcaTiming.value = await r.json()
-  } catch (e) {
-    dcaTiming.value = { status: 'down', detail: String(e), total: 0, rows: [] }
-  } finally {
-    dcaTimingLoading.value = false
   }
+  return fs
 }
-function applyDcaTimingFilters() {
-  dcaTimingFiltersActive.value = true
-  dcaTimingPage.value = 0
-  loadDcaTiming()
+function applyDcaRangeFilters() {
+  dcaRangeFiltersActive.value = true
+  dcaSearch()
 }
-function resetDcaTimingFilters() {
-  dcaTimingFilters.value = emptyTimingFilters()
-  if (!dcaTimingFiltersActive.value) return
-  dcaTimingFiltersActive.value = false
-  dcaTimingPage.value = 0
-  loadDcaTiming()
+function resetDcaRangeFilters() {
+  dcaRangeFilters.value = emptyRangeFilters()
+  if (!dcaRangeFiltersActive.value) return
+  dcaRangeFiltersActive.value = false
+  dcaSearch()
 }
-function onDcaTimingBandChange(v) {
-  if (dcaTimingBand.value === v) return
-  dcaTimingBand.value = v
-  dcaTimingPage.value = 0
-  loadDcaTiming()
-}
-function onDcaTimingPage(e) { dcaTimingPage.value = e.page; loadDcaTiming() }
-function onDcaTimingSort(e) {
-  dcaTimingSort.value = e.sortField
-  dcaTimingOrder.value = e.sortOrder === 1 ? 'asc' : 'desc'
-  dcaTimingPage.value = 0
-  loadDcaTiming()
-}
+
+// ===== 列显示过滤（2026-11-17 用户需求：用户自决定表格显示哪些列）=====
+// 代码/名称/操作恒显，其余列可勾选（默认全显）；纯客户端裁剪，不影响
+// 服务端分页/排序；会话内状态，不进 URL
+const DCA_TOGGLE_COLS = [
+  { key: 'fund_type', label: '类型' },
+  { key: 'dd_current', label: '当前回撤' },
+  { key: 'days_since_peak', label: '距前高' },
+  { key: 'age_years', label: '运作年限' },
+  { key: 'scale_yi', label: '规模' },
+  { key: 'gap_avg_days', label: '止盈间隔' },
+  { key: 'w10_rounds', label: '止盈次数' },
+  { key: 'w10_profit_rate', label: '总收益率' },
+  { key: 'w10_xirr', label: '年化·近10年' },
+  { key: 'full_xirr', label: '年化·全史' },
+  { key: 'w10_range', label: '回测区间' },
+]
+const dcaVisibleCols = ref(DCA_TOGGLE_COLS.map(c => c.key))
+const colVisible = key => dcaVisibleCols.value.includes(key)
 
 // ===== 起点条件回测区块（假设验证统计：不同起点开始定投的结果差异；
 // 静态快照 fund_dip_validation，验证重跑后刷新，不随口径变化）
@@ -765,7 +743,7 @@ async function loadDcaScatter() {
 }
 // 费用口径与权益开关都联动散点+排行（权益切换时统计卡/分箱同步重算）；
 // 费用口径同时联动止盈点对比区块
-watch([dcaFeeMode, dcaEquity], () => { loadDcaScatter(); loadDca(); loadDcaTpCompare(); loadDcaTiming() })
+watch([dcaFeeMode, dcaEquity], () => { loadDcaScatter(); loadDca(); loadDcaTpCompare() })
 
 function renderDcaScatterChart() {
   if (dcaScatterChart) { dcaScatterChart.destroy(); dcaScatterChart = null }
@@ -1197,7 +1175,7 @@ const _onFundResize = () => fundChartInstance && fundChartInstance.resize()
 
 watch(activeNav, (nav, prev) => {
   if (nav === 'funds') loadFunds()
-  if (nav === 'fundDca') { loadDca(); loadDcaScatter(); loadDcaTpCompare(); loadDcaTiming(); loadDcaDipReport() }
+  if (nav === 'fundDca') { loadDca(); loadDcaScatter(); loadDcaTpCompare(); loadDcaDipReport() }
   if (nav === 'fund' && fund.value) {
     loadFundChart()
     loadFundDetail()
@@ -2814,145 +2792,6 @@ watch(
               <div v-else class="browse-empty">多阈值对比数据尚未生成（日更回测首次写入后可用）</div>
             </div>
 
-            <!-- ===== 定投时机（当前回撤桶 × 历史止盈素质；验证结论：-25~-30% 甜蜜点） ===== -->
-            <div class="card timing-block" v-if="!STATIC_MODE" style="margin-top: 16px; padding: 14px 16px 18px">
-              <div class="toolbar" style="margin: 0 0 6px">
-                <div>
-                  <h2 class="h1" style="font-size: 18px">定投时机：现在开始定投，谁在最好的位置？</h2>
-                  <p class="sub">按「当前回撤深度」分桶看在市权益基金（历史 98 万起点验证：从 -25%~-30% 回撤开始定投，首轮止盈最快、成功率与年化最高；&gt;-30% 超深回撤起不来风险升高）· 素质列为该基金「月定投+{{ dcaTpLabel(dcaTp) }}止盈」历史回测（{{ dcaFeeLabel }}，近 10 年）· {{ dcaTiming.total ?? 0 }} 只</p>
-                </div>
-                <div class="toolbar-right">
-                  <span v-if="dcaTimingLoading" class="sub">加载中…</span>
-                  <div class="src-seg" :style="dcaTimingLoading ? 'opacity:.55' : ''">
-                    <button v-for="b in DCA_TIMING_BANDS" :key="b.value"
-                            class="src-seg-btn"
-                            :class="{ active: dcaTimingBand === b.value }"
-                            @click="onDcaTimingBandChange(b.value)"
-                            :data-timing-band="b.value">{{ b.label }}</button>
-                  </div>
-                </div>
-              </div>
-              <!-- 区间筛选：常显（2026-11-17 用户反馈：折叠按钮多余，且固定五列
-                   网格被 InputNumber 的 min-content 撑破、在窄屏冲出页面）——
-                   响应式 auto-fit 网格 + 输入框可收缩（min-width:0 / input 100%） -->
-              <div class="timing-filter">
-                <div class="timing-filter-head">
-                  <span class="timing-filter-title">区间筛选</span>
-                  <button v-if="dcaTimingFiltersActive" class="src-seg-btn"
-                          @click="resetDcaTimingFilters">清除筛选</button>
-                  <span v-if="dcaTimingFiltersActive" class="sub">筛选已生效 · {{ dcaTiming.total ?? 0 }} 只</span>
-                </div>
-                <div class="timing-filter-grid">
-                  <label>运作年限（年）
-                    <div class="timing-filter-range">
-                      <InputNumber v-model="dcaTimingFilters.age_min" :min="0" :max="99" :maxFractionDigits="1" :useGrouping="false" size="small" placeholder="最短" style="width: 100%" />
-                      <span>~</span>
-                      <InputNumber v-model="dcaTimingFilters.age_max" :min="0" :max="99" :maxFractionDigits="1" :useGrouping="false" size="small" placeholder="最长" style="width: 100%" />
-                    </div>
-                  </label>
-                  <label>止盈间隔（天）
-                    <div class="timing-filter-range">
-                      <InputNumber v-model="dcaTimingFilters.gap_min" :min="0" :useGrouping="false" size="small" placeholder="最短" style="width: 100%" />
-                      <span>~</span>
-                      <InputNumber v-model="dcaTimingFilters.gap_max" :min="0" :useGrouping="false" size="small" placeholder="最长" style="width: 100%" />
-                    </div>
-                  </label>
-                  <label>年化（0.3 = 30%）
-                    <div class="timing-filter-range">
-                      <InputNumber v-model="dcaTimingFilters.xirr_min" :min="-1" :max="20" :maxFractionDigits="2" :useGrouping="false" size="small" placeholder="最低" style="width: 100%" />
-                      <span>~</span>
-                      <InputNumber v-model="dcaTimingFilters.xirr_max" :min="-1" :max="20" :maxFractionDigits="2" :useGrouping="false" size="small" placeholder="最高" style="width: 100%" />
-                    </div>
-                  </label>
-                  <label>当前回撤（%，正数幅度）
-                    <div class="timing-filter-range">
-                      <InputNumber v-model="dcaTimingFilters.dd_min" :min="0" :max="99" :maxFractionDigits="1" :useGrouping="false" size="small" placeholder="至少跌" style="width: 100%" />
-                      <span>~</span>
-                      <InputNumber v-model="dcaTimingFilters.dd_max" :min="0" :max="99" :maxFractionDigits="1" :useGrouping="false" size="small" placeholder="至多跌" style="width: 100%" />
-                    </div>
-                  </label>
-                  <label>总收益率（0.1 = 10%）
-                    <div class="timing-filter-range">
-                      <InputNumber v-model="dcaTimingFilters.pr_min" :min="-1" :max="20" :maxFractionDigits="2" :useGrouping="false" size="small" placeholder="最低" style="width: 100%" />
-                      <span>~</span>
-                      <InputNumber v-model="dcaTimingFilters.pr_max" :min="-1" :max="20" :maxFractionDigits="2" :useGrouping="false" size="small" placeholder="最高" style="width: 100%" />
-                    </div>
-                  </label>
-                  <div class="timing-filter-actions">
-                    <Button label="应用筛选" size="small" @click="applyDcaTimingFilters" />
-                    <Button label="重置" size="small" severity="secondary" outlined @click="resetDcaTimingFilters" />
-                  </div>
-                </div>
-              </div>
-              <div v-if="dcaTiming.status === 'down'" class="browse-empty">
-                时机数据不可用：{{ dcaTiming.detail || '数据库连接失败' }}
-              </div>
-              <div class="browse-pv" v-else>
-                <DataTable :value="dcaTiming.rows || []" lazy paginator :rows="DCA_PAGE_SIZE"
-                  :first="dcaTimingPage * DCA_PAGE_SIZE"
-                  :totalRecords="dcaTiming.total || 0" :loading="dcaTimingLoading"
-                  dataKey="code" stripedRows size="small"
-                  :sortField="dcaTimingSort" :sortOrder="dcaTimingOrder === 'asc' ? 1 : -1"
-                  @page="onDcaTimingPage" @sort="onDcaTimingSort">
-                  <template #empty>
-                    <div class="browse-empty">
-                      {{ dcaTiming.status === 'loading' ? '加载中…'
-                        : '该回撤桶暂无在市权益基金（切「全部」查看）' }}
-                    </div>
-                  </template>
-                  <Column field="code" header="代码" style="width: 90px">
-                    <template #body="{ data }"><span class="mono">{{ data.code }}</span></template>
-                  </Column>
-                  <Column field="name" header="名称" />
-                  <Column field="fund_type" header="类型" style="width: 120px">
-                    <template #body="{ data }">{{ data.fund_type || '—' }}</template>
-                  </Column>
-                  <Column field="dd_current" header="当前回撤" style="width: 92px" sortable bodyClass="num-col">
-                    <template #body="{ data }">
-                      <span v-if="data.dd_current != null" :class="data.dd_current <= -0.3 ? 'neg' : ''"
-                            :title="data.dip_band === '25-30' ? '甜蜜点：历史上从该位置开始定投首轮止盈最快' : ''">{{ ddpct(data.dd_current) }}</span>
-                      <span v-else>—</span>
-                    </template>
-                  </Column>
-                  <Column field="days_since_peak" header="距前高" style="width: 88px" sortable bodyClass="num-col">
-                    <template #body="{ data }">{{ data.days_since_peak != null ? data.days_since_peak + ' 天' : '—' }}</template>
-                  </Column>
-                  <Column field="age_years" sortField="full_start" header="运作年限" style="width: 88px" sortable bodyClass="num-col">
-                    <template #body="{ data }">{{ data.age_years != null ? data.age_years + ' 年' : '—' }}</template>
-                  </Column>
-                  <Column field="scale_yi" header="规模(亿)" style="width: 88px" sortable bodyClass="num-col">
-                    <template #body="{ data }">{{ data.scale_yi != null ? data.scale_yi : '—' }}</template>
-                  </Column>
-                  <Column field="gap_avg_days" header="止盈间隔" style="width: 96px" sortable bodyClass="num-col">
-                    <template #body="{ data }">{{ dcaFeeVal(data, 'gap_avg_days') != null ? '≈' + (dcaFeeVal(data, 'gap_avg_days') / 30.44).toFixed(1) + ' 月/次' : '—' }}</template>
-                  </Column>
-                  <Column field="w10_rounds" header="止盈次数" style="width: 84px" sortable bodyClass="num-col">
-                    <template #body="{ data }">{{ dcaFeeVal(data, 'w10_rounds') ?? '—' }}</template>
-                  </Column>
-                  <Column field="w10_xirr" header="年化·近10年" style="width: 108px" sortable bodyClass="num-col">
-                    <template #body="{ data }">
-                      <span v-if="dcaFeeVal(data, 'w10_xirr') != null"
-                            :class="dcaFeeVal(data, 'w10_xirr') >= 0 ? 'chg-up' : 'chg-down'">{{ pct1(dcaFeeVal(data, 'w10_xirr')) }}</span>
-                      <span v-else>—</span>
-                    </template>
-                  </Column>
-                  <Column field="w10_profit_rate" header="总收益率" style="width: 96px" sortable bodyClass="num-col">
-                    <template #body="{ data }">
-                      <span v-if="dcaFeeVal(data, 'w10_profit_rate') != null"
-                            :class="dcaFeeVal(data, 'w10_profit_rate') >= 0 ? 'chg-up' : 'chg-down'">{{ pct1(dcaFeeVal(data, 'w10_profit_rate')) }}</span>
-                      <span v-else>—</span>
-                    </template>
-                  </Column>
-                  <Column header="操作" style="width: 72px">
-                    <template #body="{ data }">
-                      <button class="detail-btn" @click="openDcaRounds(data)">详情</button>
-                    </template>
-                  </Column>
-                </DataTable>
-              </div>
-              <p class="note" style="margin: 10px 0 0">当前回撤 = 复权净值距历史最高的跌幅（日更顺带刷新）· 「甜蜜点」结论来自 2015~2026 权益基金 98 万起点历史模拟（-25~-30% 回撤起定投首轮止盈中位 582 天、成功率 63.2%、年化 32.0%，20% 止盈线含费口径）· 历史统计不构成任何操作建议 · 点行「详情」查看该基金每轮止盈明细（与排行共用弹窗）</p>
-            </div>
-
             <!-- ===== 起点条件回测（不同起点开始定投的结果差异；假设验证统计静态快照） ===== -->
             <div class="card dip-report-block" v-if="!STATIC_MODE && dcaDipReport" style="margin-top: 16px; padding: 14px 16px 18px">
               <div class="toolbar" style="margin: 0 0 6px">
@@ -3047,6 +2886,67 @@ watch(
                         @click="dcaFeeMode = o.key"
                         :data-table-fee="o.key">{{ o.label }}</button>
               </div>
+              <!-- 列显示过滤（2026-11-17 用户需求）：勾选表格要显示的列；
+                   代码/名称/操作恒显，纯客户端裁剪不影响服务端分页 -->
+              <MultiSelect v-model="dcaVisibleCols" :options="DCA_TOGGLE_COLS"
+                optionLabel="label" optionValue="key" size="small"
+                placeholder="显示列" class="dca-col-select"
+                :maxSelectedLabels="0" selectedItemsLabel="已选 {0} 列"
+                title="勾选表格要显示的列" aria-label="选择表格显示列" />
+            </div>
+            <!-- 区间筛选：常显（2026-11-17 用户反馈：折叠按钮多余，且固定五列
+                 网格被 InputNumber 的 min-content 撑破、在窄屏冲出页面）——
+                 响应式 auto-fit 网格 + 输入框可收缩（min-width:0 / input 100%）。
+                 表格合并后直接作用于统一排行表（服务端过滤；回撤桶按钮组已删，
+                 与本面板的当前回撤维度重复） -->
+            <div class="timing-filter">
+              <div class="timing-filter-head">
+                <span class="timing-filter-title">区间筛选</span>
+                <button v-if="dcaRangeFiltersActive" class="src-seg-btn"
+                        @click="resetDcaRangeFilters">清除筛选</button>
+                <span v-if="dcaRangeFiltersActive" class="sub">筛选已生效 · {{ dca.total ?? 0 }} 只</span>
+              </div>
+              <div class="timing-filter-grid">
+                <label>运作年限（年）
+                  <div class="timing-filter-range">
+                    <InputNumber v-model="dcaRangeFilters.age_min" :min="0" :max="99" :maxFractionDigits="1" :useGrouping="false" size="small" placeholder="最短" style="width: 100%" />
+                    <span>~</span>
+                    <InputNumber v-model="dcaRangeFilters.age_max" :min="0" :max="99" :maxFractionDigits="1" :useGrouping="false" size="small" placeholder="最长" style="width: 100%" />
+                  </div>
+                </label>
+                <label>止盈间隔（天）
+                  <div class="timing-filter-range">
+                    <InputNumber v-model="dcaRangeFilters.gap_min" :min="0" :useGrouping="false" size="small" placeholder="最短" style="width: 100%" />
+                    <span>~</span>
+                    <InputNumber v-model="dcaRangeFilters.gap_max" :min="0" :useGrouping="false" size="small" placeholder="最长" style="width: 100%" />
+                  </div>
+                </label>
+                <label>年化（0.3 = 30%）
+                  <div class="timing-filter-range">
+                    <InputNumber v-model="dcaRangeFilters.xirr_min" :min="-1" :max="20" :maxFractionDigits="2" :useGrouping="false" size="small" placeholder="最低" style="width: 100%" />
+                    <span>~</span>
+                    <InputNumber v-model="dcaRangeFilters.xirr_max" :min="-1" :max="20" :maxFractionDigits="2" :useGrouping="false" size="small" placeholder="最高" style="width: 100%" />
+                  </div>
+                </label>
+                <label>当前回撤（%，正数幅度）
+                  <div class="timing-filter-range">
+                    <InputNumber v-model="dcaRangeFilters.dd_min" :min="0" :max="99" :maxFractionDigits="1" :useGrouping="false" size="small" placeholder="至少跌" style="width: 100%" />
+                    <span>~</span>
+                    <InputNumber v-model="dcaRangeFilters.dd_max" :min="0" :max="99" :maxFractionDigits="1" :useGrouping="false" size="small" placeholder="至多跌" style="width: 100%" />
+                  </div>
+                </label>
+                <label>总收益率（0.1 = 10%）
+                  <div class="timing-filter-range">
+                    <InputNumber v-model="dcaRangeFilters.pr_min" :min="-1" :max="20" :maxFractionDigits="2" :useGrouping="false" size="small" placeholder="最低" style="width: 100%" />
+                    <span>~</span>
+                    <InputNumber v-model="dcaRangeFilters.pr_max" :min="-1" :max="20" :maxFractionDigits="2" :useGrouping="false" size="small" placeholder="最高" style="width: 100%" />
+                  </div>
+                </label>
+                <div class="timing-filter-actions">
+                  <Button label="应用筛选" size="small" @click="applyDcaRangeFilters" />
+                  <Button label="重置" size="small" severity="secondary" outlined @click="resetDcaRangeFilters" />
+                </div>
+              </div>
             </div>
             <div class="browse-pv">
               <DataTable :value="dca.rows || []" lazy paginator :rows="DCA_PAGE_SIZE"
@@ -3066,43 +2966,53 @@ watch(
                   <template #body="{ data }"><span class="mono">{{ data.code }}</span></template>
                 </Column>
                 <Column field="name" header="名称" />
-                <Column field="fund_type" header="类型" style="width: 130px">
+                <Column field="fund_type" header="类型" style="width: 130px" v-if="colVisible('fund_type')">
                   <template #body="{ data }">{{ data.fund_type || '—' }}</template>
                 </Column>
-                <Column field="age_years" sortField="full_start" header="运作年限" style="width: 90px" sortable bodyClass="num-col">
+                <Column field="dd_current" header="当前回撤" style="width: 92px" sortable bodyClass="num-col" v-if="colVisible('dd_current')">
+                  <template #body="{ data }">
+                    <span v-if="data.dd_current != null" :class="data.dd_current <= -0.3 ? 'neg' : ''"
+                          :title="data.dip_band === '25-30' ? '甜蜜点：历史上从该位置开始定投首轮止盈最快' : ''">{{ ddpct(data.dd_current) }}</span>
+                    <span v-else>—</span>
+                  </template>
+                </Column>
+                <Column field="days_since_peak" header="距前高" style="width: 88px" sortable bodyClass="num-col" v-if="colVisible('days_since_peak')">
+                  <template #body="{ data }">{{ data.days_since_peak != null ? data.days_since_peak + ' 天' : '—' }}</template>
+                </Column>
+                <Column field="age_years" sortField="full_start" header="运作年限" style="width: 90px" sortable bodyClass="num-col" v-if="colVisible('age_years')">
                   <template #body="{ data }">{{ data.age_years != null ? data.age_years + ' 年' : '—' }}</template>
                 </Column>
-                <Column field="scale_yi" header="规模(亿)" style="width: 95px" sortable bodyClass="num-col">
+                <Column field="scale_yi" header="规模(亿)" style="width: 95px" sortable bodyClass="num-col" v-if="colVisible('scale_yi')">
                   <template #body="{ data }">{{ data.scale_yi != null ? data.scale_yi : '—' }}</template>
                 </Column>
-                <Column field="w10_rounds" header="止盈次数" style="width: 88px" sortable bodyClass="num-col">
+                <Column field="w10_rounds" header="止盈次数" style="width: 88px" sortable bodyClass="num-col" v-if="colVisible('w10_rounds')">
                   <template #body="{ data }">{{ dcaFeeVal(data, 'w10_rounds') ?? '—' }}</template>
                 </Column>
-                <Column field="gap_avg_days" header="止盈间隔" style="width: 100px" sortable bodyClass="num-col">
+                <Column field="gap_avg_days" header="止盈间隔" style="width: 100px" sortable bodyClass="num-col" v-if="colVisible('gap_avg_days')">
                   <template #body="{ data }">{{ dcaFeeVal(data, 'gap_avg_days') != null ? '≈' + (dcaFeeVal(data, 'gap_avg_days') / 30.44).toFixed(1) + ' 月/次' : '—' }}</template>
                 </Column>
-                <Column field="w10_profit_rate" header="总收益率" style="width: 98px" sortable bodyClass="num-col">
+                <Column field="w10_profit_rate" header="总收益率" style="width: 98px" sortable bodyClass="num-col" v-if="colVisible('w10_profit_rate')">
                   <template #body="{ data }">
                     <span v-if="dcaFeeVal(data, 'w10_profit_rate') != null"
                       :class="dcaFeeVal(data, 'w10_profit_rate') >= 0 ? 'chg-up' : 'chg-down'">{{ pct1(dcaFeeVal(data, 'w10_profit_rate')) }}</span>
                     <span v-else>—</span>
                   </template>
                 </Column>
-                <Column field="w10_xirr" header="年化·近10年" style="width: 110px" sortable bodyClass="num-col">
+                <Column field="w10_xirr" header="年化·近10年" style="width: 110px" sortable bodyClass="num-col" v-if="colVisible('w10_xirr')">
                   <template #body="{ data }">
                     <span v-if="dcaFeeVal(data, 'w10_xirr') != null"
                       :class="dcaFeeVal(data, 'w10_xirr') >= 0 ? 'chg-up' : 'chg-down'">{{ pct1(dcaFeeVal(data, 'w10_xirr')) }}</span>
                     <span v-else>—</span>
                   </template>
                 </Column>
-                <Column field="full_xirr" header="年化·全史" style="width: 105px" sortable bodyClass="num-col">
+                <Column field="full_xirr" header="年化·全史" style="width: 105px" sortable bodyClass="num-col" v-if="colVisible('full_xirr')">
                   <template #body="{ data }">
                     <span v-if="dcaFeeVal(data, 'full_xirr') != null"
                       :class="dcaFeeVal(data, 'full_xirr') >= 0 ? 'chg-up' : 'chg-down'">{{ pct1(dcaFeeVal(data, 'full_xirr')) }}</span>
                     <span v-else>—</span>
                   </template>
                 </Column>
-                <Column header="回测区间" style="width: 205px">
+                <Column header="回测区间" style="width: 205px" v-if="colVisible('w10_range')">
                   <template #body="{ data }">
                     <span class="mono">{{ data.w10_start || '—' }} ~ {{ data.w10_end || '—' }}</span>
                   </template>
@@ -3114,7 +3024,7 @@ watch(
                 </Column>
               </DataTable>
             </div>
-            <p class="note">口径：每月首个净值日投入固定金额，任一净值日持仓收益达止盈线即全仓赎回并重开新一轮（分红再投）；排行/统计/散点/详情共用同一费用口径，搜索栏或散点区可切换（不含费 / 含费·申购一折 / 含费·申购名义，赎回费各口径一致按持有天数阶梯收取）；排行/统计/散点共用同一基金类型口径，搜索栏或散点区可切换（默认仅权益类：股票型/偏股·灵活·平衡混合/股票指数/海外权益共 8 类，全市场可切回，债基·FOF·货币·偏债不在权益类内） · 统计卡为当前类型与在市口径全集分位，不随搜索变化 · 新基金（回测窗口 &lt;90 天）年化留空 · 数据为离线回测快照，重跑 scripts/fund_dca_backtest.py 并经 app.dca_store 导入后刷新 · 点行或「详情」查看每轮止盈明细 · 止盈点切换（搜索栏按钮组或对比区块行/圆点）仅改排行/统计/明细数据源，散点/分箱固定 20% 口径</p>
+            <p class="note">口径：每月首个净值日投入固定金额，任一净值日持仓收益达止盈线即全仓赎回并重开新一轮（分红再投）；排行/统计/散点/详情共用同一费用口径，搜索栏或散点区可切换（不含费 / 含费·申购一折 / 含费·申购名义，赎回费各口径一致按持有天数阶梯收取）；排行/统计/散点共用同一基金类型口径，搜索栏或散点区可切换（默认仅权益类：股票型/偏股·灵活·平衡混合/股票指数/海外权益共 8 类，全市场可切回，债基·FOF·货币·偏债不在权益类内） · 统计卡为当前类型与在市口径全集分位，不随搜索与区间筛选变化 · 新基金（回测窗口 &lt;90 天）年化留空 · 「当前回撤」= 复权净值距历史最高的跌幅（日更顺带刷新），非在市基金无此数据；「甜蜜点」结论来自 2015~2026 权益基金 98 万起点历史模拟（-25~-30% 回撤起定投首轮止盈中位 582 天、成功率 63.2%、年化 32.0%，20% 止盈线含费口径） · 数据为离线回测快照，重跑 scripts/fund_dca_backtest.py 并经 app.dca_store 导入后刷新 · 点行或「详情」查看每轮止盈明细 · 止盈点切换（搜索栏按钮组或对比区块行/圆点）仅改排行/统计/明细数据源，散点/分箱固定 20% 口径 · 历史统计不构成任何操作建议</p>
 
 
             <!-- ===== 年限 × 规模 三维散点（每基金一点） + 分箱统计 ===== -->
@@ -4630,6 +4540,9 @@ body {
    控件挤压竖排溢出——2026-10-29 截图反馈） */
 .funds-search { width: auto; max-width: 100%; height: auto; flex-wrap: wrap; row-gap: 8px; }
 .funds-search .browse-input { flex: 1 1 200px; min-width: 150px; width: auto; }
+/* 列显示过滤（MultiSelect）：与搜索栏内其他 small 控件同高，窄屏可收缩 */
+.funds-search .dca-col-select { min-width: 118px; max-width: 160px; }
+.funds-search .dca-col-select .p-multiselect-label { font-size: 12px; padding: 5px 8px; }
 .age-wrap { display: inline-flex; align-items: center; gap: 6px; }
 .age-wrap .age-input { width: 76px; text-align: right; }
 .age-suffix { font-size: 12px; opacity: .72; white-space: nowrap; }
