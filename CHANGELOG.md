@@ -5,6 +5,14 @@
 
 ## [Unreleased]
 
+### Fixed
+- **运作年限排序失效修复**：定投时机与排行两端点的排序白名单漏
+  full_start/age_years（运作年限列 field/sortField），点击列头被静默回落
+  年化排序（年限列顺序"乱"——实为年化升序行序）。修复后两种事件值均
+  映射 `ORDER BY r.full_start`；排行端点 age_years 别名同源一并修掉。
+  测试：后端 570 绿（+1 例排序别名两端点锚定）+ E2E 102 绿（E2E-436 补
+  运作年限列头排序断言）。
+
 ### Added
 - **「起点条件回测」区块（不同起点开始定投的结果差异，假设验证统计上页）**：
   数据源 scratch/dip_validation.py 扩展（samples 新增起点年份维度）落库新表
