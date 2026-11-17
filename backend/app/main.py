@@ -55,7 +55,8 @@ def create_app(*, scheduler: TaskScheduler | None = None,
                            ("任务表", task_store.init_schema),
                            ("基金表", FundStore().init_schema),
                            ("全量回测表", backtest_full.ensure_schema),
-                           ("定投回测表", dca_store.ensure_schema)):
+                           ("定投回测表", dca_store.ensure_schema),
+                           ("基金波动表", dca_store.ensure_risk_schema)):
             try:
                 with connect(config.DATABASE_URL) as conn:
                     init(conn)
@@ -139,19 +140,25 @@ def create_app(*, scheduler: TaskScheduler | None = None,
     @app.get("/api/funds")
     def funds(q: str = "", limit: int = 50, offset: int = 0,
               delisted: str = "", show_backend: str = "",
-              show_money: str = "", show_qdii: str = ""):
-        """基金列表（净值摘要：最新单位净值/日增长率/净值条数/区间）。
+              show_money: str = "", show_qdii: str = "",
+              sort: str = "code", order: str = "asc"):
+        """基金列表（净值摘要 + 波动指标列：年化/下行波动率/最大回撤/夏普
+        ·近1年 + 当前滚动波动率及分位）。
 
         语义与 /api/stocks 一致：始终 200，PG 不可达在 status=down 表达；
         delisted 三态过滤同 /api/stocks；show_backend=1 / show_money=1 /
-        show_qdii=1 才显示后端收费份额 / 货币基金 / QDII（默认隐藏）。
+        show_qdii=1 才显示后端收费份额 / 货币基金 / QDII（默认隐藏）；
+        sort 白名单排序（code 默认 + 波动指标列，白名单外回落），order 仅
+        asc 生效升序（同 /api/funds/dca 口径），恒 NULLS LAST + code 稳定序。
         """
         return fetch_fund_list(config.DATABASE_URL, q=q, limit=limit,
                                offset=offset,
                                delisted=delisted.strip().lower(),
                                show_backend=show_backend.strip().lower(),
                                show_money=show_money.strip().lower(),
-                               show_qdii=show_qdii.strip().lower())
+                               show_qdii=show_qdii.strip().lower(),
+                               sort=sort.strip().lower(),
+                               order=order.strip().lower())
 
     @app.get("/api/funds/{code}/navs")
     def fund_navs(code: str, limit: int = 250, offset: int = 0):

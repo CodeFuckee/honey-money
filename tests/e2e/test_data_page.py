@@ -5,7 +5,11 @@
 - E2E-302 在市股（delisted=False 或老接口无该键）该列显示「—」占位；
 - E2E-303 默认加载不过滤（请求无 delisted 谓词）；
 - E2E-304 过滤下拉切「仅在市」/「仅退市」→ 请求带 delisted=false/true，
-  且过滤态下翻页请求仍携带（分页不丢过滤）。
+  且过滤态下翻页请求仍携带（分页不丢过滤）；
+- E2E-317 基金列表波动指标五列渲染（格式化 + 无指标行 — 占位）；
+- E2E-318 点波动列表头 → sort=vol_1y&order=asc/desc 服务端排序；
+- E2E-319 详情页风险指标区（指标卡 + 多窗口对照表 + 快照截至 note）；
+- E2E-320 无指标行 → 指标区不渲染、待生成占位。
 运行：python -m pytest tests/e2e/test_data_page.py
 """
 
@@ -114,10 +118,14 @@ class TestDataPageDelistedFilter:
 FUNDS_BODY = {"status": "up", "total": 2, "limit": 50, "offset": 0, "funds": [
     {"code": "000001", "name": "华夏成长混合", "fund_type": "混合型-灵活",
      "unit_nav": 1.046, "pct_chg": 2.05, "navs": 6029,
-     "last_date": "2026-10-23", "first_date": "2001-12-18"},
+     "last_date": "2026-10-23", "first_date": "2001-12-18",
+     "vol_1y": 0.185, "vol_down_1y": 0.1201, "mdd_1y": 0.2533,
+     "sharpe_1y": 1.4233, "roll_vol": 0.0812, "vol_pctile": 0.6666},
     {"code": "005827", "name": "易方达蓝筹精选", "fund_type": "混合型-偏股",
      "unit_nav": 1.8721, "pct_chg": -0.31, "navs": 3200,
-     "last_date": "2026-10-23", "first_date": "2018-09-05"},
+     "last_date": "2026-10-23", "first_date": "2018-09-05",
+     "vol_1y": None, "vol_down_1y": None, "mdd_1y": None,
+     "sharpe_1y": None, "roll_vol": None, "vol_pctile": None},
 ]}
 FUND_NAV_BODY = {"status": "up", "code": "000001", "count": 3, "navs": [
     {"date": "2026-10-21", "unit_nav": 1.064, "accum_nav": 3.637,
@@ -127,6 +135,17 @@ FUND_NAV_BODY = {"status": "up", "code": "000001", "count": 3, "navs": [
     {"date": "2026-10-23", "unit_nav": 1.046, "accum_nav": 3.619,
      "pct_chg": 2.05, "unit_money": "0.018", "source": "fund_em"},
 ]}
+# 风险/波动指标快照（fund_risk_metrics 日更行；详情页指标区数据源）
+FUND_RISK = {
+    "vol_1y": 0.185, "vol_down_1y": 0.1201, "mdd_1y": 0.2533,
+    "sharpe_1y": 1.4233,
+    "vol_3y": 0.201, "vol_down_3y": 0.135, "mdd_3y": 0.301, "sharpe_3y": 1.1,
+    "vol_5y": 0.22, "vol_down_5y": 0.14, "mdd_5y": 0.35, "sharpe_5y": 0.9,
+    "vol_all": 0.23, "vol_down_all": 0.15, "mdd_all": 0.42, "sharpe_all": 0.8,
+    "roll_vol": 0.0812, "vol_pctile": 0.6666,
+    "as_of": "2026-10-23", "computed_at": "2026-11-17T06:00:00",
+}
+FUND_NAV_BODY_WITH_RISK = {**FUND_NAV_BODY, "risk": FUND_RISK}
 
 
 class TestFundBrowse:
@@ -165,6 +184,94 @@ class TestFundBrowse:
         expect(page.locator(".detail-table-card")).to_contain_text("0.018")
         page.get_by_role("button", name="← 返回列表").click()
         expect(page.get_by_role("heading", name="基金净值")).to_be_visible()
+
+
+class TestFundRiskColumns:
+    def test_risk_columns_render_and_null_dash(self, servers, page):
+        """E2E-317：波动指标五列渲染——数值格式化（18.5% / -25.3% /
+        1.42 / 67%），无指标行的基金显示 — 占位。"""
+        _, frontend_port = servers
+        page.route("**/api/funds?**", lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body=json.dumps(FUNDS_BODY)))
+        page.goto(f"http://127.0.0.1:{frontend_port}/")
+        page.get_by_role("button", name="基金净值").click()
+        expect(page.get_by_role("heading", name="基金净值")).to_be_visible()
+        row = page.locator(".browse-pv tbody tr", has_text="华夏成长混合")
+        expect(row).to_contain_text("18.5%")          # vol_1y 0.185
+        expect(row).to_contain_text("12.0%")          # vol_down_1y 0.1201
+        expect(row).to_contain_text("-25.3%")         # mdd_1y 0.2533 显负号
+        expect(row).to_contain_text("1.42")           # sharpe_1y 两位裸数
+        expect(row).to_contain_text("67%")            # vol_pctile 0.6666 取整
+        other = page.locator(".browse-pv tbody tr", has_text="易方达蓝筹精选")
+        expect(other).to_contain_text("—")            # 无指标行
+
+    def test_sort_header_sends_sort_param(self, servers, page):
+        """E2E-318：点波动列表头 → 请求带 sort=vol_1y&order=asc（PrimeVue
+        首点升序），再点降序——服务端排序参数正确。"""
+        _, frontend_port = servers
+        calls = []
+        page.route("**/api/funds**", lambda route: (
+            calls.append(route.request.url),
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps(FUNDS_BODY))) and None)
+        page.goto(f"http://127.0.0.1:{frontend_port}/")
+        page.get_by_role("button", name="基金净值").click()
+        expect(page.get_by_role("heading", name="基金净值")).to_be_visible()
+        page.locator(".browse-pv th", has_text="年化波动率").click()
+        page.wait_for_timeout(500)
+        assert any("sort=vol_1y" in u and "order=asc" in u for u in calls), calls
+        page.locator(".browse-pv th", has_text="年化波动率").click()
+        page.wait_for_timeout(500)
+        assert any("sort=vol_1y" in u and "order=desc" in u for u in calls), calls
+
+
+class TestFundRiskDetail:
+    def test_risk_cards_and_window_table(self, servers, page):
+        """E2E-319：详情页指标区——五张指标卡（近1年+当前滚动/分位）、
+        多窗口对照表（近1年/近3年/近5年/全史）、口径 note 含快照截至。"""
+        _, frontend_port = servers
+        page.route("**/api/funds?**", lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body=json.dumps(FUNDS_BODY)))
+        page.route("**/api/funds/000001/navs**", lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body=json.dumps(FUND_NAV_BODY_WITH_RISK)))
+        page.goto(f"http://127.0.0.1:{frontend_port}/")
+        page.get_by_role("button", name="基金净值").click()
+        page.locator(".browse-pv tbody tr", has_text="华夏成长混合").click()
+        expect(page.locator("h2.h1")).to_contain_text("000001")
+        card = page.locator(".risk-card")
+        expect(card).to_be_visible()
+        expect(card).to_contain_text("18.5%")          # 年化波动率·近1年
+        expect(card).to_contain_text("12.0%")          # 下行波动率
+        expect(card).to_contain_text("-25.3%")         # 最大回撤
+        expect(card).to_contain_text("1.42")           # 夏普
+        expect(card).to_contain_text("8.1%")           # 当前滚动波动率 0.0812
+        expect(card).to_contain_text("67%")            # 分位
+        table = card.locator(".risk-table")
+        for label in ("近1年", "近3年", "近5年", "全史"):
+            expect(table).to_contain_text(label)
+        expect(table).to_contain_text("22.0%")         # vol_5y 0.22
+        expect(table).to_contain_text("23.0%")         # vol_all 0.23
+        expect(card).to_contain_text("快照截至 2026-10-23")
+
+    def test_risk_missing_shows_placeholder(self, servers, page):
+        """E2E-320：无指标行（risk=null）→ 指标区不渲染、显示待生成占位。"""
+        _, frontend_port = servers
+        page.route("**/api/funds?**", lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body=json.dumps(FUNDS_BODY)))
+        page.route("**/api/funds/000001/navs**", lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body=json.dumps(FUND_NAV_BODY)))
+        page.goto(f"http://127.0.0.1:{frontend_port}/")
+        page.get_by_role("button", name="基金净值").click()
+        page.locator(".browse-pv tbody tr", has_text="华夏成长混合").click()
+        expect(page.locator("h2.h1")).to_contain_text("000001")
+        expect(page.locator(".risk-card")).to_have_count(0)
+        expect(page.get_by_text("波动指标尚未生成", exact=False)
+               ).to_be_visible()
 
 
 class TestFundDelistedFilter:

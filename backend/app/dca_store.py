@@ -367,10 +367,40 @@ WHERE r.code = t.code AND r.tp = t.tp
 """
 
 
+# 基金风险/波动指标（复权口径，risk_metrics.compute_risk_metrics 日更全量
+# 重算整表替换；列表排序/详情指标卡/排行展示共用——独立 DDL 便于启动清单
+# 兜底建表，不必等首轮日更）
+RISK_DDL = """
+CREATE TABLE IF NOT EXISTS fund_risk_metrics (
+  code            VARCHAR(10) PRIMARY KEY,
+  vol_1y DOUBLE PRECISION, vol_down_1y DOUBLE PRECISION,
+  mdd_1y DOUBLE PRECISION, sharpe_1y DOUBLE PRECISION,
+  vol_3y DOUBLE PRECISION, vol_down_3y DOUBLE PRECISION,
+  mdd_3y DOUBLE PRECISION, sharpe_3y DOUBLE PRECISION,
+  vol_5y DOUBLE PRECISION, vol_down_5y DOUBLE PRECISION,
+  mdd_5y DOUBLE PRECISION, sharpe_5y DOUBLE PRECISION,
+  vol_all DOUBLE PRECISION, vol_down_all DOUBLE PRECISION,
+  mdd_all DOUBLE PRECISION, sharpe_all DOUBLE PRECISION,
+  roll_vol        DOUBLE PRECISION,
+  vol_pctile      DOUBLE PRECISION,
+  as_of           DATE,
+  nav_count       INTEGER,
+  computed_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+"""
+
+
 def ensure_tp_schema(conn) -> None:
-    """三新表幂等建表（调度器日更首跑前调用；与旧表 DDL 互不影响）。"""
+    """多阈值新表 + 波动指标表幂等建表（调度器日更首跑前调用）。"""
     with conn.cursor() as cur:
         cur.execute(TP_DDL)
+        cur.execute(RISK_DDL)
+
+
+def ensure_risk_schema(conn) -> None:
+    """波动指标表幂等建表（启动清单兜底，缺表时浏览接口不至于整页 down）。"""
+    with conn.cursor() as cur:
+        cur.execute(RISK_DDL)
 
 
 def import_tp_rows(conn, rows: list[dict], *, params: dict | None = None) -> int:
@@ -413,6 +443,28 @@ def import_timing(conn, rows: list[tuple]) -> int:
         cur.execute("DELETE FROM fund_dip_timing")
         if rows:
             cur.executemany(_TIMING_INSERT, rows)
+    return len(rows)
+
+
+# 列序与 risk_metrics.ROW_FIELDS 逐位对齐（risk_row 产码，code 前缀 +
+# computed_at 由库端 now() 填充）；str 日期入 DATE 列同 import_timing 先例
+_RISK_COLS = ["code", "vol_1y", "vol_down_1y", "mdd_1y", "sharpe_1y",
+              "vol_3y", "vol_down_3y", "mdd_3y", "sharpe_3y",
+              "vol_5y", "vol_down_5y", "mdd_5y", "sharpe_5y",
+              "vol_all", "vol_down_all", "mdd_all", "sharpe_all",
+              "roll_vol", "vol_pctile", "as_of", "nav_count"]
+_RISK_INSERT = f"""
+INSERT INTO fund_risk_metrics ({", ".join(_RISK_COLS)})
+VALUES ({", ".join(["%s"] * len(_RISK_COLS))})
+"""
+
+
+def import_risk(conn, rows: list[tuple]) -> int:
+    """波动指标整表替换（DELETE+INSERT，日更顺带刷新）；事务由调用方提交。"""
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM fund_risk_metrics")
+        if rows:
+            cur.executemany(_RISK_INSERT, rows)
     return len(rows)
 
 

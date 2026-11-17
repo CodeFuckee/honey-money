@@ -20,6 +20,9 @@ backend/            Python 后端（FastAPI）
   app/scheduler.py    进程内任务调度器（每日到点/启动补跑/全局串行/advisory lock 互斥）
   app/tasks_api.py    任务管理 API（CRUD/触发/取消/停止/历史）
   app/dca_backtest.py 定投回测核心（脚本与调度器日更共用）
+  app/risk_metrics.py 基金风险/波动指标纯函数（年化/下行波动率、最大回撤、
+                      夏普、60 日滚动波动率及历史分位；复权口径 √252 年化；
+                      定投日更顺带全量重算落 fund_risk_metrics）
   app/pages_export.py Pages 静态快照导出（手动脚本与日更发布共用）
   app/pages_publish.py Pages 自动发布（clone→导出→commit/push）
   app/adjust.py       复权因子（懒加载入库；后/前复权合成；降级不复权）
@@ -28,7 +31,8 @@ backend/            Python 后端（FastAPI）
   app/dca_store.py    定投止盈回测快照存储（fund_dca_result / fund_dca_meta 两表 +
                       fund_dca_tp_result / fund_dca_tp_rounds / fund_dca_tp_meta
                       多阈值三表（5%~40% 八档，与旧表同构 + tp 维度，完全隔离）+
-                      fund_dip_timing 时机表（当前回撤/距前高/回撤桶，日更顺带刷新）；
+                      fund_dip_timing 时机表（当前回撤/距前高/回撤桶，日更顺带刷新）+
+                      fund_risk_metrics 波动指标表（近1/3/5年与全史四窗口，日更顺带刷新）；
                       python -m app.dca_store <csv> 导入 scripts 离线回测产物，幂等）
   app/dca_api.py      /api/funds/dca 回测排行 API（搜索/在市/年限/规模/权益类
                       （EQUITY_TYPES 白名单）过滤/排序白名单/分页 + 在市全集
@@ -48,8 +52,12 @@ frontend/           Vue3 + Vite 前端
   src/App.vue         服务仪表盘（Carbon 风格）：四状态（加载骨架/空态插画/
                       错误横幅/降级占位）+ 数据·任务·回测·教学页 +
                       数据源子页（新浪/东财来源筛选变体）+ 基金净值子页
-                      （列表含类型/最新单位净值/日增长率/净值条数/区间，
-                      点行进净值详情：单位+累计净值双线走势 + 分页明细）+
+                      （列表含类型/最新单位净值/日增长率/净值条数/区间 +
+                      波动指标五列（年化/下行波动率、最大回撤、夏普·近1年 +
+                      波动率历史分位，服务端排序白名单，fund_risk_metrics
+                      日更快照，无指标行显示 —），点行进净值详情：单位+累计
+                      净值双线走势 + 风险指标区（近1年五指标卡 + 四窗口
+                      对照表，无快照显示待生成占位）+ 分页明细）+
                       定投止盈回测子页（全市场公募基金「月定投+止盈」
                       离线回测排行：止盈点 5%~40% 八档切换（默认 20%，排行/
                       统计/明细跟随，散点/分箱固定 20%）+「止盈点对比」
@@ -298,6 +306,10 @@ docker exec honey-money-backend-1 python -m app.crawler --source fund --mode inc
 28,169 只，含已清盘与 A/C 份额——全量爬取避免回测幸存者偏差）入
 `fund_basic`（代码/名称/类型/退市标记）与 `fund_nav`（净值日，主键
 `(code, nav_date, source)`：单位净值/累计净值/日增长率/分红原始串）。
+`fund_risk_metrics`（风险/波动指标快照，code 主键）由「定投回测日更」
+任务顺带全量重算：年化/下行波动率、最大回撤、夏普（近1/3/5年与全史
+四窗口，复权日增长率口径、√252 年化、无风险利率 0）+ 当前 60 日滚动
+波动率及其全史分位；基金列表排序（vol_1y 等白名单）与详情指标区共用。
 两种模式：
 - **full 全量**：天天基金 `pingzhongdata/{code}.js` 单请求全史逐只爬
   （约 8 小时；lsjz 分页接口单页上限 20 条不可用作爬虫通道）；预置手动

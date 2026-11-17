@@ -202,6 +202,69 @@ class TestRunBacktestTp:
                 assert r["w10_xirr"] == pytest.approx(0.0)
 
 
+# ===== run_full_backtest_tp：日更编排（修 use-before-def + 风险行产出） =====
+
+class TestRunFullBacktestTp:
+    """日更编排全函数（离线：_load_* 全部打桩）。
+
+    回归锚点：时机行块曾被置于 alive_by_code/all_end 定义之前，引用未定义
+    变量 NameError 使日更整轮崩溃（9b181f39 引入，2026-11-17 修正）——
+    本用例任何成功断言即证明顺序已修复。"""
+
+    def _run(self, monkeypatch, nav):
+        from app import dca_backtest as mod
+        _, basic, scale_map = _synthetic_inputs()
+
+        def fake_codes(conn):
+            return sorted(nav["code"].unique())
+
+        def fake_basic(conn, codes):
+            return basic.loc[codes]
+
+        def fake_scale(conn):
+            return scale_map
+
+        def fake_nav(conn, codes):
+            return nav[nav["code"].isin(codes)].reset_index(drop=True)
+
+        monkeypatch.setattr(mod, "_load_codes", fake_codes)
+        monkeypatch.setattr(mod, "_load_basic", fake_basic)
+        monkeypatch.setattr(mod, "_load_scale", fake_scale)
+        monkeypatch.setattr(mod, "_load_nav", fake_nav)
+        _patch_connect(monkeypatch, mod, FakeConn())
+        return mod.run_full_backtest_tp("postgresql://fake")
+
+    def test_seven_tuple_with_risk_rows(self, monkeypatch):
+        from app import dca_backtest as mod
+        nav, _, _ = _synthetic_inputs()
+        out = self._run(monkeypatch, nav)
+        assert len(out) == 7
+        old_rows, old_rounds, tp_rows, tp_rounds, timing_rows, risk_rows, \
+            stats = out
+        assert stats["fund_count"] == 2
+        assert stats["risk_count"] == 2
+        assert {r[0] for r in risk_rows} == {"000001", "000002"}
+        assert all(len(r) == 1 + 20 for r in risk_rows)   # code + ROW_FIELDS
+        # 平躺基金：恒定净值 → vol_all=0.0、sharpe None（None 行照常落库）
+        flat = [r for r in risk_rows if r[0] == "000002"][0]
+        assert flat[1] == 0.0                             # vol_1y
+        assert flat[4] is None                            # sharpe_1y
+
+    def test_timing_rows_alive_only_risk_rows_all(self, monkeypatch):
+        """B 截去尾部 60 天 → 不在市：时机行只收 A，风险行两只都算
+        （退市基金波动回顾仍有意义）。"""
+        from app import dca_backtest as mod
+        nav, _, _ = _synthetic_inputs()
+        b_idx = nav.index[nav["code"] == "000002"]
+        nav = nav.drop(b_idx[-60:]).reset_index(drop=True)
+        _old, _rounds, _tp, _tp_rounds, timing_rows, risk_rows, stats = \
+            self._run(monkeypatch, nav)
+        assert {t[0] for t in timing_rows} == {"000001"}
+        assert {r[0] for r in risk_rows} == {"000001", "000002"}
+        # 时机行 computed_at = 数据集最新净值日（列序与 _TIMING_COLS 对齐）
+        assert timing_rows[0][4] == str(stats["window_end"])[:10]
+
+
 # ===== 存储：三新表 DDL/写入/间隔聚合 =====
 
 class FakeCursor:

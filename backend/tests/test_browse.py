@@ -6,6 +6,7 @@ import datetime as dt
 import sys
 
 import pandas as pd
+import psycopg
 from pathlib import Path
 
 import pytest
@@ -435,10 +436,12 @@ class TestBarsAdjust:
 # ---------------------------------------------------------- 基金列表/净值 ----
 
 # 基金列表第二段查询返回行（code, name, fund_type, unit_nav, pct_chg,
-# nav_date, navs, first_date）
+# nav_date, navs, first_date, vol_1y, vol_down_1y, mdd_1y, sharpe_1y,
+# roll_vol, vol_pctile）——后 6 列 LEFT JOIN fund_risk_metrics（可为 NULL）
 FUND_PAGE_ROW = ("000001", "华夏成长混合", "混合型-灵活",
                  1.046012, 2.054, dt.date(2026, 10, 23),
-                 6029, dt.date(2001, 12, 18))
+                 6029, dt.date(2001, 12, 18),
+                 0.1850, 0.1201, 0.2533, 1.4233, 0.0812, 0.6666)
 # 基金净值明细行（nav_date, unit_nav, accum_nav, pct_chg, unit_money, source）
 FUND_NAV_NEW = (dt.date(2026, 10, 23), 1.046, 3.619, 2.05, "0.018", "fund_em")
 FUND_NAV_OLD = (dt.date(2026, 10, 22), 1.025, 3.598, -3.67, None, "fund_em")
@@ -454,7 +457,8 @@ def _with_fake_conn(monkeypatch, rows):
 
 class TestFundList:
     """基金列表三段式查询（对齐股票列表：fund_basic 小表分页 + 当页聚合
-    fund_nav + count——用 QueueConn 按调用序弹出结果）。"""
+    fund_nav + count——用 QueueConn 按调用序弹出结果）；分页段 LEFT JOIN
+    fund_risk_metrics 透出波动指标列。"""
 
     def _fetch(self, monkeypatch, **kw):
         import app.browse as browse_mod
@@ -471,11 +475,13 @@ class TestFundList:
         ids_sql, ids_params = conn.executed[0]
         page_sql, page_params = conn.executed[1]
         cnt_sql, cnt_params = conn.executed[2]
-        assert "FROM fund_basic" in ids_sql and "ILIKE" in ids_sql
+        assert "FROM fund_basic b" in ids_sql and "ILIKE" in ids_sql
+        assert "LEFT JOIN fund_risk_metrics rm" in ids_sql
         assert ids_params == ("华夏", "%华夏%", "%华夏%", 50, 0)
         assert "fund_nav" in page_sql and "LATERAL" in page_sql
+        assert "rm.vol_1y" in page_sql            # 波动指标列随页透出
         assert page_params == (["000001"],)       # 只聚合当页代码
-        assert "fund_basic" in cnt_sql and "ILIKE" in cnt_sql
+        assert "fund_basic b" in cnt_sql and "ILIKE" in cnt_sql
         assert cnt_params == ("华夏", "%华夏%", "%华夏%")
         row = body["funds"][0]
         assert row["code"] == "000001"
@@ -485,11 +491,42 @@ class TestFundList:
         assert row["navs"] == 6029
         assert row["last_date"] == "2026-10-23"
         assert row["first_date"] == "2001-12-18"
+        assert row["vol_1y"] == 0.185             # round 4 位
+        assert row["vol_down_1y"] == 0.1201
+        assert row["mdd_1y"] == 0.2533
+        assert row["sharpe_1y"] == 1.4233
+        assert row["roll_vol"] == 0.0812
+        assert row["vol_pctile"] == 0.6666
 
     def test_default_no_search_params(self, monkeypatch):
         _, conn = self._fetch(monkeypatch)
         ids_params = conn.executed[0][1]
         assert ids_params == ("", "%%", "%%", 50, 0)
+
+    def test_default_sort_is_code(self, monkeypatch):
+        _, conn = self._fetch(monkeypatch)
+        assert "ORDER BY b.code ASC NULLS LAST" in conn.executed[0][0]
+
+    def test_sort_metric_desc(self, monkeypatch):
+        """波动指标排序：白名单列落 rm 表 + DESC NULLS LAST（无行沉底）。"""
+        _, conn = self._fetch(monkeypatch, sort="vol_1y", order="desc")
+        assert "ORDER BY rm.vol_1y DESC NULLS LAST" in conn.executed[0][0]
+
+    def test_sort_metric_asc(self, monkeypatch):
+        _, conn = self._fetch(monkeypatch, sort="vol_pctile", order="asc")
+        assert "ORDER BY rm.vol_pctile ASC NULLS LAST" in conn.executed[0][0]
+
+    def test_sort_all_whitelist_keys_map_to_rm(self, monkeypatch):
+        import app.browse as browse_mod
+        for key in ("vol_down_1y", "mdd_1y", "sharpe_1y"):
+            _, conn = self._fetch(monkeypatch, sort=key, order="desc")
+            assert f"ORDER BY rm.{key} DESC NULLS LAST" in conn.executed[0][0]
+
+    def test_sort_invalid_falls_back_to_code(self, monkeypatch):
+        """白名单外（含注入企图）回落 b.code——防注入锚点。"""
+        _, conn = self._fetch(monkeypatch, sort="rm.vol_1y; DROP TABLE x")
+        assert "ORDER BY b.code ASC NULLS LAST" in conn.executed[0][0]
+        assert "DROP" not in conn.executed[0][0]
 
 
 class TestFundNavs:
@@ -508,12 +545,98 @@ class TestFundNavs:
         assert nav["pct_chg"] == 2.05 and nav["unit_money"] == "0.018"
         assert nav["source"] == "fund_em"
         assert body["count"] == 2 and body["code"] == "000001"
+        # FakeConn.fetchone 恒 None → 无风险行 → risk=None（详情页隐藏指标区）
+        assert body["risk"] is None
 
     def test_empty_navs(self, monkeypatch):
         _with_fake_conn(monkeypatch, [])
         import app.browse as browse_mod
         body = browse_mod.fetch_fund_navs("postgresql://fake", "000001")
         assert body["status"] == "up" and body["navs"] == []
+
+
+# 基金风险指标行（fund_risk_metrics 单行：16 窗口指标 + roll_vol +
+# vol_pctile + as_of + computed_at），与 _FUND_RISK_SQL 列序逐位对齐
+FUND_RISK_ROW = tuple([0.1850, 0.1201, 0.2533, 1.4233] * 4)
+FUND_RISK_ROW += (0.0812, 0.6666, dt.date(2026, 10, 23),
+                  dt.datetime(2026, 11, 17, 6, 0, 0))
+
+
+class TestFundNavsRisk:
+    """navs 响应附带 risk 快照（详情页指标区数据源）。"""
+
+    def _fetch(self, monkeypatch, risk_row, fetchone_raises=None):
+        import app.browse as browse_mod
+
+        class _Conn(QueueConn):
+            def cursor(self):
+                cur = super().cursor()
+
+                class _Cur:
+                    def __enter__(self):
+                        return self
+
+                    def __exit__(self, *exc):
+                        return False
+
+                    def __getattr__(self, name):
+                        return getattr(cur, name)
+
+                    def execute(self, query, params=None):
+                        if fetchone_raises is not None and \
+                                "fund_risk_metrics" in query:
+                            raise fetchone_raises
+                        cur.execute(query, params)
+
+                return _Cur()
+
+        conn = _Conn(fetchall_queue=[[FUND_NAV_NEW, FUND_NAV_OLD]],
+                     fetchone_queue=[risk_row])
+        monkeypatch.setattr(browse_mod.psycopg, "connect",
+                            lambda *a, **k: conn)
+        return browse_mod.fetch_fund_navs("postgresql://fake", "000001")
+
+    def test_risk_passthrough(self, monkeypatch):
+        """有指标行：risk 逐字段透传，日期转 ISO 串。"""
+        body = self._fetch(monkeypatch, FUND_RISK_ROW)
+        risk = body["risk"]
+        assert risk["vol_1y"] == 0.1850 and risk["vol_down_1y"] == 0.1201
+        assert risk["mdd_1y"] == 0.2533 and risk["sharpe_1y"] == 1.4233
+        assert risk["vol_all"] == 0.1850 and risk["sharpe_all"] == 1.4233
+        assert risk["roll_vol"] == 0.0812 and risk["vol_pctile"] == 0.6666
+        assert risk["as_of"] == "2026-10-23"
+        assert risk["computed_at"] == "2026-11-17T06:00:00"
+
+    def test_no_risk_row(self, monkeypatch):
+        """该基金无指标行：risk=None（前端显示占位）。"""
+        body = self._fetch(monkeypatch, None)
+        assert body["status"] == "up" and body["risk"] is None
+
+    def test_missing_risk_table_degrades(self, monkeypatch):
+        """fund_risk_metrics 尚未建表（schema 滞后）：risk=None 不炸详情。"""
+        body = self._fetch(
+            monkeypatch, None,
+            fetchone_raises=psycopg.errors.UndefinedTable("relation does not exist"))
+        assert body["status"] == "up" and body["risk"] is None
+
+
+class TestFundsSortRoute:
+    def test_endpoint_passes_sort_order(self, client, monkeypatch):
+        import app.main as main_mod
+        captured = {}
+
+        def fake_funds(dsn, *, q="", limit=50, offset=0, delisted="",
+                       show_backend="", show_money="", show_qdii="",
+                       sort="code", order="asc"):
+            captured.update(sort=sort, order=order)
+            return {"status": "up", "total": 0, "limit": limit,
+                    "offset": offset, "funds": []}
+
+        monkeypatch.setattr(main_mod, "fetch_fund_list", fake_funds)
+        client.get("/api/funds", params={"sort": "vol_1y", "order": "desc"})
+        assert captured["sort"] == "vol_1y" and captured["order"] == "desc"
+        client.get("/api/funds")
+        assert captured["sort"] == "code" and captured["order"] == "asc"
 
 
 class TestFundsRoutes:
@@ -545,8 +668,7 @@ class TestFundsRoutes:
 class TestFundListDelistedFilter:
     """基金列表退市过滤：对齐股票页 delisted 三态（'' 全部/false 在市/true 退市）。"""
 
-    ROW = ("000001", "华夏成长混合", "混合型-灵活", 1.046, 2.05,
-           dt.date(2026, 10, 23), 6029, dt.date(2001, 12, 18))
+    ROW = FUND_PAGE_ROW
 
     def _fetch(self, monkeypatch, delisted):
         import app.browse as browse_mod
@@ -562,13 +684,13 @@ class TestFundListDelistedFilter:
         body, conn = self._fetch(monkeypatch, "true")
         ids_sql = conn.executed[0][0]
         cnt_sql = conn.executed[2][0]
-        assert "fund_basic.delisted = TRUE" in ids_sql
-        assert "fund_basic.delisted = TRUE" in cnt_sql
+        assert "b.delisted = TRUE" in ids_sql
+        assert "b.delisted = TRUE" in cnt_sql
         assert body["status"] == "up"
 
     def test_clause_false_and_default(self, monkeypatch):
         _, conn = self._fetch(monkeypatch, "false")
-        assert "fund_basic.delisted = FALSE" in conn.executed[0][0]
+        assert "b.delisted = FALSE" in conn.executed[0][0]
         _, conn2 = self._fetch(monkeypatch, "")
         assert "delisted = " not in conn2.executed[0][0]
 
@@ -592,8 +714,8 @@ class TestFundBackendFilter:
         body = browse_mod.fetch_fund_list("postgresql://fake")
         ids_sql = conn.executed[0][0]
         cnt_sql = conn.executed[2][0]
-        assert "position('后端' in fund_basic.name) = 0" in ids_sql
-        assert "position('后端' in fund_basic.name) = 0" in cnt_sql
+        assert "position('后端' in b.name) = 0" in ids_sql
+        assert "position('后端' in b.name) = 0" in cnt_sql
         assert body["status"] == "up"
 
     def test_show_backend_removes_clause(self, monkeypatch):
@@ -615,7 +737,8 @@ class TestFundBackendFilter:
         captured = {}
 
         def fake_funds(dsn, *, q="", limit=50, offset=0, delisted="",
-                       show_backend="", show_money="", show_qdii=""):
+                       show_backend="", show_money="", show_qdii="",
+                       sort="code", order="asc"):
             captured["show_backend"] = show_backend
             return {"status": "up", "total": 0, "limit": limit,
                     "offset": offset, "funds": []}
@@ -645,7 +768,7 @@ class TestFundMoneyFilter:
         import app.browse as browse_mod
         conn = self._conn(monkeypatch)
         body = browse_mod.fetch_fund_list("postgresql://fake")
-        clause = "COALESCE(position('货币' in fund_basic.fund_type), 0) = 0"
+        clause = "COALESCE(position('货币' in b.fund_type), 0) = 0"
         assert clause in conn.executed[0][0]        # NULL 类型不受影响
         assert clause in conn.executed[2][0]
         assert body["status"] == "up"
@@ -662,7 +785,8 @@ class TestFundMoneyFilter:
         captured = {}
 
         def fake_funds(dsn, *, q="", limit=50, offset=0, delisted="",
-                       show_backend="", show_money="", show_qdii=""):
+                       show_backend="", show_money="", show_qdii="",
+                       sort="code", order="asc"):
             captured["show_money"] = show_money
             return {"status": "up", "total": 0, "limit": limit,
                     "offset": offset, "funds": []}
@@ -692,7 +816,7 @@ class TestFundQdiiFilter:
         import app.browse as browse_mod
         conn = self._conn(monkeypatch)
         body = browse_mod.fetch_fund_list("postgresql://fake")
-        clause = "COALESCE(position('QDII' in fund_basic.fund_type), 0) = 0"
+        clause = "COALESCE(position('QDII' in b.fund_type), 0) = 0"
         assert clause in conn.executed[0][0]
         assert clause in conn.executed[2][0]
         assert body["status"] == "up"
@@ -709,7 +833,8 @@ class TestFundQdiiFilter:
         captured = {}
 
         def fake_funds(dsn, *, q="", limit=50, offset=0, delisted="",
-                       show_backend="", show_money="", show_qdii=""):
+                       show_backend="", show_money="", show_qdii="",
+                       sort="code", order="asc"):
             captured["show_qdii"] = show_qdii
             return {"status": "up", "total": 0, "limit": limit,
                     "offset": offset, "funds": []}

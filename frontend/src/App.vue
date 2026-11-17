@@ -339,6 +339,9 @@ const fundsShowMoney = ref(false)
 const fundsShowQdii = ref(false)
 const fundsLoading = ref(false)
 const FUNDS_PAGE_SIZE = 50
+// 波动指标列排序（服务端白名单）：'' 默认 code 序；lazy @sort 事件驱动
+const fundsSort = ref('')
+const fundsOrder = ref('desc')
 const fundsTotalPages = computed(() =>
   Math.max(1, Math.ceil((funds.value.total || 0) / FUNDS_PAGE_SIZE)))
 
@@ -351,7 +354,8 @@ async function loadFunds() {
     const be = fundsShowBackend.value ? '&show_backend=1' : ''
     const mn = fundsShowMoney.value ? '&show_money=1' : ''
     const qd = fundsShowQdii.value ? '&show_qdii=1' : ''
-    const r = await fetch(`/api/funds?q=${q}&limit=${FUNDS_PAGE_SIZE}&offset=${off}${dl}${be}${mn}${qd}`)
+    const so = fundsSort.value ? `&sort=${fundsSort.value}&order=${fundsOrder.value}` : ''
+    const r = await fetch(`/api/funds?q=${q}&limit=${FUNDS_PAGE_SIZE}&offset=${off}${dl}${be}${mn}${qd}${so}`)
     funds.value = await r.json()
   } catch (e) {
     funds.value = { status: 'down', total: 0, funds: [] }
@@ -373,6 +377,14 @@ function toggleFundsQdii() {
   fundsSearch()
 }
 function onFundsPage(e) { fundsPage.value = e.page; loadFunds() }
+function onFundsSort(e) {
+  // PrimeVue lazy 排序：sortField=列 field，sortOrder 1/-1；白名单在
+  // 后端（_FUND_SORT_COLS），非法值回落 code——前端只透传
+  fundsSort.value = e.sortField || ''
+  fundsOrder.value = e.sortOrder === 1 ? 'asc' : 'desc'
+  fundsPage.value = 0
+  loadFunds()
+}
 
 // ===== 定投止盈回测排行（数据子页：/api/funds/dca 快照，导入见 app/dca_store） =====
 const dca = ref({ status: 'loading', total: 0, rows: [], stats: null, meta: null })
@@ -557,6 +569,11 @@ const dcaTpChart = computed(() => {
 // 表，两张基金表合一；回撤桶按钮组删除（与区间筛选的当前回撤维度重复，
 // 用户确认保留区间筛选）；五维度区间筛选迁到排行区作用于统一表格
 const ddpct = v => v == null ? '—' : (v * 100).toFixed(1) + '%'
+// 波动指标格式化（fund_risk_metrics 小数口径：0.185 → 18.5%）
+const volpct = v => v == null ? '—' : (v * 100).toFixed(1) + '%'          // 波动率
+const mddneg = v => v == null ? '—' : (v > 0 ? '-' : '') + (v * 100).toFixed(1) + '%' // 最大回撤（存正数显负号）
+const pctile = v => v == null ? '—' : Math.round(v * 100) + '%'           // 波动率历史分位
+const sharpe2 = v => v == null ? '—' : v.toFixed(2)                        // 夏普（裸数值两位）
 // 五维度区间筛选（空=不筛；回撤输入正数幅度）。应用后服务端过滤（分页
 // 表格客户端筛当前页无意义）；筛选面板常显（2026-11-17 用户反馈，去折叠
 // 按钮）；会话内探索状态，不进 URL
@@ -1084,6 +1101,16 @@ function openDcaCellFunds(ai, si) {
 const fund = ref(null)                    // { code, name, fund_type }
 const fundNav = ref('funds')              // 详情页返回目标
 const fundChart = ref({ status: 'loading', navs: [] })
+// 风险/波动指标（navs 响应附带 risk 字段，fund_risk_metrics 日更快照）：
+// null = 该基金无指标行 / 日更未跑过，详情页指标区按此显示占位
+const fundRisk = ref(null)
+// 多窗口对照表行序（与 risk_metrics.WINDOWS 同序）
+const FUND_RISK_WINDOWS = [
+  { key: '1y', label: '近1年' },
+  { key: '3y', label: '近3年' },
+  { key: '5y', label: '近5年' },
+  { key: 'all', label: '全史' },
+]
 const fundRows = ref({ status: 'loading', rows: [] })
 const fundDetailPage = ref(0)             // 0 起
 const FUND_CHART_POINTS = 2500            // 图取近 2500 个净值日（约 10 年）
@@ -1103,10 +1130,12 @@ function backToFunds() { setNav(fundNav.value || 'funds') }
 
 async function loadFundChart() {
   fundChart.value = { status: 'loading', navs: [] }
+  fundRisk.value = null
   try {
     const r = await fetch(`/api/funds/${fund.value.code}/navs?limit=${FUND_CHART_POINTS}&offset=0`)
     const body = await r.json()
     fundChart.value = { status: body.status, detail: body.detail, navs: body.navs || [] }
+    fundRisk.value = body.status === 'up' ? (body.risk ?? null) : null
   } catch (e) {
     fundChart.value = { status: 'down', detail: String(e), navs: [] }
   }
@@ -2681,7 +2710,9 @@ watch(
                 :first="fundsPage * 50"
                 :totalRecords="funds.total || 0" :loading="fundsLoading"
                 dataKey="code" stripedRows size="small"
-                @page="onFundsPage" @row-click="openFund">
+                :sortField="fundsSort || undefined"
+                :sortOrder="fundsOrder === 'asc' ? 1 : -1"
+                @page="onFundsPage" @sort="onFundsSort" @row-click="openFund">
                 <template #empty>
                   <div class="browse-empty">
                     {{ funds.status === 'down' ? '数据库不可达：' + (funds.detail || '')
@@ -2705,6 +2736,26 @@ watch(
                     <span v-else>—</span>
                   </template>
                 </Column>
+                <Column field="vol_1y" sortable bodyClass="num-col" style="width: 108px">
+                  <template #header><span title="近1年（最近250个净值日）日收益率标准差 × √252，复权口径；日更任务快照">年化波动率</span></template>
+                  <template #body="{ data }">{{ volpct(data.vol_1y) }}</template>
+                </Column>
+                <Column field="vol_down_1y" sortable bodyClass="num-col" style="width: 108px">
+                  <template #header><span title="近1年内只统计下跌日收益率的标准差 × √252（真实痛苦的方向）">下行波动率</span></template>
+                  <template #body="{ data }">{{ volpct(data.vol_down_1y) }}</template>
+                </Column>
+                <Column field="mdd_1y" sortable bodyClass="num-col" style="width: 100px">
+                  <template #header><span title="近1年窗口内复权净值峰谷最大回撤（正数存储，显示为负号）">最大回撤</span></template>
+                  <template #body="{ data }">{{ mddneg(data.mdd_1y) }}</template>
+                </Column>
+                <Column field="sharpe_1y" sortable bodyClass="num-col" style="width: 88px">
+                  <template #header><span title="近1年夏普比率：日收益均值/标准差 × √252，无风险利率 0（每单位波动换回的收益）">夏普</span></template>
+                  <template #body="{ data }">{{ sharpe2(data.sharpe_1y) }}</template>
+                </Column>
+                <Column field="vol_pctile" sortable bodyClass="num-col" style="width: 100px">
+                  <template #header><span title="当前 60 日滚动年化波动率在该基金自身全史滚动序列中的百分位：越低=当前比历史更平静，越高=更颠簸">波动率分位</span></template>
+                  <template #body="{ data }">{{ pctile(data.vol_pctile) }}</template>
+                </Column>
                 <Column field="navs" header="净值条数" style="width: 100px">
                   <template #body="{ data }">{{ data.navs || 0 }}</template>
                 </Column>
@@ -2716,7 +2767,7 @@ watch(
                 </Column>
               </DataTable>
             </div>
-            <p class="note">来源：本地 PG（fund_basic / fund_nav，任务源 fund）· 点击行查看基金净值走势与明细 · 货币基金无净值走势不在此列</p>
+            <p class="note">来源：本地 PG（fund_basic / fund_nav，任务源 fund）· 点击行查看基金净值走势与明细 · 货币基金无净值走势不在此列 · 波动指标列（年化/下行波动率、最大回撤、夏普）为近 1 年口径 = 最近 250 个净值日，日收益率取复权日增长率、年化系数 √252、无风险利率 0，日更任务（回测）顺带快照；分位 = 当前 60 日滚动波动率在该基金自身全史滚动序列中的百分位，越低越平静——日更未跑过时全列为 —</p>
           </template>
 
           <!-- ===== 定投止盈回测排行（离线回测快照：scripts/fund_dca_backtest.py → app.dca_store 导入） ===== -->
@@ -3385,6 +3436,50 @@ watch(
               <div v-show="fundChart.status === 'up' && fundChart.navs.length"
                 ref="fundChartEl" class="kchart"></div>
             </div>
+
+            <!-- 风险/波动指标（fund_risk_metrics 日更快照） -->
+            <div v-if="fundRisk" class="card risk-card">
+              <div class="dc-grid" style="grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); margin: 0 0 12px">
+                <div class="dc-item">
+                  <div class="dc-label" title="近1年（最近250个净值日）日收益率标准差 × √252，复权口径">年化波动率<span class="dc-hint">近1年</span></div>
+                  <div class="dc-value">{{ volpct(fundRisk.vol_1y) }}</div>
+                </div>
+                <div class="dc-item">
+                  <div class="dc-label" title="只统计下跌日收益率的标准差 × √252（真实痛苦的方向）">下行波动率<span class="dc-hint">近1年</span></div>
+                  <div class="dc-value">{{ volpct(fundRisk.vol_down_1y) }}</div>
+                </div>
+                <div class="dc-item">
+                  <div class="dc-label" title="近1年窗口内复权净值峰谷最大回撤">最大回撤<span class="dc-hint">近1年</span></div>
+                  <div class="dc-value">{{ mddneg(fundRisk.mdd_1y) }}</div>
+                </div>
+                <div class="dc-item">
+                  <div class="dc-label" title="日收益均值/标准差 × √252，无风险利率 0——每单位波动换回的收益">夏普<span class="dc-hint">近1年</span></div>
+                  <div class="dc-value">{{ sharpe2(fundRisk.sharpe_1y) }}</div>
+                </div>
+                <div class="dc-item">
+                  <div class="dc-label" title="当前 60 日滚动年化波动率及其在该基金自身全史滚动序列中的百分位（越低=比历史更平静）">当前滚动波动率<span class="dc-hint">60日</span></div>
+                  <div class="dc-value">{{ volpct(fundRisk.roll_vol) }} <span class="dc-hint">分位 {{ pctile(fundRisk.vol_pctile) }}</span></div>
+                </div>
+              </div>
+              <div class="risk-table-wrap">
+                <table class="risk-table">
+                  <thead>
+                    <tr><th>窗口</th><th>年化波动率</th><th>下行波动率</th><th>最大回撤</th><th>夏普</th></tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="w in FUND_RISK_WINDOWS" :key="w.key">
+                      <td class="mono">{{ w.label }}</td>
+                      <td>{{ volpct(fundRisk['vol_' + w.key]) }}</td>
+                      <td>{{ volpct(fundRisk['vol_down_' + w.key]) }}</td>
+                      <td>{{ mddneg(fundRisk['mdd_' + w.key]) }}</td>
+                      <td>{{ sharpe2(fundRisk['sharpe_' + w.key]) }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p class="note" style="margin: 10px 0 0">口径：日收益率取复权日增长率（分红再投）· 年化系数 √252、无风险利率 0 · 窗口按净值日个数（近1年=250 / 近3年=750 / 近5年=1250 / 全史=全部），样本不足的窗口为 — · 快照截至 {{ fundRisk.as_of || '—' }}，由日更任务（回测）顺带生成 · 分位 = 当前 60 日滚动波动率在该基金自身全史滚动序列中的百分位，越低越平静</p>
+            </div>
+            <p v-else class="note" style="margin: 0 0 10px">波动指标尚未生成：日更任务（回测）跑过一轮后在此展示该基金的波动率 / 最大回撤 / 夏普快照</p>
 
             <!-- 净值明细表（独立分页，可翻更早历史） -->
             <div class="card detail-table-card">
@@ -4644,6 +4739,16 @@ body {
 .dca-matrix-wrap .dca-matrix { width: 100%; min-width: 620px; font-size: 13px; }
 .dca-matrix-wrap .dca-matrix th, .dca-matrix-wrap .dca-matrix td { padding: 9px 14px; }
 .dca-matrix.dca-median { margin-top: 14px; }
+/* 基金详情页风险/波动指标区：指标卡 + 多窗口对照表（宽度自适应窄屏） */
+.risk-card { margin-top: 14px; }
+.risk-table-wrap { overflow-x: auto; }
+.risk-table { border-collapse: collapse; font-size: 12px; width: 100%;
+  min-width: 480px; }
+.risk-table th, .risk-table td { border: 1px solid #e0e0e0; padding: 6px 10px;
+  text-align: center; white-space: nowrap; }
+.risk-table th { background: #f4f4f4; font-weight: 600; }
+.risk-table tbody td.mono { font-weight: 600; }
+.risk-card .note { color: #6b7a93; }
 .dca-cell-link { cursor: pointer; }
 .dca-cell-link:hover { background: #eef4fc; }
 .detail-btn {

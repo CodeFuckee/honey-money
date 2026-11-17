@@ -33,6 +33,8 @@ import pandas as pd
 import psycopg
 from scipy.optimize import brentq
 
+from .risk_metrics import compute_risk_metrics, risk_row
+
 AMOUNT = 1000.0
 TAKE_PROFIT = 0.20
 WINDOW_10Y = pd.DateOffset(years=10)
@@ -538,15 +540,18 @@ def compute_dip_timing(dates: pd.DatetimeIndex, adj: np.ndarray) -> dict:
 
 def run_full_backtest_tp(dsn: str, *, thresholds=TP_THRESHOLDS,
                          log=print) -> tuple[list[dict], list[tuple],
-                                             list[dict], list[tuple], dict]:
+                                             list[dict], list[tuple],
+                                             list[tuple], list[tuple], dict]:
     """日更全量回测（多阈值版）：PG 拉数一次 → run_backtest_tp → 派生旧口径行。
 
-    返回 (old_rows, old_rounds, tp_rows, tp_rounds, timing_rows, stats)：
+    返回 (old_rows, old_rounds, tp_rows, tp_rounds, timing_rows, risk_rows,
+    stats)：
     - old_rows/old_rounds：tp=TAKE_PROFIT 派生的旧口径行（写
       fund_dca_result / fund_dca_rounds，与旧引擎 run_backtest 输出一致）；
     - tp_rows/tp_rounds：全阈值行（写 fund_dca_tp_* 新表）；
     - timing_rows：当前回撤时机行（写 fund_dip_timing，定投时机视图）；
-    - alive 45 天新鲜度规则对两套行同一份（基金级，与阈值无关）。
+    - risk_rows：风险/波动指标行（写 fund_risk_metrics，risk_row 产码）；
+    - alive 45 天新鲜度规则对时机行与各套行同一份（基金级，与阈值无关）。
     纯 CPU，调用方放子进程跑；直写由调用方事务完成。
     """
     with psycopg.connect(dsn, connect_timeout=10) as conn:
@@ -560,26 +565,14 @@ def run_full_backtest_tp(dsn: str, *, thresholds=TP_THRESHOLDS,
     log(f"净值行：{len(nav):,}")
     tp_rows, tp_rounds = run_backtest_tp(nav, basic, scale_map, thresholds,
                                          log=log)
-    # 旧口径行 = tp=0.20 派生（去掉 tp 维度），与 run_backtest 输出一致
+    # 旧口径行 = tp=TAKE_PROFIT 派生（去掉 tp 维度），与 run_backtest 输出一致
     old_rows = [{k: v for k, v in r.items() if k != "tp"}
                 for r in tp_rows if r["tp"] == TAKE_PROFIT]
     old_rounds = [t[:1] + t[2:] for t in tp_rounds if t[1] == TAKE_PROFIT]
-    # 时机行（定投时机视图，见 compute_dip_timing）：alive 基金独立二次遍历，
-    # 纯 cummax 计算（在市过滤同 alive_by_code）
-    timing_rows = []
-    for code, g in nav.groupby("code", sort=True):
-        if not alive_by_code.get(code):
-            continue
-        g = g.sort_values("nav_date")
-        prep = prep_window(g, None)
-        if prep is None:
-            continue
-        t = compute_dip_timing(*prep)
-        timing_rows.append((code, t["dd_current"], t["days_since_peak"],
-                            t["dip_band"],
-                            str(all_end)[:10] if all_end else None))
     # alive：full_end 距数据集最新净值日 45 天内（场内 ETF 的 delisted 标记
-    # 不可直接用，见 dca_store 同款口径）
+    # 不可直接用，见 dca_store 同款口径）——必须先于时机/风险行计算（此前
+    # 时机块误置于 alive/all_end 定义之前，引用未定义变量 NameError 使日更
+    # 整轮崩溃；2026-11-17 随波动指标接入一并修正）
     all_end = max((r["full_end"] for r in old_rows if r["full_end"]),
                   default=None)
     cutoff = (pd.Timestamp(all_end) - pd.Timedelta(days=_ALIVE_WINDOW_DAYS)) \
@@ -591,15 +584,33 @@ def run_full_backtest_tp(dsn: str, *, thresholds=TP_THRESHOLDS,
         alive_by_code[r["code"]] = r["alive"]
     for r in tp_rows:
         r["alive"] = alive_by_code.get(r["code"], False)
+    # 时机行（定投时机视图，见 compute_dip_timing）+ 风险指标行
+    # （risk_metrics，列表波动列/详情指标卡共用）：一次 groupby 双产出；
+    # 时机行只收 alive 基金（"当前时机"语义），风险行不限（退市基金波动
+    # 回顾仍有意义）
+    timing_rows = []
+    risk_rows = []
+    for code, g in nav.groupby("code", sort=True):
+        g = g.sort_values("nav_date")
+        prep = prep_window(g, None)
+        if prep is None:
+            continue
+        if alive_by_code.get(code):
+            t = compute_dip_timing(*prep)
+            timing_rows.append((code, t["dd_current"], t["days_since_peak"],
+                                t["dip_band"],
+                                str(all_end)[:10] if all_end else None))
+        risk_rows.append(risk_row(code, compute_risk_metrics(*prep)))
     stats = {"fund_count": len(old_rows), "round_count": len(old_rounds),
              "tp_round_count": len(tp_rounds),
              "timing_count": len(timing_rows),
+             "risk_count": len(risk_rows),
              "thresholds": [float(t) for t in thresholds],
              "window_end": str(all_end) if all_end else None}
     log(f"回测完成：{stats['fund_count']:,} 只 / 旧口径轮次 "
         f"{stats['round_count']:,} 行 / 多阈值轮次 {stats['tp_round_count']:,} 行"
-        f" / 时机行 {stats['timing_count']:,}")
-    return old_rows, old_rounds, tp_rows, tp_rounds, timing_rows, stats
+        f" / 时机行 {stats['timing_count']:,} / 风险行 {stats['risk_count']:,}")
+    return old_rows, old_rounds, tp_rows, tp_rounds, timing_rows, risk_rows, stats
 
 
 def import_scale_csv(csv_path: str, dsn: str, *, log=print) -> int:

@@ -62,15 +62,19 @@ ORDER BY trade_date DESC LIMIT %s OFFSET %s
 """
 
 # 基金列表：与股票列表同款两段式（fund_basic 小表分页 → 只对当页聚合
-# fund_nav 大表——爬满后 fund_nav 可达数千万行，LATERAL 必须作用于分页后）
+# fund_nav 大表——爬满后 fund_nav 可达数千万行，LATERAL 必须作用于分页后）。
+# 分页段 LEFT JOIN fund_risk_metrics：波动指标排序须全量可比（rm 是日更
+# 全量重算的窄表，join 代价可忽略）；谓词/排序列全部带 b./rm. 前缀
+# （有 join 后裸列名对 rm.code 产生歧义，42P01 教训同源）
 _FUND_LIST_IDS_SQL = """
-SELECT code, name FROM fund_basic
-WHERE (%s = '' OR code ILIKE %s OR name ILIKE %s)
+SELECT b.code, b.name FROM fund_basic b
+LEFT JOIN fund_risk_metrics rm ON rm.code = b.code
+WHERE (%s = '' OR b.code ILIKE %s OR b.name ILIKE %s)
   AND {delist_clause}
   AND {backend_clause}
   AND {money_clause}
   AND {qdii_clause}
-ORDER BY code
+ORDER BY {sort_clause}
 LIMIT %s OFFSET %s
 """
 
@@ -78,7 +82,9 @@ _FUND_LIST_SQL = """
 SELECT b.code, b.name, b.fund_type,
        p.unit_nav, p.pct_chg, p.nav_date,
        COALESCE(s.navs, 0) AS navs,
-       COALESCE(s.first_date, p.nav_date) AS first_date
+       COALESCE(s.first_date, p.nav_date) AS first_date,
+       rm.vol_1y, rm.vol_down_1y, rm.mdd_1y, rm.sharpe_1y,
+       rm.roll_vol, rm.vol_pctile
 FROM fund_basic b
 LEFT JOIN LATERAL (
     SELECT unit_nav, pct_chg, nav_date
@@ -91,13 +97,14 @@ LEFT JOIN LATERAL (
     FROM fund_nav f2
     WHERE f2.code = b.code
 ) s ON true
+LEFT JOIN fund_risk_metrics rm ON rm.code = b.code
 WHERE b.code = ANY(%s)
 ORDER BY b.code
 """
 
 _FUND_COUNT_SQL = """
-SELECT count(*) FROM fund_basic
-WHERE (%s = '' OR code ILIKE %s OR name ILIKE %s)
+SELECT count(*) FROM fund_basic b
+WHERE (%s = '' OR b.code ILIKE %s OR b.name ILIKE %s)
   AND {delist_clause}
   AND {backend_clause}
   AND {money_clause}
@@ -109,6 +116,26 @@ SELECT nav_date, unit_nav, accum_nav, pct_chg, unit_money, source
 FROM fund_nav WHERE code = %s
 ORDER BY nav_date DESC LIMIT %s OFFSET %s
 """
+
+_FUND_RISK_SQL = """
+SELECT vol_1y, vol_down_1y, mdd_1y, sharpe_1y,
+       vol_3y, vol_down_3y, mdd_3y, sharpe_3y,
+       vol_5y, vol_down_5y, mdd_5y, sharpe_5y,
+       vol_all, vol_down_all, mdd_all, sharpe_all,
+       roll_vol, vol_pctile, as_of, computed_at
+FROM fund_risk_metrics WHERE code = %s
+"""
+
+# 基金列表排序白名单（防注入）：波动指标列落 rm 表，默认 code；
+# 排序恒 NULLS LAST（无指标行的退市/新基金沉底）+ b.code 稳定序
+_FUND_SORT_COLS = {
+    "code": "b.code",
+    "vol_1y": "rm.vol_1y",
+    "vol_down_1y": "rm.vol_down_1y",
+    "mdd_1y": "rm.mdd_1y",
+    "sharpe_1y": "rm.sharpe_1y",
+    "vol_pctile": "rm.vol_pctile",
+}
 
 
 def _safe(fn, default):
@@ -270,10 +297,12 @@ def fetch_stock_basic(dsn: str) -> dict:
 def fetch_fund_list(dsn: str, *, q: str = "", limit: int = 50,
                     offset: int = 0, delisted: str = "",
                     show_backend: str = "", show_money: str = "",
-                    show_qdii: str = "") -> dict:
-    """基金列表 + 每只净值摘要（最新单位净值/日增长率/净值条数/区间），
-    code/name 模糊搜索。两段式同 fetch_stock_list（见其 docstring 的
-    深分页性能教训）。
+                    show_qdii: str = "", sort: str = "code",
+                    order: str = "asc") -> dict:
+    """基金列表 + 每只净值摘要（最新单位净值/日增长率/净值条数/区间）+ 波动
+    指标（近1年四指标/当前滚动波动率/分位，fund_risk_metrics 日更快照，
+    无指标行的基金字段为 null），code/name 模糊搜索。两段式同
+    fetch_stock_list（见其 docstring 的深分页性能教训）。
 
     delisted="false"/"true" 仅在市/仅退市（fund_basic.delisted 由爬虫按
     在市集合差集标记），其余值（含空串）不过滤；
@@ -283,6 +312,9 @@ def fetch_fund_list(dsn: str, *, q: str = "", limit: int = 50,
     摊余成本法货基净值恒为 1、无单位净值走势，列表常驻意义小）。
     show_qdii 非 "1"/"true"（默认）隐藏 QDII 基金（fund_type 含"QDII"，
     净值披露 T+1/T+2 滞后）。
+    sort 白名单排序（_FUND_SORT_COLS：code 默认 + 波动指标列），白名单外
+    回落 code；order 仅 asc 生效升序、其余降序（同 dca_api 口径）；
+    恒 NULLS LAST + code 稳定序。
     谓词用 position() 而非 LIKE '%..%'：psycopg3 会对带参 SQL 里的字面量
     % 做 %-格式化，中文首字节撞上直接 UnicodeDecodeError（真库实测）
     ——内联片段禁用裸 %，与全表名教训同源；COALESCE 使 NULL 类型
@@ -291,19 +323,23 @@ def fetch_fund_list(dsn: str, *, q: str = "", limit: int = 50,
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
     like = f"%{q}%"
-    delist_clause = (f"fund_basic.delisted = {delisted.upper()}"
+    delist_clause = (f"b.delisted = {delisted.upper()}"
                      if delisted in ("true", "false") else "true")
     backend_clause = ("true" if show_backend in ("1", "true")
-                      else "position('后端' in fund_basic.name) = 0")
+                      else "position('后端' in b.name) = 0")
     money_clause = ("true" if show_money in ("1", "true")
-                    else "COALESCE(position('货币' in fund_basic.fund_type), 0) = 0")
+                    else "COALESCE(position('货币' in b.fund_type), 0) = 0")
     qdii_clause = ("true" if show_qdii in ("1", "true")
-                   else "COALESCE(position('QDII' in fund_basic.fund_type), 0) = 0")
+                   else "COALESCE(position('QDII' in b.fund_type), 0) = 0")
+    sort_col = _FUND_SORT_COLS.get(sort, _FUND_SORT_COLS["code"])
+    order_dir = "ASC" if order.strip().lower() == "asc" else "DESC"
+    sort_clause = f"{sort_col} {order_dir} NULLS LAST"
     sql_ids = (_FUND_LIST_IDS_SQL
                .replace("{delist_clause}", delist_clause)
                .replace("{backend_clause}", backend_clause)
                .replace("{money_clause}", money_clause)
-               .replace("{qdii_clause}", qdii_clause))
+               .replace("{qdii_clause}", qdii_clause)
+               .replace("{sort_clause}", sort_clause))
     count_sql = (_FUND_COUNT_SQL
                  .replace("{delist_clause}", delist_clause)
                  .replace("{backend_clause}", backend_clause)
@@ -319,7 +355,9 @@ def fetch_fund_list(dsn: str, *, q: str = "", limit: int = 50,
                 if codes:
                     cur.execute(_FUND_LIST_SQL, (codes,))
                     cols = ["code", "name", "fund_type", "unit_nav", "pct_chg",
-                            "last_date", "navs", "first_date"]
+                            "last_date", "navs", "first_date",
+                            "vol_1y", "vol_down_1y", "mdd_1y", "sharpe_1y",
+                            "roll_vol", "vol_pctile"]
                     by_code = {r[0]: dict(zip(cols, r)) for r in cur.fetchall()}
                     funds = [by_code[c] for c in codes]   # 保持 code 序
                 cur.execute(count_sql, (q, like, like))
@@ -327,6 +365,9 @@ def fetch_fund_list(dsn: str, *, q: str = "", limit: int = 50,
         for f in funds:
             f["unit_nav"] = round(f["unit_nav"], 4) if f["unit_nav"] is not None else None
             f["pct_chg"] = round(f["pct_chg"], 2) if f["pct_chg"] is not None else None
+            for k in ("vol_1y", "vol_down_1y", "mdd_1y", "sharpe_1y",
+                      "roll_vol", "vol_pctile"):
+                f[k] = round(f[k], 4) if f[k] is not None else None
             for k in ("last_date", "first_date"):
                 if f[k]:
                     f[k] = f[k].isoformat()
@@ -339,7 +380,9 @@ def fetch_fund_list(dsn: str, *, q: str = "", limit: int = 50,
 def fetch_fund_navs(dsn: str, code: str, *, limit: int = 250,
                     offset: int = 0) -> dict:
     """单只基金净值历史（默认最新 250 个净值日，倒序进正序出，同 bars 约定：
-    图表用升序，明细表自行倒序展示）。"""
+    图表用升序，明细表自行倒序展示）。响应附带 risk：风险/波动指标快照
+    （fund_risk_metrics 日更行，全字段 None 化的缺省形状；该基金无指标行
+    或表未建时 risk=None——详情页指标区按此隐藏）。"""
     limit = max(1, min(limit, 5000))
     offset = max(0, offset)
 
@@ -348,12 +391,31 @@ def fetch_fund_navs(dsn: str, code: str, *, limit: int = 250,
             with conn.cursor() as cur:
                 cur.execute(_FUND_NAVS_SQL, (code, limit, offset))
                 rows = cur.fetchall()
+                risk = None
+                try:
+                    cur.execute(_FUND_RISK_SQL, (code,))
+                    rrow = cur.fetchone()
+                except psycopg.errors.UndefinedTable:
+                    rrow = None              # 建表兜底前 schema 滞后不炸详情
+                if rrow is not None:
+                    rcols = ["vol_1y", "vol_down_1y", "mdd_1y", "sharpe_1y",
+                             "vol_3y", "vol_down_3y", "mdd_3y", "sharpe_3y",
+                             "vol_5y", "vol_down_5y", "mdd_5y", "sharpe_5y",
+                             "vol_all", "vol_down_all", "mdd_all", "sharpe_all",
+                             "roll_vol", "vol_pctile", "as_of", "computed_at"]
+                    risk = dict(zip(rcols, rrow))
+                    risk["as_of"] = (risk["as_of"].isoformat()
+                                     if risk["as_of"] is not None else None)
+                    risk["computed_at"] = (risk["computed_at"].isoformat()
+                                           if risk["computed_at"] is not None
+                                           else None)
         out = [
             {"date": r[0].isoformat(), "unit_nav": r[1], "accum_nav": r[2],
              "pct_chg": r[3], "unit_money": r[4], "source": r[5]}
             for r in rows
         ]
         out.reverse()
-        return {"status": "up", "code": code, "count": len(out), "navs": out}
+        return {"status": "up", "code": code, "count": len(out), "navs": out,
+                "risk": risk}
     return _safe(run, {"status": "down", "detail": "pg unreachable",
-                       "code": code, "count": 0, "navs": []})
+                       "code": code, "count": 0, "navs": [], "risk": None})

@@ -144,8 +144,8 @@ async def _run_backtest_job(dsn: str, task: dict, progress,
         # "Can't get local object" 崩掉子进程任务）
         with concurrent.futures.ProcessPoolExecutor(max_workers=1,
                                                     mp_context=ctx) as pool:
-            old_rows, old_rounds, tp_rows, tp_rounds, timing_rows, stats = \
-                await loop.run_in_executor(
+            old_rows, old_rounds, tp_rows, tp_rounds, timing_rows, \
+                risk_rows, stats = await loop.run_in_executor(
                     pool, dca_backtest.run_full_backtest_tp, dsn)
     except Exception as exc:
         with psycopg.connect(dsn) as conn:
@@ -176,12 +176,13 @@ async def _run_backtest_job(dsn: str, task: dict, progress,
                  "window_end": stats.get("window_end"),
                  "source": "scheduler/backtest"}
     with psycopg.connect(dsn) as conn:
-        dca_store.ensure_tp_schema(conn)          # 三新表幂等建表
+        dca_store.ensure_tp_schema(conn)          # 多阈值新表 + 波动指标表幂等建表
         dca_store.import_rows(conn, old_rows, params=params)
         dca_store.import_rounds(conn, old_rounds)
         dca_store.import_tp_rows(conn, tp_rows, params=tp_params)
         dca_store.import_tp_rounds(conn, tp_rounds)
         dca_store.import_timing(conn, timing_rows)
+        dca_store.import_risk(conn, risk_rows)
         store.finish_run(conn, run_id, total_stocks=stats["fund_count"],
                          ok_stocks=stats["fund_count"], failed_stocks=0,
                          bars_upserted=stats["round_count"], failures=[],
@@ -189,7 +190,8 @@ async def _run_backtest_job(dsn: str, task: dict, progress,
         conn.commit()
     print(f"[backtest] 日更完成：{stats['fund_count']:,} 只 / "
           f"旧口径轮次 {stats['round_count']:,} 行 / 多阈值轮次 "
-          f"{stats['tp_round_count']:,} 行，窗口截至 {stats.get('window_end')}")
+          f"{stats['tp_round_count']:,} 行 / 风险行 {stats['risk_count']:,}，"
+          f"窗口截至 {stats.get('window_end')}")
 
     # Pages 自动发布（可选）：PAGES_REPO_URL 配置了含 token 的仓库 URL 才启用；
     # 失败只告警不回滚——回测结果是主交付物，公开页保持上一份快照次日自愈
