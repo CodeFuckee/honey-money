@@ -2835,116 +2835,136 @@ watch(
             </div>
             <p class="note" v-if="STATIC_MODE && dca.meta?.generated_at"
               style="margin: 0 0 8px">静态快照（GitHub Pages）· 数据生成于 {{ dca.meta.generated_at.slice(0, 10) }} · 明细不含净值曲线 · 实时数据以内网部署为准</p>
-            <div class="ph-search funds-search">
-              <span class="p-inputtext-icon-wrap"><i class="pi pi-search"></i></span>
-              <InputText v-model="dcaQuery" placeholder="搜索基金代码 / 名称，如 510300 或 沪深300"
-                class="browse-input" @keydown.enter="dcaSearch" />
-              <Button label="搜索" size="small" severity="secondary" outlined @click="dcaSearch" />
-              <Select v-model="dcaAlive" :options="DCA_ALIVE_FILTERS"
-                optionLabel="label" optionValue="value" size="small"
-                placeholder="仅在市" class="delisted-select"
-                aria-label="按在市状态过滤" @change="dcaSearch" />
-              <span class="age-wrap" title="只看运作超过 N 年的基金；0 或留空 = 全部">
-                <InputNumber v-model="dcaAge" :min="0" :max="99"
-                  :maxFractionDigits="0" :useGrouping="false" size="small"
-                  inputClass="age-input" inputId="dca-age"
-                  placeholder="年限" aria-label="按运作年限过滤，大于该年数" />
-                <span class="age-suffix">年以上</span>
-              </span>
-              <span class="age-wrap" title="只看规模超过 N 亿的基金；0 或留空 = 全部（含无规模披露）">
-                <InputNumber v-model="dcaScale" :min="0" :max="99999"
-                  :maxFractionDigits="2" :useGrouping="false" size="small"
-                  inputClass="age-input" inputId="dca-scale"
-                  placeholder="规模" aria-label="按资产规模过滤，大于该数值（亿元）" />
-                <span class="age-suffix">亿以上</span>
-              </span>
-              <!-- 止盈点切换：排行/统计/明细跟随（对比区块行/圆点同款状态）；默认 20% -->
-              <div class="src-seg" v-if="!STATIC_MODE"
-                   title="切换止盈线：排行/统计/明细跟随（散点/分箱固定 20% 口径）">
-                <button v-for="t in DCA_TP_OPTIONS" :key="t"
-                        class="src-seg-btn"
-                        :class="{ active: dcaTp === t }"
-                        @click="onDcaTpChange(t)"
-                        :data-tp="t">{{ dcaTpLabel(t) }}</button>
+            <!-- 统一筛选面板（2026-11-17 用户反馈：筛选区显乱）——一个面板三行分组，
+                 行间独立 flex 互不搅动：行1 搜索与基础筛选（搜索框自带边框）·
+                 行2 口径切换（组带小标签）· 行3 区间筛选（内嵌浅灰区块） -->
+            <div class="dca-filter-panel">
+              <div class="dca-filter-row funds-search">
+                <span class="dca-search-box">
+                  <span class="p-inputtext-icon-wrap"><i class="pi pi-search"></i></span>
+                  <InputText v-model="dcaQuery" placeholder="搜索基金代码 / 名称，如 510300"
+                    class="browse-input" @keydown.enter="dcaSearch" />
+                </span>
+                <Button label="搜索" size="small" severity="secondary" outlined @click="dcaSearch" />
+                <Select v-model="dcaAlive" :options="DCA_ALIVE_FILTERS"
+                  optionLabel="label" optionValue="value" size="small"
+                  placeholder="仅在市" class="delisted-select"
+                  aria-label="按在市状态过滤" @change="dcaSearch" />
+                <span class="age-wrap" title="只看运作超过 N 年的基金；0 或留空 = 全部">
+                  <span class="age-suffix">运作 ≥</span>
+                  <InputNumber v-model="dcaAge" :min="0" :max="99"
+                    :maxFractionDigits="0" :useGrouping="false" size="small"
+                    inputClass="age-input" inputId="dca-age"
+                    aria-label="按运作年限过滤，大于该年数" />
+                  <span class="age-suffix">年</span>
+                </span>
+                <span class="age-wrap" title="只看规模超过 N 亿的基金；0 或留空 = 全部（含无规模披露）">
+                  <span class="age-suffix">规模 ≥</span>
+                  <InputNumber v-model="dcaScale" :min="0" :max="99999"
+                    :maxFractionDigits="2" :useGrouping="false" size="small"
+                    inputClass="age-input" inputId="dca-scale"
+                    aria-label="按资产规模过滤，大于该数值（亿元）" />
+                  <span class="age-suffix">亿</span>
+                </span>
+                <span class="dca-filter-spacer"></span>
+                <!-- 列显示过滤（2026-11-17 用户需求）：勾选表格要显示的列；
+                     代码/名称/操作恒显，纯客户端裁剪不影响服务端分页 -->
+                <MultiSelect v-model="dcaVisibleCols" :options="DCA_TOGGLE_COLS"
+                  optionLabel="label" optionValue="key" size="small"
+                  placeholder="显示列" class="dca-col-select"
+                  :maxSelectedLabels="0" selectedItemsLabel="已选 {0} 列"
+                  title="勾选表格要显示的列" aria-label="选择表格显示列" />
               </div>
-              <!-- 权益类筛选：与散点区同一状态（dcaEquity），排行/统计/散点联动 -->
-              <div class="src-seg" title="排行/统计/散点共用同一基金类型口径（默认仅权益类）">
-                <button class="src-seg-btn"
-                        :class="{ active: dcaEquity }"
-                        @click="dcaEquity = true"
-                        data-table-cat="equity">仅权益类</button>
-                <button class="src-seg-btn"
-                        :class="{ active: !dcaEquity }"
-                        @click="dcaEquity = false"
-                        data-table-cat="all">全市场</button>
+              <div class="dca-filter-row dca-filter-segs">
+                <!-- 止盈点切换：排行/统计/明细跟随（对比区块行/圆点同款状态）；默认 20% -->
+                <div class="seg-group" v-if="!STATIC_MODE">
+                  <span class="seg-label">止盈点</span>
+                  <div class="src-seg" title="切换止盈线：排行/统计/明细跟随（散点/分箱固定 20% 口径）">
+                    <button v-for="t in DCA_TP_OPTIONS" :key="t"
+                            class="src-seg-btn"
+                            :class="{ active: dcaTp === t }"
+                            @click="onDcaTpChange(t)"
+                            :data-tp="t">{{ dcaTpLabel(t) }}</button>
+                  </div>
+                </div>
+                <!-- 权益类筛选：与散点区同一状态（dcaEquity），排行/统计/散点联动 -->
+                <div class="seg-group">
+                  <span class="seg-label">基金类型</span>
+                  <div class="src-seg" title="排行/统计/散点共用同一基金类型口径（默认仅权益类）">
+                    <button class="src-seg-btn"
+                            :class="{ active: dcaEquity }"
+                            @click="dcaEquity = true"
+                            data-table-cat="equity">仅权益类</button>
+                    <button class="src-seg-btn"
+                            :class="{ active: !dcaEquity }"
+                            @click="dcaEquity = false"
+                            data-table-cat="all">全市场</button>
+                  </div>
+                </div>
+                <!-- 费用口径：与散点区同一状态（dcaFeeMode），排行/统计/散点/详情联动 -->
+                <div class="seg-group">
+                  <span class="seg-label">费用口径</span>
+                  <div class="src-seg" title="排行/统计/散点/详情共用同一费用口径">
+                    <button v-for="o in DCA_FEE_OPTIONS" :key="o.key"
+                            class="src-seg-btn"
+                            :class="{ active: dcaFeeMode === o.key }"
+                            @click="dcaFeeMode = o.key"
+                            :data-table-fee="o.key">{{ o.label }}</button>
+                  </div>
+                </div>
               </div>
-              <!-- 费用口径：与散点区同一状态（dcaFeeMode），排行/统计/散点/详情联动 -->
-              <div class="src-seg" title="排行/统计/散点/详情共用同一费用口径">
-                <button v-for="o in DCA_FEE_OPTIONS" :key="o.key"
-                        class="src-seg-btn"
-                        :class="{ active: dcaFeeMode === o.key }"
-                        @click="dcaFeeMode = o.key"
-                        :data-table-fee="o.key">{{ o.label }}</button>
-              </div>
-              <!-- 列显示过滤（2026-11-17 用户需求）：勾选表格要显示的列；
-                   代码/名称/操作恒显，纯客户端裁剪不影响服务端分页 -->
-              <MultiSelect v-model="dcaVisibleCols" :options="DCA_TOGGLE_COLS"
-                optionLabel="label" optionValue="key" size="small"
-                placeholder="显示列" class="dca-col-select"
-                :maxSelectedLabels="0" selectedItemsLabel="已选 {0} 列"
-                title="勾选表格要显示的列" aria-label="选择表格显示列" />
-            </div>
-            <!-- 区间筛选：常显（2026-11-17 用户反馈：折叠按钮多余，且固定五列
-                 网格被 InputNumber 的 min-content 撑破、在窄屏冲出页面）——
-                 响应式 auto-fit 网格 + 输入框可收缩（min-width:0 / input 100%）。
-                 表格合并后直接作用于统一排行表（服务端过滤；回撤桶按钮组已删，
-                 与本面板的当前回撤维度重复） -->
-            <div class="timing-filter">
-              <div class="timing-filter-head">
-                <span class="timing-filter-title">区间筛选</span>
-                <button v-if="dcaRangeFiltersActive" class="src-seg-btn"
-                        @click="resetDcaRangeFilters">清除筛选</button>
-                <span v-if="dcaRangeFiltersActive" class="sub">筛选已生效 · {{ dca.total ?? 0 }} 只</span>
-              </div>
-              <div class="timing-filter-grid">
-                <label>运作年限（年）
-                  <div class="timing-filter-range">
-                    <InputNumber v-model="dcaRangeFilters.age_min" :min="0" :max="99" :maxFractionDigits="1" :useGrouping="false" size="small" placeholder="最短" style="width: 100%" />
-                    <span>~</span>
-                    <InputNumber v-model="dcaRangeFilters.age_max" :min="0" :max="99" :maxFractionDigits="1" :useGrouping="false" size="small" placeholder="最长" style="width: 100%" />
+              <!-- 区间筛选：常显（2026-11-17 用户反馈：折叠按钮多余，且固定五列
+                   网格被 InputNumber 的 min-content 撑破、在窄屏冲出页面）——
+                   响应式 auto-fit 网格 + 输入框可收缩（min-width:0 / input 100%）。
+                   表格合并后直接作用于统一排行表（服务端过滤；回撤桶按钮组已删，
+                   与本面板的当前回撤维度重复） -->
+              <div class="timing-filter timing-filter--inline">
+                <div class="timing-filter-head">
+                  <span class="timing-filter-title">区间筛选</span>
+                  <button v-if="dcaRangeFiltersActive" class="src-seg-btn"
+                          @click="resetDcaRangeFilters">清除筛选</button>
+                  <span v-if="dcaRangeFiltersActive" class="sub">筛选已生效 · {{ dca.total ?? 0 }} 只</span>
+                </div>
+                <div class="timing-filter-grid">
+                  <label>运作年限（年）
+                    <div class="timing-filter-range">
+                      <InputNumber v-model="dcaRangeFilters.age_min" :min="0" :max="99" :maxFractionDigits="1" :useGrouping="false" size="small" placeholder="最短" style="width: 100%" />
+                      <span>~</span>
+                      <InputNumber v-model="dcaRangeFilters.age_max" :min="0" :max="99" :maxFractionDigits="1" :useGrouping="false" size="small" placeholder="最长" style="width: 100%" />
+                    </div>
+                  </label>
+                  <label>止盈间隔（天）
+                    <div class="timing-filter-range">
+                      <InputNumber v-model="dcaRangeFilters.gap_min" :min="0" :useGrouping="false" size="small" placeholder="最短" style="width: 100%" />
+                      <span>~</span>
+                      <InputNumber v-model="dcaRangeFilters.gap_max" :min="0" :useGrouping="false" size="small" placeholder="最长" style="width: 100%" />
+                    </div>
+                  </label>
+                  <label>年化（0.3 = 30%）
+                    <div class="timing-filter-range">
+                      <InputNumber v-model="dcaRangeFilters.xirr_min" :min="-1" :max="20" :maxFractionDigits="2" :useGrouping="false" size="small" placeholder="最低" style="width: 100%" />
+                      <span>~</span>
+                      <InputNumber v-model="dcaRangeFilters.xirr_max" :min="-1" :max="20" :maxFractionDigits="2" :useGrouping="false" size="small" placeholder="最高" style="width: 100%" />
+                    </div>
+                  </label>
+                  <label>当前回撤（%，正数幅度）
+                    <div class="timing-filter-range">
+                      <InputNumber v-model="dcaRangeFilters.dd_min" :min="0" :max="99" :maxFractionDigits="1" :useGrouping="false" size="small" placeholder="至少跌" style="width: 100%" />
+                      <span>~</span>
+                      <InputNumber v-model="dcaRangeFilters.dd_max" :min="0" :max="99" :maxFractionDigits="1" :useGrouping="false" size="small" placeholder="至多跌" style="width: 100%" />
+                    </div>
+                  </label>
+                  <label>总收益率（0.1 = 10%）
+                    <div class="timing-filter-range">
+                      <InputNumber v-model="dcaRangeFilters.pr_min" :min="-1" :max="20" :maxFractionDigits="2" :useGrouping="false" size="small" placeholder="最低" style="width: 100%" />
+                      <span>~</span>
+                      <InputNumber v-model="dcaRangeFilters.pr_max" :min="-1" :max="20" :maxFractionDigits="2" :useGrouping="false" size="small" placeholder="最高" style="width: 100%" />
+                    </div>
+                  </label>
+                  <div class="timing-filter-actions">
+                    <Button label="应用筛选" size="small" @click="applyDcaRangeFilters" />
+                    <Button label="重置" size="small" severity="secondary" outlined @click="resetDcaRangeFilters" />
                   </div>
-                </label>
-                <label>止盈间隔（天）
-                  <div class="timing-filter-range">
-                    <InputNumber v-model="dcaRangeFilters.gap_min" :min="0" :useGrouping="false" size="small" placeholder="最短" style="width: 100%" />
-                    <span>~</span>
-                    <InputNumber v-model="dcaRangeFilters.gap_max" :min="0" :useGrouping="false" size="small" placeholder="最长" style="width: 100%" />
-                  </div>
-                </label>
-                <label>年化（0.3 = 30%）
-                  <div class="timing-filter-range">
-                    <InputNumber v-model="dcaRangeFilters.xirr_min" :min="-1" :max="20" :maxFractionDigits="2" :useGrouping="false" size="small" placeholder="最低" style="width: 100%" />
-                    <span>~</span>
-                    <InputNumber v-model="dcaRangeFilters.xirr_max" :min="-1" :max="20" :maxFractionDigits="2" :useGrouping="false" size="small" placeholder="最高" style="width: 100%" />
-                  </div>
-                </label>
-                <label>当前回撤（%，正数幅度）
-                  <div class="timing-filter-range">
-                    <InputNumber v-model="dcaRangeFilters.dd_min" :min="0" :max="99" :maxFractionDigits="1" :useGrouping="false" size="small" placeholder="至少跌" style="width: 100%" />
-                    <span>~</span>
-                    <InputNumber v-model="dcaRangeFilters.dd_max" :min="0" :max="99" :maxFractionDigits="1" :useGrouping="false" size="small" placeholder="至多跌" style="width: 100%" />
-                  </div>
-                </label>
-                <label>总收益率（0.1 = 10%）
-                  <div class="timing-filter-range">
-                    <InputNumber v-model="dcaRangeFilters.pr_min" :min="-1" :max="20" :maxFractionDigits="2" :useGrouping="false" size="small" placeholder="最低" style="width: 100%" />
-                    <span>~</span>
-                    <InputNumber v-model="dcaRangeFilters.pr_max" :min="-1" :max="20" :maxFractionDigits="2" :useGrouping="false" size="small" placeholder="最高" style="width: 100%" />
-                  </div>
-                </label>
-                <div class="timing-filter-actions">
-                  <Button label="应用筛选" size="small" @click="applyDcaRangeFilters" />
-                  <Button label="重置" size="small" severity="secondary" outlined @click="resetDcaRangeFilters" />
                 </div>
               </div>
             </div>
@@ -4538,11 +4558,40 @@ body {
 .filter-chip.active .chip-dot { background: #0f62fe; }
 /* 基金页搜索栏：宽度自适应 + 换行（.ph-search 的 480px 钉死宽度会导致
    控件挤压竖排溢出——2026-10-29 截图反馈） */
-.funds-search { width: auto; max-width: 100%; height: auto; flex-wrap: wrap; row-gap: 8px; }
-.funds-search .browse-input { flex: 1 1 200px; min-width: 150px; width: auto; }
-/* 列显示过滤（MultiSelect）：与搜索栏内其他 small 控件同高，窄屏可收缩 */
+/* —— 统一筛选面板（2026-11-17 用户反馈：筛选区显乱）——
+   一个面板三行分组：搜索/基础筛选 · 口径切换（带小标签）· 区间筛选；
+   行间独立 flex，窄屏各自换行互不搅动；funds-search 类保留在行 1 仅为
+   E2E 选择器契约（test_fund_dca_page 的 .funds-search .browse-input） */
+.dca-filter-panel { display: flex; flex-direction: column; gap: 10px;
+  margin: 0 0 12px; padding: 12px 14px; background: var(--card-bg, #fff);
+  border: 1px solid var(--card-border-color, #e0e0e0); border-radius: 6px; }
+.dca-filter-row { display: flex; flex-wrap: wrap; align-items: center;
+  gap: 8px 12px; min-width: 0; }
+.dca-filter-spacer { flex: 1 1 0; }
+/* 行 1 搜索框：自带边框的紧凑输入（替代旧「整条边框大盒子」形态），
+   focus 主蓝描边；.browse-input 全局透明无边框样式原样适用 */
+.dca-search-box { display: inline-flex; align-items: center; gap: 8px;
+  flex: 1 1 240px; max-width: 360px; min-width: 180px; height: 32px;
+  padding: 0 10px; border: 1px solid #8d8d8d; background: #fff;
+  transition: border-color .1s; }
+.dca-search-box:focus-within { border-color: var(--accent, #0f62fe); }
+.dca-search-box .pi-search { color: #525252; font-size: 13px; }
+/* PrimeVue 运行时注入的 .p-inputtext 主题（白底描边）晚于打包 CSS 生效，
+   同权重会盖掉 .browse-input 的透明无边框——三连类提高权重压回透明，
+   搜索框只保留 .dca-search-box 自身的一圈描边 */
+.dca-search-box input.p-inputtext.browse-input { border: 0; background: transparent;
+  box-shadow: none; padding: 0; height: 100%; flex: 1 1 auto; min-width: 0; width: auto; }
+.dca-filter-row .age-wrap .age-input { width: 64px; }
+/* 行 2 口径组：12px 灰组标签 + 按钮组，组间留白大于组内 */
+.dca-filter-segs { gap: 8px 18px; }
+.seg-group { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.seg-label { font-size: 12px; color: #525252; white-space: nowrap; }
+/* 列显示过滤（MultiSelect）：与搜索行 small 控件同高，窄屏可收缩 */
 .funds-search .dca-col-select { min-width: 118px; max-width: 160px; }
 .funds-search .dca-col-select .p-multiselect-label { font-size: 12px; padding: 5px 8px; }
+/* 行 3 区间筛选：面板内嵌区块——浅灰底替代独立描边，视觉上从属于同一面板 */
+.timing-filter--inline { margin: 0; border: 0; border-radius: 4px;
+  background: var(--surface-50, #f4f4f4); }
 .age-wrap { display: inline-flex; align-items: center; gap: 6px; }
 .age-wrap .age-input { width: 76px; text-align: right; }
 .age-suffix { font-size: 12px; opacity: .72; white-space: nowrap; }
