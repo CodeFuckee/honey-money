@@ -572,8 +572,8 @@ const dcaTimingPage = ref(0)
 const dcaTimingLoading = ref(false)
 const ddpct = v => v == null ? '—' : (v * 100).toFixed(1) + '%'
 // 五维度区间筛选（空=不筛；回撤输入正数幅度）。应用后服务端过滤（分页
-// 表格客户端筛当前页无意义）；会话内探索状态，不进 URL
-const dcaTimingFiltersShow = ref(false)
+// 表格客户端筛当前页无意义）；筛选面板常显（2026-11-17 用户反馈，去折叠
+// 按钮）；会话内探索状态，不进 URL
 const emptyTimingFilters = () => ({ age_min: null, age_max: null,
   gap_min: null, gap_max: null, xirr_min: null, xirr_max: null,
   dd_min: null, dd_max: null, pr_min: null, pr_max: null })
@@ -2750,120 +2750,6 @@ watch(
               </div>
             </div>
 
-            <!-- ===== 年限 × 规模 三维散点（每基金一点） + 分箱统计 ===== -->
-            <div class="card" style="margin-top: 16px; padding: 14px 16px 18px">
-              <div class="toolbar" style="margin: 0 0 6px">
-                <div>
-                  <h2 class="h1" style="font-size: 18px">年限 × 规模 × 年化 三维散点</h2>
-                  <p class="sub">每只在市基金一个点，落在自己的（运作年限，规模，年化）坐标上，不做任何分组重复计数 · 规模为对数轴 · 悬停点查看基金明细 · 统计截至 {{ dcaScatter?.ref_date || '—' }}</p>
-                </div>
-                <div class="toolbar-right">
-                  <span v-if="dcaFeeLoading" class="sub" style="margin-right: 8px">重算中…</span>
-                  <div class="src-seg" :style="dcaFeeLoading ? 'opacity:.55' : ''">
-                    <button class="src-seg-btn"
-                            :class="{ active: dcaEquity }"
-                            @click="dcaEquity = true"
-                            data-scatter-cat="equity">仅权益类</button>
-                    <button class="src-seg-btn"
-                            :class="{ active: !dcaEquity }"
-                            @click="dcaEquity = false"
-                            data-scatter-cat="all">全市场</button>
-                  </div>
-                  <div class="src-seg" :style="dcaFeeLoading ? 'opacity:.55' : ''">
-                    <button v-for="o in DCA_FEE_OPTIONS" :key="o.key"
-                            class="src-seg-btn"
-                            :class="{ active: dcaFeeMode === o.key }"
-                            @click="dcaFeeMode = o.key"
-                            :data-fee="o.key">{{ o.label }}</button>
-                  </div>
-                </div>
-              </div>
-              <div v-if="dcaScatter?.status === 'down'" class="browse-empty">
-                散点分析不可用：{{ dcaScatter.detail || '数据库连接失败' }}
-              </div>
-              <template v-else-if="dcaScatter?.points?.length">
-                <div ref="dcaScatterChartEl" class="dca-scatter-chart" style="width: 100%; height: 620px"></div>
-
-                <!-- 结论（左） + 分箱矩阵（右）：宽屏并排、窄屏堆叠 -->
-                <div class="dca-panel">
-                  <div class="dca-conclusion" v-if="dcaScatterConclusion">
-                    <div class="dc-head">
-                      <b>结论</b>
-                      <span class="dc-badge">{{ dcaFeeLabel }} · {{ dcaEquity ? '仅权益类' : '全市场' }} · 在市 {{ fmt(dcaScatter.points.length) }} 只 · 每基金只计一次</span>
-                    </div>
-                    <div class="dc-grid">
-                      <div class="dc-item">
-                        <div class="dc-label">年限维度</div>
-                        <div class="dc-value">&lt;1 年 <b :class="dcaScatterConclusion.ageMean[0] >= 0 ? 'pos' : 'neg'">{{ pctp(dcaScatterConclusion.ageMean[0]) }}</b><span class="dc-arrow">→</span>≥10 年 <b :class="dcaScatterConclusion.ageMean[4] >= 0 ? 'pos' : 'neg'">{{ pctp(dcaScatterConclusion.ageMean[4]) }}</b></div>
-                        <div class="dc-note">年限越长、定投止盈的年化越稳越高</div>
-                      </div>
-                      <div class="dc-item">
-                        <div class="dc-label">规模维度</div>
-                        <div class="dc-value"><template v-for="(sb, i) in dcaScatter.scale_bands" :key="sb"><span v-if="i" class="dc-arrow">→</span><b :class="dcaScatterConclusion.scaleMean[i] >= 0 ? 'pos' : 'neg'">{{ pctp(dcaScatterConclusion.scaleMean[i]) }}</b></template></div>
-                        <div class="dc-note">&lt;1 亿 → ≥100 亿 · 影响弱于年限，差距不大且非单调</div>
-                      </div>
-                      <div class="dc-item dc-best" v-if="dcaScatterConclusion.best">
-                        <div class="dc-label">★ 组合最优格<span class="dc-hint">样本 ≥300</span></div>
-                        <div class="dc-value">{{ dcaScatter.age_bands[dcaScatterConclusion.best.ageIdx] }} × {{ dcaScatter.scale_bands[dcaScatterConclusion.best.scaleIdx] }}</div>
-                        <div class="dc-note">平均年化 <b :class="dcaScatterConclusion.best.cell.mean_xirr >= 0 ? 'pos' : 'neg'">{{ pctp(dcaScatterConclusion.best.cell.mean_xirr) }}</b> · {{ fmt(dcaScatterConclusion.best.cell.count) }} 只 · 中位 {{ pctp(dcaScatterConclusion.best.cell.median_xirr) }} · 年化为正 {{ pct0(dcaScatterConclusion.best.cell.positive_share) }}</div>
-                      </div>
-                    </div>
-                  </div>
-                  <div class="dca-matrix-wrap">
-                    <div class="dc-head">
-                      <b>年限段 × 规模段 分箱统计（均值）</b>
-                      <span class="dc-badge">格内 = 基金数 / 平均年化 · 点击格子查看基金清单</span>
-                    </div>
-                    <table class="dca-matrix">
-                      <tr>
-                        <th>规模 \ 年限</th>
-                        <th v-for="ab in dcaScatter.age_bands" :key="ab">{{ ab }}</th>
-                      </tr>
-                      <tr v-for="(sb, si) in dcaScatter.scale_bands" :key="sb">
-                        <th>{{ sb }}</th>
-                        <td v-for="(ab, ai) in dcaScatter.age_bands" :key="ab"
-                            :class="{ 'dca-matrix-best': dcaScatterConclusion?.best && dcaScatterConclusion.best.ageIdx === ai && dcaScatterConclusion.best.scaleIdx === si,
-                                      'dca-cell-link': dcaScatter.matrix[ai][si].count }"
-                            title="点击查看格内基金清单"
-                            @click="openDcaCellFunds(ai, si)">
-                          <template v-if="dcaScatter.matrix[ai][si].count">
-                            {{ dcaScatter.matrix[ai][si].count }} 只<br/>
-                            <span :class="dcaScatter.matrix[ai][si].mean_xirr >= 0 ? 'chg-up' : 'chg-down'">{{ pctp(dcaScatter.matrix[ai][si].mean_xirr) }}</span>
-                          </template>
-                          <template v-else>—</template>
-                        </td>
-                      </tr>
-                    </table>
-                    <div class="dc-head" style="margin-top: 16px">
-                      <b>年限段 × 规模段 分箱统计（中位）</b>
-                      <span class="dc-badge">格内 = 基金数 / 中位年化 · 中位不受极端值拉扯 · 点击查看清单</span>
-                    </div>
-                    <table class="dca-matrix dca-median">
-                      <tr>
-                        <th>规模 \ 年限</th>
-                        <th v-for="ab in dcaScatter.age_bands" :key="ab">{{ ab }}</th>
-                      </tr>
-                      <tr v-for="(sb, si) in dcaScatter.scale_bands" :key="sb">
-                        <th>{{ sb }}</th>
-                        <td v-for="(ab, ai) in dcaScatter.age_bands" :key="ab"
-                            :class="{ 'dca-matrix-best': dcaMedianBest && dcaMedianBest.ageIdx === ai && dcaMedianBest.scaleIdx === si,
-                                      'dca-cell-link': dcaScatter.matrix[ai][si].count }"
-                            title="点击查看格内基金清单"
-                            @click="openDcaCellFunds(ai, si)">
-                          <template v-if="dcaScatter.matrix[ai][si].count">
-                            {{ dcaScatter.matrix[ai][si].count }} 只<br/>
-                            <span :class="dcaScatter.matrix[ai][si].median_xirr >= 0 ? 'chg-up' : 'chg-down'">{{ pctp(dcaScatter.matrix[ai][si].median_xirr) }}</span>
-                          </template>
-                          <template v-else>—</template>
-                        </td>
-                      </tr>
-                    </table>
-                  </div>
-                </div>
-                <p class="note" style="margin-top: 8px">口径：在市且年化非空的基金 · 年化为定投+20%止盈的 XIRR，可切换 不含费 / 含费·申购一折 / 含费·申购名义（申购费外扣折份额，赎回费按每笔持有天数阶梯：权益类 7 天内 1.5%、7 天~1 年 0.5%、1~2 年 0.25%、之后免，债券与 C 类 7 天后免；管理/托管/销售服务费已在净值内不重复计） · 超出轴范围（年化 &lt;-100% / &gt;300%、年限 &gt;25 年）的点截断在边缘 · 结论由分箱统计自动生成</p>
-              </template>
-              <div v-else class="browse-empty">散点数据加载中…</div>
-            </div>
             <div class="learn-metrics" v-if="dca.stats">
               <div class="card lm"><div class="lm-k">在市基金</div><div class="lm-v">{{ dca.stats.count }}</div></div>
               <div class="card lm"><div class="lm-k">年化中位</div><div class="lm-v">{{ pctp(dca.stats.median) }}</div></div>
@@ -2946,54 +2832,56 @@ watch(
                   </div>
                 </div>
               </div>
-              <div class="src-seg" style="margin: 0 0 8px">
-                <button class="src-seg-btn"
-                        :class="{ active: dcaTimingFiltersShow }"
-                        @click="dcaTimingFiltersShow = !dcaTimingFiltersShow">区间筛选</button>
-                <button v-if="dcaTimingFiltersActive" class="src-seg-btn"
-                        @click="resetDcaTimingFilters">清除筛选</button>
-                <span v-if="dcaTimingFiltersActive" class="sub" style="margin-left: 8px">筛选已生效 · {{ dcaTiming.total ?? 0 }} 只</span>
-              </div>
-              <div v-if="dcaTimingFiltersShow && !STATIC_MODE"
-                   style="display: grid; grid-template-columns: repeat(5, minmax(150px, 1fr)); gap: 8px 16px; margin: 0 0 12px; padding: 10px 12px; border: 1px solid var(--card-border-color, #e0e0e0); border-radius: 6px">
-                <label>运作年限（年）
-                  <div style="display: flex; gap: 4px; align-items: center">
-                    <InputNumber v-model="dcaTimingFilters.age_min" :min="0" :max="99" :maxFractionDigits="1" :useGrouping="false" size="small" placeholder="最短" style="width: 100%" />
-                    <span>~</span>
-                    <InputNumber v-model="dcaTimingFilters.age_max" :min="0" :max="99" :maxFractionDigits="1" :useGrouping="false" size="small" placeholder="最长" style="width: 100%" />
+              <!-- 区间筛选：常显（2026-11-17 用户反馈：折叠按钮多余，且固定五列
+                   网格被 InputNumber 的 min-content 撑破、在窄屏冲出页面）——
+                   响应式 auto-fit 网格 + 输入框可收缩（min-width:0 / input 100%） -->
+              <div class="timing-filter">
+                <div class="timing-filter-head">
+                  <span class="timing-filter-title">区间筛选</span>
+                  <button v-if="dcaTimingFiltersActive" class="src-seg-btn"
+                          @click="resetDcaTimingFilters">清除筛选</button>
+                  <span v-if="dcaTimingFiltersActive" class="sub">筛选已生效 · {{ dcaTiming.total ?? 0 }} 只</span>
+                </div>
+                <div class="timing-filter-grid">
+                  <label>运作年限（年）
+                    <div class="timing-filter-range">
+                      <InputNumber v-model="dcaTimingFilters.age_min" :min="0" :max="99" :maxFractionDigits="1" :useGrouping="false" size="small" placeholder="最短" style="width: 100%" />
+                      <span>~</span>
+                      <InputNumber v-model="dcaTimingFilters.age_max" :min="0" :max="99" :maxFractionDigits="1" :useGrouping="false" size="small" placeholder="最长" style="width: 100%" />
+                    </div>
+                  </label>
+                  <label>止盈间隔（天）
+                    <div class="timing-filter-range">
+                      <InputNumber v-model="dcaTimingFilters.gap_min" :min="0" :useGrouping="false" size="small" placeholder="最短" style="width: 100%" />
+                      <span>~</span>
+                      <InputNumber v-model="dcaTimingFilters.gap_max" :min="0" :useGrouping="false" size="small" placeholder="最长" style="width: 100%" />
+                    </div>
+                  </label>
+                  <label>年化（0.3 = 30%）
+                    <div class="timing-filter-range">
+                      <InputNumber v-model="dcaTimingFilters.xirr_min" :min="-1" :max="20" :maxFractionDigits="2" :useGrouping="false" size="small" placeholder="最低" style="width: 100%" />
+                      <span>~</span>
+                      <InputNumber v-model="dcaTimingFilters.xirr_max" :min="-1" :max="20" :maxFractionDigits="2" :useGrouping="false" size="small" placeholder="最高" style="width: 100%" />
+                    </div>
+                  </label>
+                  <label>当前回撤（%，正数幅度）
+                    <div class="timing-filter-range">
+                      <InputNumber v-model="dcaTimingFilters.dd_min" :min="0" :max="99" :maxFractionDigits="1" :useGrouping="false" size="small" placeholder="至少跌" style="width: 100%" />
+                      <span>~</span>
+                      <InputNumber v-model="dcaTimingFilters.dd_max" :min="0" :max="99" :maxFractionDigits="1" :useGrouping="false" size="small" placeholder="至多跌" style="width: 100%" />
+                    </div>
+                  </label>
+                  <label>总收益率（0.1 = 10%）
+                    <div class="timing-filter-range">
+                      <InputNumber v-model="dcaTimingFilters.pr_min" :min="-1" :max="20" :maxFractionDigits="2" :useGrouping="false" size="small" placeholder="最低" style="width: 100%" />
+                      <span>~</span>
+                      <InputNumber v-model="dcaTimingFilters.pr_max" :min="-1" :max="20" :maxFractionDigits="2" :useGrouping="false" size="small" placeholder="最高" style="width: 100%" />
+                    </div>
+                  </label>
+                  <div class="timing-filter-actions">
+                    <Button label="应用筛选" size="small" @click="applyDcaTimingFilters" />
+                    <Button label="重置" size="small" severity="secondary" outlined @click="resetDcaTimingFilters" />
                   </div>
-                </label>
-                <label>止盈间隔（天）
-                  <div style="display: flex; gap: 4px; align-items: center">
-                    <InputNumber v-model="dcaTimingFilters.gap_min" :min="0" :useGrouping="false" size="small" placeholder="最短" style="width: 100%" />
-                    <span>~</span>
-                    <InputNumber v-model="dcaTimingFilters.gap_max" :min="0" :useGrouping="false" size="small" placeholder="最长" style="width: 100%" />
-                  </div>
-                </label>
-                <label>年化（0.3 = 30%）
-                  <div style="display: flex; gap: 4px; align-items: center">
-                    <InputNumber v-model="dcaTimingFilters.xirr_min" :min="-1" :max="20" :maxFractionDigits="2" :useGrouping="false" size="small" placeholder="最低" style="width: 100%" />
-                    <span>~</span>
-                    <InputNumber v-model="dcaTimingFilters.xirr_max" :min="-1" :max="20" :maxFractionDigits="2" :useGrouping="false" size="small" placeholder="最高" style="width: 100%" />
-                  </div>
-                </label>
-                <label>当前回撤（%，正数幅度）
-                  <div style="display: flex; gap: 4px; align-items: center">
-                    <InputNumber v-model="dcaTimingFilters.dd_min" :min="0" :max="99" :maxFractionDigits="1" :useGrouping="false" size="small" placeholder="至少跌" style="width: 100%" />
-                    <span>~</span>
-                    <InputNumber v-model="dcaTimingFilters.dd_max" :min="0" :max="99" :maxFractionDigits="1" :useGrouping="false" size="small" placeholder="至多跌" style="width: 100%" />
-                  </div>
-                </label>
-                <label>总收益率（0.1 = 10%）
-                  <div style="display: flex; gap: 4px; align-items: center">
-                    <InputNumber v-model="dcaTimingFilters.pr_min" :min="-1" :max="20" :maxFractionDigits="2" :useGrouping="false" size="small" placeholder="最低" style="width: 100%" />
-                    <span>~</span>
-                    <InputNumber v-model="dcaTimingFilters.pr_max" :min="-1" :max="20" :maxFractionDigits="2" :useGrouping="false" size="small" placeholder="最高" style="width: 100%" />
-                  </div>
-                </label>
-                <div style="display: flex; gap: 8px; align-items: flex-end">
-                  <Button label="应用筛选" size="small" @click="applyDcaTimingFilters" />
-                  <Button label="重置" size="small" severity="secondary" outlined @click="resetDcaTimingFilters" />
                 </div>
               </div>
               <div v-if="dcaTiming.status === 'down'" class="browse-empty">
@@ -3229,6 +3117,120 @@ watch(
             <p class="note">口径：每月首个净值日投入固定金额，任一净值日持仓收益达止盈线即全仓赎回并重开新一轮（分红再投）；排行/统计/散点/详情共用同一费用口径，搜索栏或散点区可切换（不含费 / 含费·申购一折 / 含费·申购名义，赎回费各口径一致按持有天数阶梯收取）；排行/统计/散点共用同一基金类型口径，搜索栏或散点区可切换（默认仅权益类：股票型/偏股·灵活·平衡混合/股票指数/海外权益共 8 类，全市场可切回，债基·FOF·货币·偏债不在权益类内） · 统计卡为当前类型与在市口径全集分位，不随搜索变化 · 新基金（回测窗口 &lt;90 天）年化留空 · 数据为离线回测快照，重跑 scripts/fund_dca_backtest.py 并经 app.dca_store 导入后刷新 · 点行或「详情」查看每轮止盈明细 · 止盈点切换（搜索栏按钮组或对比区块行/圆点）仅改排行/统计/明细数据源，散点/分箱固定 20% 口径</p>
 
 
+            <!-- ===== 年限 × 规模 三维散点（每基金一点） + 分箱统计 ===== -->
+            <div class="card" style="margin-top: 16px; padding: 14px 16px 18px">
+              <div class="toolbar" style="margin: 0 0 6px">
+                <div>
+                  <h2 class="h1" style="font-size: 18px">年限 × 规模 × 年化 三维散点</h2>
+                  <p class="sub">每只在市基金一个点，落在自己的（运作年限，规模，年化）坐标上，不做任何分组重复计数 · 规模为对数轴 · 悬停点查看基金明细 · 统计截至 {{ dcaScatter?.ref_date || '—' }}</p>
+                </div>
+                <div class="toolbar-right">
+                  <span v-if="dcaFeeLoading" class="sub" style="margin-right: 8px">重算中…</span>
+                  <div class="src-seg" :style="dcaFeeLoading ? 'opacity:.55' : ''">
+                    <button class="src-seg-btn"
+                            :class="{ active: dcaEquity }"
+                            @click="dcaEquity = true"
+                            data-scatter-cat="equity">仅权益类</button>
+                    <button class="src-seg-btn"
+                            :class="{ active: !dcaEquity }"
+                            @click="dcaEquity = false"
+                            data-scatter-cat="all">全市场</button>
+                  </div>
+                  <div class="src-seg" :style="dcaFeeLoading ? 'opacity:.55' : ''">
+                    <button v-for="o in DCA_FEE_OPTIONS" :key="o.key"
+                            class="src-seg-btn"
+                            :class="{ active: dcaFeeMode === o.key }"
+                            @click="dcaFeeMode = o.key"
+                            :data-fee="o.key">{{ o.label }}</button>
+                  </div>
+                </div>
+              </div>
+              <div v-if="dcaScatter?.status === 'down'" class="browse-empty">
+                散点分析不可用：{{ dcaScatter.detail || '数据库连接失败' }}
+              </div>
+              <template v-else-if="dcaScatter?.points?.length">
+                <div ref="dcaScatterChartEl" class="dca-scatter-chart" style="width: 100%; height: 620px"></div>
+
+                <!-- 结论（左） + 分箱矩阵（右）：宽屏并排、窄屏堆叠 -->
+                <div class="dca-panel">
+                  <div class="dca-conclusion" v-if="dcaScatterConclusion">
+                    <div class="dc-head">
+                      <b>结论</b>
+                      <span class="dc-badge">{{ dcaFeeLabel }} · {{ dcaEquity ? '仅权益类' : '全市场' }} · 在市 {{ fmt(dcaScatter.points.length) }} 只 · 每基金只计一次</span>
+                    </div>
+                    <div class="dc-grid">
+                      <div class="dc-item">
+                        <div class="dc-label">年限维度</div>
+                        <div class="dc-value">&lt;1 年 <b :class="dcaScatterConclusion.ageMean[0] >= 0 ? 'pos' : 'neg'">{{ pctp(dcaScatterConclusion.ageMean[0]) }}</b><span class="dc-arrow">→</span>≥10 年 <b :class="dcaScatterConclusion.ageMean[4] >= 0 ? 'pos' : 'neg'">{{ pctp(dcaScatterConclusion.ageMean[4]) }}</b></div>
+                        <div class="dc-note">年限越长、定投止盈的年化越稳越高</div>
+                      </div>
+                      <div class="dc-item">
+                        <div class="dc-label">规模维度</div>
+                        <div class="dc-value"><template v-for="(sb, i) in dcaScatter.scale_bands" :key="sb"><span v-if="i" class="dc-arrow">→</span><b :class="dcaScatterConclusion.scaleMean[i] >= 0 ? 'pos' : 'neg'">{{ pctp(dcaScatterConclusion.scaleMean[i]) }}</b></template></div>
+                        <div class="dc-note">&lt;1 亿 → ≥100 亿 · 影响弱于年限，差距不大且非单调</div>
+                      </div>
+                      <div class="dc-item dc-best" v-if="dcaScatterConclusion.best">
+                        <div class="dc-label">★ 组合最优格<span class="dc-hint">样本 ≥300</span></div>
+                        <div class="dc-value">{{ dcaScatter.age_bands[dcaScatterConclusion.best.ageIdx] }} × {{ dcaScatter.scale_bands[dcaScatterConclusion.best.scaleIdx] }}</div>
+                        <div class="dc-note">平均年化 <b :class="dcaScatterConclusion.best.cell.mean_xirr >= 0 ? 'pos' : 'neg'">{{ pctp(dcaScatterConclusion.best.cell.mean_xirr) }}</b> · {{ fmt(dcaScatterConclusion.best.cell.count) }} 只 · 中位 {{ pctp(dcaScatterConclusion.best.cell.median_xirr) }} · 年化为正 {{ pct0(dcaScatterConclusion.best.cell.positive_share) }}</div>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="dca-matrix-wrap">
+                    <div class="dc-head">
+                      <b>年限段 × 规模段 分箱统计（均值）</b>
+                      <span class="dc-badge">格内 = 基金数 / 平均年化 · 点击格子查看基金清单</span>
+                    </div>
+                    <table class="dca-matrix">
+                      <tr>
+                        <th>规模 \ 年限</th>
+                        <th v-for="ab in dcaScatter.age_bands" :key="ab">{{ ab }}</th>
+                      </tr>
+                      <tr v-for="(sb, si) in dcaScatter.scale_bands" :key="sb">
+                        <th>{{ sb }}</th>
+                        <td v-for="(ab, ai) in dcaScatter.age_bands" :key="ab"
+                            :class="{ 'dca-matrix-best': dcaScatterConclusion?.best && dcaScatterConclusion.best.ageIdx === ai && dcaScatterConclusion.best.scaleIdx === si,
+                                      'dca-cell-link': dcaScatter.matrix[ai][si].count }"
+                            title="点击查看格内基金清单"
+                            @click="openDcaCellFunds(ai, si)">
+                          <template v-if="dcaScatter.matrix[ai][si].count">
+                            {{ dcaScatter.matrix[ai][si].count }} 只<br/>
+                            <span :class="dcaScatter.matrix[ai][si].mean_xirr >= 0 ? 'chg-up' : 'chg-down'">{{ pctp(dcaScatter.matrix[ai][si].mean_xirr) }}</span>
+                          </template>
+                          <template v-else>—</template>
+                        </td>
+                      </tr>
+                    </table>
+                    <div class="dc-head" style="margin-top: 16px">
+                      <b>年限段 × 规模段 分箱统计（中位）</b>
+                      <span class="dc-badge">格内 = 基金数 / 中位年化 · 中位不受极端值拉扯 · 点击查看清单</span>
+                    </div>
+                    <table class="dca-matrix dca-median">
+                      <tr>
+                        <th>规模 \ 年限</th>
+                        <th v-for="ab in dcaScatter.age_bands" :key="ab">{{ ab }}</th>
+                      </tr>
+                      <tr v-for="(sb, si) in dcaScatter.scale_bands" :key="sb">
+                        <th>{{ sb }}</th>
+                        <td v-for="(ab, ai) in dcaScatter.age_bands" :key="ab"
+                            :class="{ 'dca-matrix-best': dcaMedianBest && dcaMedianBest.ageIdx === ai && dcaMedianBest.scaleIdx === si,
+                                      'dca-cell-link': dcaScatter.matrix[ai][si].count }"
+                            title="点击查看格内基金清单"
+                            @click="openDcaCellFunds(ai, si)">
+                          <template v-if="dcaScatter.matrix[ai][si].count">
+                            {{ dcaScatter.matrix[ai][si].count }} 只<br/>
+                            <span :class="dcaScatter.matrix[ai][si].median_xirr >= 0 ? 'chg-up' : 'chg-down'">{{ pctp(dcaScatter.matrix[ai][si].median_xirr) }}</span>
+                          </template>
+                          <template v-else>—</template>
+                        </td>
+                      </tr>
+                    </table>
+                  </div>
+                </div>
+                <p class="note" style="margin-top: 8px">口径：在市且年化非空的基金 · 年化为定投+20%止盈的 XIRR，可切换 不含费 / 含费·申购一折 / 含费·申购名义（申购费外扣折份额，赎回费按每笔持有天数阶梯：权益类 7 天内 1.5%、7 天~1 年 0.5%、1~2 年 0.25%、之后免，债券与 C 类 7 天后免；管理/托管/销售服务费已在净值内不重复计） · 超出轴范围（年化 &lt;-100% / &gt;300%、年限 &gt;25 年）的点截断在边缘 · 结论由分箱统计自动生成</p>
+              </template>
+              <div v-else class="browse-empty">散点数据加载中…</div>
+            </div>
             <!-- ===== 每次止盈明细弹窗（点排行行或「详情」按钮触发） ===== -->
             <Dialog v-model:visible="dcaRoundsVisible" modal
               :header="dcaRoundsFund ? `${dcaRoundsFund.code} ${dcaRoundsFund.name} · 每次止盈明细${dcaRoundsFund.age_years != null ? '（运作 ' + dcaRoundsFund.age_years + ' 年）' : ''}` : '每次止盈明细'"
@@ -4631,6 +4633,20 @@ body {
 .age-wrap { display: inline-flex; align-items: center; gap: 6px; }
 .age-wrap .age-input { width: 76px; text-align: right; }
 .age-suffix { font-size: 12px; opacity: .72; white-space: nowrap; }
+/* 定投时机区间筛选：常显面板（2026-11-17 用户反馈）。auto-fit 网格窄屏自动
+   换行；InputNumber 根元素 flex 可收缩 + 内部 input 撑满，避免其默认
+   min-content 宽度把网格撑破、冲出页面 */
+.timing-filter { margin: 4px 0 12px; padding: 10px 12px;
+  border: 1px solid var(--card-border-color, #e0e0e0); border-radius: 6px; }
+.timing-filter-head { display: flex; align-items: center; gap: 10px; margin: 0 0 8px; }
+.timing-filter-title { font-size: 13px; font-weight: 600; }
+.timing-filter-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px 16px; }
+.timing-filter-grid > label { min-width: 0; }
+.timing-filter-range { display: flex; gap: 4px; align-items: center; min-width: 0; }
+.timing-filter-range .p-inputnumber { flex: 1 1 0; min-width: 0; }
+.timing-filter-range .p-inputnumber .p-inputnumber-input { width: 100%; }
+.timing-filter-actions { display: flex; gap: 8px; align-items: flex-end; }
 /* 结论卡（整宽，三条数据条自适应横排） + 分箱矩阵（拉伸撑满卡片宽）
    （2026-10-31 截图反馈：原整段长句结论信息密度过高，重排后又留右侧空白；
    二稿按用户要求整行撑满） */

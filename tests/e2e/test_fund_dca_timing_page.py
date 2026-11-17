@@ -79,15 +79,15 @@ class TestDcaTiming:
 
     def test_timing_range_filters(self, servers, page, mock_dca, mock_tp,
                                   mock_timing):
-        """E2E-438：展开筛选 → 输入年化 min → 应用 → 请求带 xirr_min；
-        清除筛选按钮出现。"""
+        """E2E-438：筛选面板常显（2026-11-17 用户反馈：不再需要展开按钮）
+        → 输入年化 min → 应用 → 请求带 xirr_min；清除筛选按钮出现。"""
         _, frontend_port = servers
         open_dca(page, frontend_port)
         expect(page.locator(".timing-block tbody tr", has_text="019387")
               ).to_be_visible()
-        page.locator(".timing-block button", has_text="区间筛选").click()
-        # 年化 min 输入（筛选区第一个"最低"占位输入框）
+        # 面板常显：无需点击任何展开按钮，输入框直接可见可输入
         xirr_min = page.locator(".timing-block input[placeholder='最低']").nth(0)
+        expect(xirr_min).to_be_visible()
         xirr_min.fill("0.3")
         page.locator(".timing-block button", has_text="应用筛选").click()
         expect(page.locator(".timing-block button", has_text="清除筛选")
