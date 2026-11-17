@@ -369,7 +369,12 @@ def register_fund_dca_routes(app):
                          order: str = "desc", min_age: float = 0.0,
                          min_scale: float = 0.0, limit: int = 50,
                          offset: int = 0, fee: str = "gross",
-                         equity: str = "true"):
+                         equity: str = "true",
+                         age_min: float = None, age_max: float = None,
+                         gap_min: float = None, gap_max: float = None,
+                         xirr_min: float = None, xirr_max: float = None,
+                         dd_min: float = None, dd_max: float = None,
+                         pr_min: float = None, pr_max: float = None):
         """定投时机列表（当前回撤桶 × 历史止盈素质）。
 
         band 选回撤桶：25-30 默认（假设验证甜蜜点：该位置开始定投首轮止盈
@@ -386,7 +391,12 @@ def register_fund_dca_routes(app):
                                 min_scale=max(0.0, min_scale),
                                 limit=limit, offset=offset,
                                 fee=fee.strip().lower(),
-                                equity=_parse_equity(equity))
+                                equity=_parse_equity(equity),
+                                age_min=age_min, age_max=age_max,
+                                gap_min=gap_min, gap_max=gap_max,
+                                xirr_min=xirr_min, xirr_max=xirr_max,
+                                dd_min=dd_min, dd_max=dd_max,
+                                pr_min=pr_min, pr_max=pr_max)
 
     @app.get("/api/funds/dca/dip-report")
     def funds_dca_dip_report():
@@ -835,6 +845,7 @@ WHERE (%s = '' OR t.code ILIKE %s OR r.name ILIKE %s)
   AND {age_clause}
   AND {scale_clause}
   AND {equity_clause}
+  AND {range_clause}
 ORDER BY {sort_col} {order_dir} NULLS LAST, t.code
 LIMIT %s OFFSET %s
 """
@@ -848,6 +859,9 @@ WHERE (%s = '' OR t.code ILIKE %s OR r.name ILIKE %s)
   AND {age_clause}
   AND {scale_clause}
   AND {equity_clause}
+  AND {range_clause}
+ORDER BY {sort_col} {order_dir} NULLS LAST, t.code
+LIMIT %s OFFSET %s
 """
 
 # 时机桶白名单（25-30 为验证结论甜蜜点；'' = 全部）
@@ -883,7 +897,12 @@ def fetch_dca_timing(dsn: str, *, tp: float = TAKE_PROFIT, band: str = "25-30",
                      q: str = "", alive: str = "true", sort: str = "w10_xirr",
                      order: str = "desc", min_age: float = 0.0,
                      min_scale: float = 0.0, limit: int = 50, offset: int = 0,
-                     fee: str = "gross", equity: bool = True) -> dict:
+                     fee: str = "gross", equity: bool = True,
+                     age_min: float = None, age_max: float = None,
+                     gap_min: float = None, gap_max: float = None,
+                     xirr_min: float = None, xirr_max: float = None,
+                     dd_min: float = None, dd_max: float = None,
+                     pr_min: float = None, pr_max: float = None) -> dict:
     """定投时机列表：fund_dip_timing（当前回撤桶）× fund_dca_tp_result（历史
     素质字段，tp/fee 口径同排行端点）。band 白名单（20-25/25-30/30+，'' = 全部，
     乱值回落全部）；排序白名单含 dd_current/days_since_peak（fee 口径字段随
@@ -918,11 +937,47 @@ def fetch_dca_timing(dsn: str, *, tp: float = TAKE_PROFIT, band: str = "25-30",
                     age_clause = "r.full_start < %s"
                 scale_clause = "r.scale_yi > %s" if min_scale else "true"
                 scale_param = min_scale if min_scale else None
+                # 五维度区间筛选（参数化；全部可选，None=不筛）。
+                # age：运作年限边界 → full_start 距 ref 偏移；dd：用户输入
+                # 正数回撤幅度，后端取负与 dd_current（负数）比较。
+                range_clauses, range_params = [], []
+
+                def _between(col, lo, hi):
+                    if lo is not None and hi is not None:
+                        range_clauses.append(f"{col} BETWEEN %s AND %s")
+                        range_params.extend([lo, hi])
+                    elif lo is not None:
+                        range_clauses.append(f"{col} >= %s")
+                        range_params.append(lo)
+                    elif hi is not None:
+                        range_clauses.append(f"{col} <= %s")
+                        range_params.append(hi)
+
+                if age_min is not None and ref:
+                    range_clauses.append("r.full_start <= %s")
+                    range_params.append(
+                        ref - dt.timedelta(days=365.25 * age_min))
+                if age_max is not None and ref:
+                    range_clauses.append("r.full_start >= %s")
+                    range_params.append(
+                        ref - dt.timedelta(days=365.25 * age_max))
+                _between(f"r.gap_avg_days{suffix}", gap_min, gap_max)
+                _between(f"r.w10_xirr{suffix}", xirr_min, xirr_max)
+                if dd_min is not None:
+                    range_clauses.append("t.dd_current <= %s")
+                    range_params.append(-dd_min)
+                if dd_max is not None:
+                    range_clauses.append("t.dd_current >= %s")
+                    range_params.append(-dd_max)
+                _between(f"r.w10_profit_rate{suffix}", pr_min, pr_max)
+                range_clause = (" AND ".join(range_clauses)
+                                if range_clauses else "true")
                 sql = (_TIMING_SQL.replace("{band_clause}", band_clause)
                        .replace("{alive_clause}", alive_clause)
                        .replace("{age_clause}", age_clause)
                        .replace("{scale_clause}", scale_clause)
                        .replace("{equity_clause}", equity_clause)
+                       .replace("{range_clause}", range_clause)
                        .replace("{sort_col}", sort_col)
                        .replace("{order_dir}", order_dir))
                 count_sql = (_TIMING_COUNT_SQL
@@ -930,12 +985,14 @@ def fetch_dca_timing(dsn: str, *, tp: float = TAKE_PROFIT, band: str = "25-30",
                              .replace("{alive_clause}", alive_clause)
                              .replace("{age_clause}", age_clause)
                              .replace("{scale_clause}", scale_clause)
-                             .replace("{equity_clause}", equity_clause))
+                             .replace("{equity_clause}", equity_clause)
+                             .replace("{range_clause}", range_clause))
                 base = ([tp, q, like, like]
                         + ([band_val] if band_val else [])
                         + ([cutoff] if cutoff else [])
                         + ([scale_param] if scale_param else [])
-                        + ([equity_param] if equity_param else []))
+                        + ([equity_param] if equity_param else [])
+                        + range_params)
                 cur.execute(sql, (*base, limit, offset))
                 rows = cur.fetchall()
                 cur.execute(count_sql, base)

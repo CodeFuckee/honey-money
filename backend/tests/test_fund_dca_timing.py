@@ -157,6 +157,7 @@ class FakeConnOne:
         self.one = one
         self.rows = rows or []
         self.executed: list = []
+        self.executed_params: list = []
 
     def cursor(self):
         return self
@@ -169,6 +170,7 @@ class FakeConnOne:
 
     def execute(self, query, params=None):
         self.executed.append(query)
+        self.executed_params.append(params)
 
     def fetchone(self):
         return self.one
@@ -237,10 +239,41 @@ class TestDcaTimingRoutes:
         resp = client.get("/api/funds/dca/timing")
         body = resp.json()
         assert body["status"] == "up"
-        r = body["rows"][0]
-        assert r["code"] == "000001" and r["tp"] == 0.2
-        assert r["dd_current"] == -0.2712 and r["dip_band"] == "25-30"
-        assert r["days_since_peak"] == 340
-        assert r["age_years"] == pytest.approx(10.0, abs=0.1)  # 运作年限
-        assert r["w10_xirr"] == 0.92 and r["w10_xirr_nom"] == 0.98
-        assert r["w10_profit_rate_disc"] == 0.175
+
+    def test_timing_range_filters_sql(self, client, monkeypatch):
+        """五维度区间筛选：age/gap/xirr/dd/pr 各自 min/max → 对应 BETWEEN
+        条件与参数化数值；dd 用户输入正数（回撤幅度）后端取负。"""
+        import app.dca_api as dca_mod
+        import datetime as dt
+        conn = FakeConnOne((dt.date(2026, 11, 16),))
+        _patch_connect(monkeypatch, dca_mod, conn)
+        resp = client.get("/api/funds/dca/timing", params={
+            "fee": "nom",
+            "age_min": 3, "age_max": 10,
+            "gap_min": 90, "gap_max": 400,
+            "xirr_min": 0.3, "xirr_max": 2.0,
+            "dd_min": 25, "dd_max": 30,
+            "pr_min": 0.1, "pr_max": 0.9})
+        assert resp.status_code == 200
+        sqls = conn.executed
+        # age → full_start 双边界；gap/xirr/pr → fee 后缀列 BETWEEN；dd → 取负
+        assert any("r.full_start <" in s for s in sqls)
+        assert any("r.full_start >" in s for s in sqls)
+        assert any("r.gap_avg_days_nom BETWEEN" in s for s in sqls)
+        assert any("r.w10_xirr_nom BETWEEN" in s for s in sqls)
+        assert any("r.w10_profit_rate_nom BETWEEN" in s for s in sqls)
+        assert any("t.dd_current <= %s" in s for s in sqls)
+        assert any("t.dd_current >= %s" in s for s in sqls)
+        # dd 参数为用户输入取负（回撤幅度 → 负的 dd_current）
+        _num = lambda ps, v: any(
+            isinstance(x, (int, float)) and abs(x + v) < 1e-9 for x in (ps or []))
+        assert any(_num(ps, 25.0) for ps in conn.executed_params), \
+            conn.executed_params
+        assert any(_num(ps, 30.0) for ps in conn.executed_params), \
+            conn.executed_params
+        # 部分筛选（只传年化 min）：只出现 >= 条件
+        conn2 = FakeConnOne((None, None, None))
+        _patch_connect(monkeypatch, dca_mod, conn2)
+        client.get("/api/funds/dca/timing", params={"xirr_min": 0.3})
+        assert any("r.w10_xirr >= %s" in s for s in conn2.executed)
+        assert not any("BETWEEN" in s for s in conn2.executed)

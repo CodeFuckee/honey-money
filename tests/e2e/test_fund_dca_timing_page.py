@@ -67,6 +67,35 @@ def mock_timing(page):
 
 
 class TestDcaTiming:
+    def test_timing_scale_column(self, servers, page, mock_dca, mock_tp,
+                                 mock_timing):
+        """规模列渲染（TIMING_BODY rows 自带 scale_yi 1.2 / 209.0）。"""
+        _, frontend_port = servers
+        open_dca(page, frontend_port)
+        expect(page.locator(".timing-block th", has_text="规模(亿)")
+              ).to_be_visible()
+        expect(page.locator(".timing-block tbody tr", has_text="019387")
+              ).to_contain_text("1.2")
+
+    def test_timing_range_filters(self, servers, page, mock_dca, mock_tp,
+                                  mock_timing):
+        """E2E-438：展开筛选 → 输入年化 min → 应用 → 请求带 xirr_min；
+        清除筛选按钮出现。"""
+        _, frontend_port = servers
+        open_dca(page, frontend_port)
+        expect(page.locator(".timing-block tbody tr", has_text="019387")
+              ).to_be_visible()
+        page.locator(".timing-block button", has_text="区间筛选").click()
+        # 年化 min 输入（筛选区第一个"最低"占位输入框）
+        xirr_min = page.locator(".timing-block input[placeholder='最低']").nth(0)
+        xirr_min.fill("0.3")
+        page.locator(".timing-block button", has_text="应用筛选").click()
+        expect(page.locator(".timing-block button", has_text="清除筛选")
+              ).to_be_visible(timeout=10_000)
+        assert any("xirr_min=0.3" in u for u in mock_timing), mock_timing
+        # 清除筛选
+        page.locator(".timing-block button", has_text="清除筛选").click()
+        assert "xirr_min" not in mock_timing[-1], mock_timing
     def test_timing_block_renders_with_default_band(self, servers, page,
                                                    mock_dca, mock_tp,
                                                    mock_timing):

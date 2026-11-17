@@ -571,21 +571,47 @@ const dcaTimingOrder = ref('desc')
 const dcaTimingPage = ref(0)
 const dcaTimingLoading = ref(false)
 const ddpct = v => v == null ? '—' : (v * 100).toFixed(1) + '%'
+// 五维度区间筛选（空=不筛；回撤输入正数幅度）。应用后服务端过滤（分页
+// 表格客户端筛当前页无意义）；会话内探索状态，不进 URL
+const dcaTimingFiltersShow = ref(false)
+const emptyTimingFilters = () => ({ age_min: null, age_max: null,
+  gap_min: null, gap_max: null, xirr_min: null, xirr_max: null,
+  dd_min: null, dd_max: null, pr_min: null, pr_max: null })
+const dcaTimingFilters = ref(emptyTimingFilters())
+const dcaTimingFiltersActive = ref(false)
 async function loadDcaTiming() {
   if (STATIC_MODE) return
   dcaTimingLoading.value = true
   try {
     const off = dcaTimingPage.value * DCA_PAGE_SIZE
+    let fs = ''
+    if (dcaTimingFiltersActive.value) {
+      for (const [k, v] of Object.entries(dcaTimingFilters.value)) {
+        if (v != null && v !== '') fs += `&${k}=${v}`
+      }
+    }
     const r = await fetch(`/api/funds/dca/timing?band=${encodeURIComponent(dcaTimingBand.value)}`
       + `&tp=${dcaTp.value}&fee=${dcaFeeMode.value}&equity=${dcaEquity.value}`
       + `&sort=${dcaTimingSort.value}&order=${dcaTimingOrder.value}`
-      + `&limit=${DCA_PAGE_SIZE}&offset=${off}`)
+      + `&limit=${DCA_PAGE_SIZE}&offset=${off}${fs}`)
     dcaTiming.value = await r.json()
   } catch (e) {
     dcaTiming.value = { status: 'down', detail: String(e), total: 0, rows: [] }
   } finally {
     dcaTimingLoading.value = false
   }
+}
+function applyDcaTimingFilters() {
+  dcaTimingFiltersActive.value = true
+  dcaTimingPage.value = 0
+  loadDcaTiming()
+}
+function resetDcaTimingFilters() {
+  dcaTimingFilters.value = emptyTimingFilters()
+  if (!dcaTimingFiltersActive.value) return
+  dcaTimingFiltersActive.value = false
+  dcaTimingPage.value = 0
+  loadDcaTiming()
 }
 function onDcaTimingBandChange(v) {
   if (dcaTimingBand.value === v) return
@@ -2920,6 +2946,56 @@ watch(
                   </div>
                 </div>
               </div>
+              <div class="src-seg" style="margin: 0 0 8px">
+                <button class="src-seg-btn"
+                        :class="{ active: dcaTimingFiltersShow }"
+                        @click="dcaTimingFiltersShow = !dcaTimingFiltersShow">区间筛选</button>
+                <button v-if="dcaTimingFiltersActive" class="src-seg-btn"
+                        @click="resetDcaTimingFilters">清除筛选</button>
+                <span v-if="dcaTimingFiltersActive" class="sub" style="margin-left: 8px">筛选已生效 · {{ dcaTiming.total ?? 0 }} 只</span>
+              </div>
+              <div v-if="dcaTimingFiltersShow && !STATIC_MODE"
+                   style="display: grid; grid-template-columns: repeat(5, minmax(150px, 1fr)); gap: 8px 16px; margin: 0 0 12px; padding: 10px 12px; border: 1px solid var(--card-border-color, #e0e0e0); border-radius: 6px">
+                <label>运作年限（年）
+                  <div style="display: flex; gap: 4px; align-items: center">
+                    <InputNumber v-model="dcaTimingFilters.age_min" :min="0" :max="99" :maxFractionDigits="1" :useGrouping="false" size="small" placeholder="最短" style="width: 100%" />
+                    <span>~</span>
+                    <InputNumber v-model="dcaTimingFilters.age_max" :min="0" :max="99" :maxFractionDigits="1" :useGrouping="false" size="small" placeholder="最长" style="width: 100%" />
+                  </div>
+                </label>
+                <label>止盈间隔（天）
+                  <div style="display: flex; gap: 4px; align-items: center">
+                    <InputNumber v-model="dcaTimingFilters.gap_min" :min="0" :useGrouping="false" size="small" placeholder="最短" style="width: 100%" />
+                    <span>~</span>
+                    <InputNumber v-model="dcaTimingFilters.gap_max" :min="0" :useGrouping="false" size="small" placeholder="最长" style="width: 100%" />
+                  </div>
+                </label>
+                <label>年化（0.3 = 30%）
+                  <div style="display: flex; gap: 4px; align-items: center">
+                    <InputNumber v-model="dcaTimingFilters.xirr_min" :min="-1" :max="20" :maxFractionDigits="2" :useGrouping="false" size="small" placeholder="最低" style="width: 100%" />
+                    <span>~</span>
+                    <InputNumber v-model="dcaTimingFilters.xirr_max" :min="-1" :max="20" :maxFractionDigits="2" :useGrouping="false" size="small" placeholder="最高" style="width: 100%" />
+                  </div>
+                </label>
+                <label>当前回撤（%，正数幅度）
+                  <div style="display: flex; gap: 4px; align-items: center">
+                    <InputNumber v-model="dcaTimingFilters.dd_min" :min="0" :max="99" :maxFractionDigits="1" :useGrouping="false" size="small" placeholder="至少跌" style="width: 100%" />
+                    <span>~</span>
+                    <InputNumber v-model="dcaTimingFilters.dd_max" :min="0" :max="99" :maxFractionDigits="1" :useGrouping="false" size="small" placeholder="至多跌" style="width: 100%" />
+                  </div>
+                </label>
+                <label>总收益率（0.1 = 10%）
+                  <div style="display: flex; gap: 4px; align-items: center">
+                    <InputNumber v-model="dcaTimingFilters.pr_min" :min="-1" :max="20" :maxFractionDigits="2" :useGrouping="false" size="small" placeholder="最低" style="width: 100%" />
+                    <span>~</span>
+                    <InputNumber v-model="dcaTimingFilters.pr_max" :min="-1" :max="20" :maxFractionDigits="2" :useGrouping="false" size="small" placeholder="最高" style="width: 100%" />
+                  </div>
+                </label>
+                <div style="display: flex; gap: 8px; align-items: flex-end">
+                  <Button label="应用筛选" size="small" @click="applyDcaTimingFilters" />
+                  <Button label="重置" size="small" severity="secondary" outlined @click="resetDcaTimingFilters" />
+                </div>
+              </div>
               <div v-if="dcaTiming.status === 'down'" class="browse-empty">
                 时机数据不可用：{{ dcaTiming.detail || '数据库连接失败' }}
               </div>
@@ -2955,6 +3031,9 @@ watch(
                   </Column>
                   <Column field="age_years" sortField="full_start" header="运作年限" style="width: 88px" sortable bodyClass="num-col">
                     <template #body="{ data }">{{ data.age_years != null ? data.age_years + ' 年' : '—' }}</template>
+                  </Column>
+                  <Column field="scale_yi" header="规模(亿)" style="width: 88px" sortable bodyClass="num-col">
+                    <template #body="{ data }">{{ data.scale_yi != null ? data.scale_yi : '—' }}</template>
                   </Column>
                   <Column field="gap_avg_days" header="止盈间隔" style="width: 96px" sortable bodyClass="num-col">
                     <template #body="{ data }">{{ dcaFeeVal(data, 'gap_avg_days') != null ? '≈' + (dcaFeeVal(data, 'gap_avg_days') / 30.44).toFixed(1) + ' 月/次' : '—' }}</template>
