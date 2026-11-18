@@ -33,6 +33,19 @@ const DATA_BASE = `${import.meta.env.BASE_URL}data`
 
 const activeNav = ref(STATIC_MODE ? 'fundDca' : 'dash')   // dash | data | src-sina | src-ef | backtest | learn
 const sidebarOpen = ref(false)   // ≤820px：侧栏折叠抽屉开关（桌面端恒展开无影响）
+// 桌面端（>820px）侧栏折叠开关：收窄为 56px 图标窄条，状态记忆 localStorage。
+// 汉堡按钮按视口宽分流：移动端开合抽屉（sidebarOpen），桌面端切换窄条。
+const SIDEBAR_COLLAPSED_KEY = 'hm-sidebar-collapsed'
+const sidebarCollapsed = ref(false)
+try { sidebarCollapsed.value = localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1' } catch {}
+function toggleSidebar() {
+  if (window.matchMedia('(max-width: 820px)').matches) {
+    sidebarOpen.value = !sidebarOpen.value
+    return
+  }
+  sidebarCollapsed.value = !sidebarCollapsed.value
+  try { localStorage.setItem(SIDEBAR_COLLAPSED_KEY, sidebarCollapsed.value ? '1' : '0') } catch {}
+}
 
 // ===== 路由：URL 路径 ↔ 页面，查询串 ↔ 参数（刷新/分享/前进后退恢复） =====
 // 手写 History API 同步（单组件架构，无需 vue-router）；nginx/vite preview
@@ -2366,7 +2379,7 @@ watch(
 
       <!-- 标题栏（apple 标准标题 / carbon 复用为深色 UI Shell 头；fluent 按原型无标题栏，切换控件移至工具栏） -->
       <div class="titlebar">
-        <svg class="shell-menu" role="button" aria-label="切换导航" @click="sidebarOpen = !sidebarOpen" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <svg class="shell-menu" role="button" aria-label="切换导航" @click="toggleSidebar" viewBox="0 0 16 16" fill="none" aria-hidden="true">
           <line x1="2" y1="3.5" x2="14" y2="3.5" stroke="currentColor" stroke-width="1.6"/>
           <line x1="2" y1="8" x2="14" y2="8" stroke="currentColor" stroke-width="1.6"/>
           <line x1="2" y1="12.5" x2="14" y2="12.5" stroke="currentColor" stroke-width="1.6"/>
@@ -2382,7 +2395,7 @@ watch(
 
       <div class="body">
         <!-- 侧栏 -->
-        <aside class="sidebar" :class="{ open: sidebarOpen }">
+        <aside class="sidebar" :class="{ open: sidebarOpen, collapsed: sidebarCollapsed }">
           <div class="app-item">
             <svg class="app-item-icon" viewBox="0 0 24 24" fill="none">
               <path d="M12 2.5 20 7v10l-8 4.5L4 17V7z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
@@ -2399,6 +2412,7 @@ watch(
               { id: 'backtest', label: '回测' }, { id: 'learn', label: '教学' }])"
             :key="n.id" class="nav-item"
             :class="{ active: activeNav === n.id, 'sub-active': (activeNav.startsWith('src-') || activeNav === 'stock' || activeNav === 'funds' || activeNav === 'fund' || activeNav === 'fundDca') && n.id === 'data' }"
+            :title="sidebarCollapsed ? n.label : null"
             @click="setNav(n.id)">
             <svg v-if="n.id === 'dash'" class="nav-icon" viewBox="0 0 20 20" fill="none">
               <rect x="2.5" y="2.5" width="6.5" height="6.5" rx="1.2" stroke="currentColor" stroke-width="1.5"/>
@@ -2427,14 +2441,33 @@ watch(
           <template v-if="!STATIC_MODE">
             <div class="group">数据源</div>
             <button v-for="s in SRC_ITEMS" :key="s.id" class="src-item"
-              :class="{ active: activeNav === s.id }" @click="setNav(s.id)">
+              :class="{ active: activeNav === s.id }" :title="sidebarCollapsed ? s.label : null"
+              @click="setNav(s.id)">
+              <svg v-if="s.id === 'src-sina'" class="src-icon" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                <rect x="4" y="2.5" width="12" height="15" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
+                <path d="M7 6.5h6M7 10h6M7 13.5h3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+              </svg>
+              <svg v-else class="src-icon" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                <circle cx="10" cy="5.5" r="2.8" stroke="currentColor" stroke-width="1.5"/>
+                <path d="M4 11c0 1.5 2.7 2.6 6 2.6s6-1.1 6-2.6M4 15c0 1.5 2.7 2.6 6 2.6s6-1.1 6-2.6"
+                  stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+              </svg>
               {{ s.label }}<span v-if="s.field === 'eastmoney'" class="src-dot"
                 :class="emCookie.valid ? 'ok' : 'bad'" :title="emCookie.valid ? 'Cookie 有效' : '东财 Cookie 未配置/无效'"></span>
             </button>
             <button class="src-item" :class="{ active: activeNav === 'funds' }"
-              @click="setNav('funds')">基金净值</button>
+              :title="sidebarCollapsed ? '基金净值' : null" @click="setNav('funds')">
+              <svg class="src-icon" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                <path d="M2.5 15.5c3 0 4-9.5 7.5-9.5 2.5 0 3 6 7.5 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+              </svg>
+              基金净值</button>
             <button class="src-item" :class="{ active: activeNav === 'fundDca' }"
-              @click="setNav('fundDca')">定投止盈回测</button>
+              :title="sidebarCollapsed ? '定投止盈回测' : null" @click="setNav('fundDca')">
+              <svg class="src-icon" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                <path d="M16.5 10a6.5 6.5 0 1 1-2-4.7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                <path d="M16.8 2.8v3.4h-3.4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              定投止盈回测</button>
           </template>
           <div class="sidebar-foot">v0.1.0 · 工程骨架</div>
         </aside>
@@ -5028,6 +5061,30 @@ body {
 .ct-btn.on { background: #0f62fe; border-color: #0f62fe; color: #fff; font-weight: 600; }
 .ct-btn:hover:not(.on) { background: #e8e8e8; }
 .ct-hint { font-size: 12px; color: #da1e28; margin-left: 8px; }
+
+/* ===== 桌面端侧栏折叠（>820px）：收窄 56px 图标窄条，状态记忆见 toggleSidebar =====
+   仅桌面端生效；移动端（≤820px）抽屉样式在下方媒体查询，不受 collapsed 类影响 */
+.sidebar { transition: background-color .15s ease, width .2s ease; }
+/* 数据源图标：展开态隐藏（保持文字缩进原样），仅窄条显示 */
+.src-icon { display: none; width: 16px; height: 16px; flex: none; color: #525252; }
+@media (min-width: 821px) {
+  .sidebar.collapsed { width: 56px; }
+  .sidebar.collapsed .app-item { justify-content: center; padding: 0; }
+  .sidebar.collapsed .app-item span { display: none; }
+  .sidebar.collapsed .group { display: none; }
+  /* 分组分隔线：与展开态同一条（nth-of-type(2) 带 border-top），窄条下变纯分隔块 */
+  .sidebar.collapsed .group:nth-of-type(2) { display: block; height: 0; overflow: hidden;
+    font-size: 0; margin: 14px 10px 6px; width: auto; }
+  .sidebar.collapsed .nav-item,
+  .sidebar.collapsed .src-item { font-size: 0; gap: 0; justify-content: center;
+    padding: 0; margin: 0 8px 4px; }
+  .sidebar.collapsed .nav-item.active::before,
+  .sidebar.collapsed .nav-item.active::after,
+  .sidebar.collapsed .src-item.active::after { display: none; }
+  .sidebar.collapsed .src-icon { display: block; }
+  .sidebar.collapsed .src-dot { margin-left: 4px; }
+  .sidebar.collapsed .sidebar-foot { display: none; }
+}
 
 /* ===== 移动端（≤820px）：侧栏折叠、表格横滚、弹窗自适应（2026-11-03） ===== */
 @media (max-width: 820px) {
