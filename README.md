@@ -36,8 +36,11 @@ backend/            Python 后端（FastAPI）
                       python -m app.dca_store <csv> 导入 scripts 离线回测产物，幂等）
   app/dca_api.py      /api/funds/dca 回测排行 API（搜索/在市/年限/规模/权益类
                       （EQUITY_TYPES 白名单）过滤/排序白名单/分页 + 在市全集
-                      分位统计 + 口径 meta，降级 200 约定）+
-                      /api/funds/dca/tp（多阈值排行，tp 白名单回落 0.2）+
+                      分位统计 + 口径 meta，降级 200 约定；行内附波动指标列
+                      vol_1y/vol_down_1y/mdd_1y/sharpe_1y/roll_vol/vol_pctile
+                      （LEFT JOIN fund_risk_metrics，可按其排序））+
+                      /api/funds/dca/tp（多阈值排行，tp 白名单回落 0.2，
+                      同附波动指标列与排序）+
                       /api/funds/dca/tp/compare（八档止盈点市场级对比聚合，
                       权益类+商品池）+ /api/funds/dca/tp/{code}/rounds
                       （单基金单阈值轮次明细）+ /api/funds/dca/tp/{code}/summary
@@ -66,6 +69,9 @@ frontend/           Vue3 + Vite 前端
                       切换排行阈值）+ 统一基金表格（2026-11-17 表格合并：
                       「定投时机」表并入排行表——当前回撤/距前高时机列由
                       后端 LEFT JOIN fund_dip_timing 提供，服务端排序；
+                      2026-11-18 追加波动指标五列（年化/下行波动率、最大
+                      回撤、夏普·近1年 + 波动率分位，LEFT JOIN
+                      fund_risk_metrics 可排序，与数据页基金净值表同源）；
                       列显示过滤 MultiSelect 自选显隐列（代码/名称/操作
                       恒显）；五维度区间筛选面板（运作年限/止盈间隔/年化/
                       当前回撤/总收益率，回撤输入正数幅度，服务端过滤，
@@ -82,6 +88,9 @@ frontend/           Vue3 + Vite 前端
                       搜索/运作年限与规模输入过滤（>N 年 / >N 亿）/分页/排序
                       同步 URL + 止盈间隔列 + 「详情」按钮，弹窗看每轮
                       止盈日/复权净值/投入/申购赎回费/净收益/累计净收益
+                      + 风险指标卡排（年化/下行波动率、最大回撤、夏普·
+                      近1年 + 当前滚动波动率及分位，navs 响应 risk 附带，
+                      静态快照模式显示待生成占位）
                       （明细跟随所选阈值：fund_dca_rounds 三口径 102k 轮
                       + fund_dca_tp_rounds 八阈值×三口径轮次，费用口径随
                       全页开关联动；弹窗内可切换止盈点（局部状态不波及排行），

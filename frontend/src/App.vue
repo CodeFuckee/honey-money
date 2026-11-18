@@ -612,6 +612,11 @@ const DCA_TOGGLE_COLS = [
   { key: 'days_since_peak', label: '距前高' },
   { key: 'age_years', label: '运作年限' },
   { key: 'scale_yi', label: '规模' },
+  { key: 'vol_1y', label: '年化波动率' },
+  { key: 'vol_down_1y', label: '下行波动率' },
+  { key: 'mdd_1y', label: '最大回撤' },
+  { key: 'sharpe_1y', label: '夏普' },
+  { key: 'vol_pctile', label: '波动率分位' },
   { key: 'gap_avg_days', label: '止盈间隔' },
   { key: 'w10_rounds', label: '止盈次数' },
   { key: 'w10_profit_rate', label: '总收益率' },
@@ -796,6 +801,9 @@ const dcaRoundsFund = ref(null)          // { code, name }
 const dcaRounds = ref({ status: 'loading', rounds: [] })
 
 const dcaRoundsNavs = ref([])            // 弹窗净值曲线（已复权链 [{date,value}]，起点=1）
+// 弹窗风险/波动指标（navs 响应附带 risk，fund_risk_metrics 日更快照）；
+// null = 无指标行 / 静态模式（快照不含 risk），指标区显示占位
+const dcaRoundsRisk = ref(null)
 let dcaRoundsChart = null
 const dcaRoundsChartEl = ref(null)
 
@@ -834,6 +842,7 @@ function openDcaRounds(e) {
                           age_years: data.age_years ?? null }
   dcaRounds.value = { status: 'loading', rounds: [] }
   dcaRoundsNavs.value = []
+  dcaRoundsRisk.value = null
   dcaRoundsTp.value = dcaTp.value        // 弹窗局部阈值从页面当前档位起步
   dcaRoundsFee.value = dcaFeeMode.value  // 弹窗局部费率口径同起步
   dcaRoundsAll.value = {}
@@ -878,6 +887,7 @@ function openDcaRounds(e) {
       .catch(() => { dcaRoundsNavs.value = [] })
     return
   }
+  // live：风险指标随 navs 响应附带（静态快照无 risk，保持 null 显示占位）
   // 弹窗明细跟随阈值：20% 走旧端点，其余阈值走 fund_dca_tp_rounds
   const roundsUrl = dcaTp.value === 0.20
     ? `/api/funds/dca/${data.code}/rounds?fee=${dcaFeeMode.value}`
@@ -894,6 +904,7 @@ function openDcaRounds(e) {
     .then(r => r.json())
     .then(body => {
       dcaRoundsNavs.value = body.status === 'up' ? chainFromNavs(body.navs || []) : []
+      dcaRoundsRisk.value = body.status === 'up' ? (body.risk ?? null) : null
       nextTick(() => renderDcaRoundsChart())
     })
     .catch(() => { dcaRoundsNavs.value = [] })
@@ -3056,6 +3067,26 @@ watch(
                 <Column field="scale_yi" header="规模(亿)" style="width: 95px" sortable bodyClass="num-col" v-if="colVisible('scale_yi')">
                   <template #body="{ data }">{{ data.scale_yi != null ? data.scale_yi : '—' }}</template>
                 </Column>
+                <Column field="vol_1y" header="年化波动率" style="width: 104px" sortable bodyClass="num-col" v-if="colVisible('vol_1y')">
+                  <template #header><span title="近1年（最近250个净值日）日收益率标准差 × √252，复权口径；fund_risk_metrics 日更快照">年化波动率</span></template>
+                  <template #body="{ data }">{{ volpct(data.vol_1y) }}</template>
+                </Column>
+                <Column field="vol_down_1y" header="下行波动率" style="width: 104px" sortable bodyClass="num-col" v-if="colVisible('vol_down_1y')">
+                  <template #header><span title="近1年内只统计下跌日收益率的标准差 × √252（真实痛苦的方向）">下行波动率</span></template>
+                  <template #body="{ data }">{{ volpct(data.vol_down_1y) }}</template>
+                </Column>
+                <Column field="mdd_1y" header="最大回撤" style="width: 96px" sortable bodyClass="num-col" v-if="colVisible('mdd_1y')">
+                  <template #header><span title="近1年窗口内复权净值峰谷最大回撤（正数存储，显示为负号）">最大回撤</span></template>
+                  <template #body="{ data }">{{ mddneg(data.mdd_1y) }}</template>
+                </Column>
+                <Column field="sharpe_1y" header="夏普" style="width: 84px" sortable bodyClass="num-col" v-if="colVisible('sharpe_1y')">
+                  <template #header><span title="近1年夏普比率：日收益均值/标准差 × √252，无风险利率 0（每单位波动换回的收益）">夏普</span></template>
+                  <template #body="{ data }">{{ sharpe2(data.sharpe_1y) }}</template>
+                </Column>
+                <Column field="vol_pctile" header="波动率分位" style="width: 100px" sortable bodyClass="num-col" v-if="colVisible('vol_pctile')">
+                  <template #header><span title="当前 60 日滚动年化波动率在该基金自身全史滚动序列中的百分位：越低=当前比历史更平静，越高=更颠簸">波动率分位</span></template>
+                  <template #body="{ data }">{{ pctile(data.vol_pctile) }}</template>
+                </Column>
                 <Column field="w10_rounds" header="止盈次数" style="width: 88px" sortable bodyClass="num-col" v-if="colVisible('w10_rounds')">
                   <template #body="{ data }">{{ dcaFeeVal(data, 'w10_rounds') ?? '—' }}</template>
                 </Column>
@@ -3095,7 +3126,7 @@ watch(
                 </Column>
               </DataTable>
             </div>
-            <p class="note">口径：每月首个净值日投入固定金额，任一净值日持仓收益达止盈线即全仓赎回并重开新一轮（分红再投）；排行/统计/散点/详情共用同一费用口径，搜索栏或散点区可切换（不含费 / 含费·申购一折 / 含费·申购名义，赎回费各口径一致按持有天数阶梯收取）；排行/统计/散点共用同一基金类型口径，搜索栏或散点区可切换（默认仅权益类：股票型/偏股·灵活·平衡混合/股票指数/海外权益共 8 类，全市场可切回，债基·FOF·货币·偏债不在权益类内） · 统计卡为当前类型与在市口径全集分位，不随搜索与区间筛选变化 · 新基金（回测窗口 &lt;90 天）年化留空 · 「当前回撤」= 复权净值距历史最高的跌幅（日更顺带刷新），非在市基金无此数据；「甜蜜点」结论来自 2015~2026 权益基金 98 万起点历史模拟（-25~-30% 回撤起定投首轮止盈中位 582 天、成功率 63.2%、年化 32.0%，20% 止盈线含费口径） · 数据为离线回测快照，重跑 scripts/fund_dca_backtest.py 并经 app.dca_store 导入后刷新 · 点行或「详情」查看每轮止盈明细 · 止盈点切换（搜索栏按钮组或对比区块行/圆点）仅改排行/统计/明细数据源，散点/分箱固定 20% 口径 · 历史统计不构成任何操作建议</p>
+            <p class="note">口径：每月首个净值日投入固定金额，任一净值日持仓收益达止盈线即全仓赎回并重开新一轮（分红再投）；排行/统计/散点/详情共用同一费用口径，搜索栏或散点区可切换（不含费 / 含费·申购一折 / 含费·申购名义，赎回费各口径一致按持有天数阶梯收取）；排行/统计/散点共用同一基金类型口径，搜索栏或散点区可切换（默认仅权益类：股票型/偏股·灵活·平衡混合/股票指数/海外权益共 8 类，全市场可切回，债基·FOF·货币·偏债不在权益类内） · 统计卡为当前类型与在市口径全集分位，不随搜索与区间筛选变化 · 新基金（回测窗口 &lt;90 天）年化留空 · 「当前回撤」= 复权净值距历史最高的跌幅（日更顺带刷新），非在市基金无此数据；「甜蜜点」结论来自 2015~2026 权益基金 98 万起点历史模拟（-25~-30% 回撤起定投首轮止盈中位 582 天、成功率 63.2%、年化 32.0%，20% 止盈线含费口径） · 波动指标列（年化/下行波动率、最大回撤、夏普·近1年 + 波动率分位）为基金净值快照（复权日增长率、√252 年化、无风险利率 0，fund_risk_metrics 日更顺带刷新，无指标行显示 —），与回测口径独立、不随费用/止盈点切换 · 数据为离线回测快照，重跑 scripts/fund_dca_backtest.py 并经 app.dca_store 导入后刷新 · 点行或「详情」查看每轮止盈明细 · 止盈点切换（搜索栏按钮组或对比区块行/圆点）仅改排行/统计/明细数据源，散点/分箱固定 20% 口径 · 历史统计不构成任何操作建议</p>
 
 
             <!-- ===== 年限 × 规模 三维散点（每基金一点） + 分箱统计 ===== -->
@@ -3260,6 +3291,32 @@ watch(
                     :class="summaryFeeVal(dcaRoundsSummaryRow, 'w10_xirr') >= 0 ? 'chg-up' : 'chg-down'">{{ pct1(summaryFeeVal(dcaRoundsSummaryRow, 'w10_xirr')) }}</span><span v-else>—</span></div>
                 </div>
               </div>
+              <!-- 风险/波动指标（fund_risk_metrics 日更快照，随 navs 响应附带） -->
+              <div v-if="dcaRoundsRisk" class="dc-grid"
+                style="grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); margin: 0 0 12px">
+                <div class="dc-item">
+                  <div class="dc-label" title="近1年（最近250个净值日）日收益率标准差 × √252，复权口径">年化波动率<span class="dc-hint">近1年</span></div>
+                  <div class="dc-value">{{ volpct(dcaRoundsRisk.vol_1y) }}</div>
+                </div>
+                <div class="dc-item">
+                  <div class="dc-label" title="只统计下跌日收益率的标准差 × √252（真实痛苦的方向）">下行波动率<span class="dc-hint">近1年</span></div>
+                  <div class="dc-value">{{ volpct(dcaRoundsRisk.vol_down_1y) }}</div>
+                </div>
+                <div class="dc-item">
+                  <div class="dc-label" title="近1年窗口内复权净值峰谷最大回撤">最大回撤<span class="dc-hint">近1年</span></div>
+                  <div class="dc-value">{{ mddneg(dcaRoundsRisk.mdd_1y) }}</div>
+                </div>
+                <div class="dc-item">
+                  <div class="dc-label" title="日收益均值/标准差 × √252，无风险利率 0——每单位波动换回的收益">夏普<span class="dc-hint">近1年</span></div>
+                  <div class="dc-value">{{ sharpe2(dcaRoundsRisk.sharpe_1y) }}</div>
+                </div>
+                <div class="dc-item">
+                  <div class="dc-label" title="当前 60 日滚动年化波动率及其在该基金自身全史滚动序列中的百分位（越低=比历史更平静）">当前滚动波动率<span class="dc-hint">60日</span></div>
+                  <div class="dc-value">{{ volpct(dcaRoundsRisk.roll_vol) }} <span class="dc-hint">分位 {{ pctile(dcaRoundsRisk.vol_pctile) }}</span></div>
+                </div>
+              </div>
+              <p v-if="dcaRoundsRisk" class="note" style="margin: 0 0 8px">波动指标口径：复权日增长率（分红再投）· 年化系数 √252、无风险利率 0 · 快照截至 {{ dcaRoundsRisk.as_of || '—' }}，日更顺带生成 · 与回测指标独立（回测口径为策略收益，此为基金净值波动）</p>
+              <p v-else class="note" style="margin: 0 0 8px">波动指标待生成：日更任务（回测）跑过一轮后在此展示（静态快照模式不含）</p>
               <div v-show="dcaRoundsNavs.length" ref="dcaRoundsChartEl"
                 style="width: 100%; height: 300px; margin-bottom: 10px"></div>
               <p class="note" style="margin: 0 0 8px"

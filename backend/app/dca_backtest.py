@@ -25,6 +25,7 @@
 `run_backtest()` 输出逐字段一致（测试锚定），日更同事务双写、旧表零改动。
 """
 
+import gc
 import io
 from typing import NamedTuple
 
@@ -610,6 +611,11 @@ def run_full_backtest_tp(dsn: str, *, thresholds=TP_THRESHOLDS,
     log(f"回测完成：{stats['fund_count']:,} 只 / 旧口径轮次 "
         f"{stats['round_count']:,} 行 / 多阈值轮次 {stats['tp_round_count']:,} 行"
         f" / 时机行 {stats['timing_count']:,} / 风险行 {stats['risk_count']:,}")
+    # 结果组装完即释放 NAV 大头（~1.2GB）：返回值要经 pickle 传回父进程
+    # （buffer 与结果集同时在内存），不释放会把子进程 RSS 顶到内存悬崖
+    # （2026-11-17 run 122 swap 抖动 72 分钟的共因之一）
+    del nav
+    gc.collect()
     return old_rows, old_rounds, tp_rows, tp_rounds, timing_rows, risk_rows, stats
 
 

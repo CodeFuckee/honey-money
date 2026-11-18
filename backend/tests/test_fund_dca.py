@@ -664,7 +664,13 @@ class TestDcaTimingJoin:
         assert join in _DCA_LIST_SQL and join in _TP_LIST_SQL
         cols = "t.dd_current, t.days_since_peak, t.dip_band"
         assert cols in _DCA_LIST_SQL and cols in _TP_LIST_SQL
-        assert _LIST_COLS[-3:] == ["dd_current", "days_since_peak", "dip_band"]
+        # 时机列位于波动指标六列之前（2026-11-18 波动列追加在尾部）
+        i = _LIST_COLS.index("dd_current")
+        assert _LIST_COLS[i:i + 3] == ["dd_current", "days_since_peak",
+                                       "dip_band"]
+        assert _LIST_COLS[i + 3:i + 9] == ["vol_1y", "vol_down_1y", "mdd_1y",
+                                           "sharpe_1y", "roll_vol",
+                                           "vol_pctile"]
         assert _TP_LIST_COLS == ["tp"] + _LIST_COLS
 
     def test_sort_dd_current_maps_t_table(self):
@@ -682,6 +688,56 @@ class TestDcaTimingJoin:
         sql, _ = conn.cursor_obj.executed[1]
         assert "DROP" not in sql
         assert "ORDER BY r.w10_xirr DESC" in sql
+
+
+class TestDcaRiskJoin:
+    """波动指标列（2026-11-18）：排行列表 LEFT JOIN fund_risk_metrics 附
+    年化/下行波动率、最大回撤、夏普·近1年 + 当前滚动波动率及分位，与数据页
+    基金净值浏览表同源同口径；排序白名单落 rm 表（费用口径无关）。"""
+
+    def test_list_sqls_have_risk_join_and_columns(self):
+        """两个排行端点的列表 SQL 都带 LEFT JOIN rm 与六列；行映射同步。"""
+        from app.dca_api import (_DCA_LIST_SQL, _LIST_COLS, _TP_LIST_SQL,
+                                 _TP_LIST_COLS)
+        join = "LEFT JOIN fund_risk_metrics rm ON rm.code = r.code"
+        assert join in _DCA_LIST_SQL and join in _TP_LIST_SQL
+        for frag in ("rm.vol_1y, rm.vol_down_1y, rm.mdd_1y, rm.sharpe_1y,",
+                     "rm.roll_vol, rm.vol_pctile"):
+            assert frag in _DCA_LIST_SQL and frag in _TP_LIST_SQL
+        assert _LIST_COLS[-6:] == ["vol_1y", "vol_down_1y", "mdd_1y",
+                                   "sharpe_1y", "roll_vol", "vol_pctile"]
+        assert _TP_LIST_COLS == ["tp"] + _LIST_COLS
+
+    def test_sort_risk_columns_map_rm_table(self):
+        """波动列排序落 rm 表：sort=vol_1y → ORDER BY rm.vol_1y（费用无关）。"""
+        body, conn = _fetch_dca(sort="vol_1y", order="asc")
+        sql, _ = conn.cursor_obj.executed[1]
+        assert "ORDER BY rm.vol_1y ASC NULLS LAST" in sql
+        for key in ("vol_down_1y", "mdd_1y", "sharpe_1y", "roll_vol",
+                    "vol_pctile"):
+            body, conn = _fetch_dca(sort=key)
+            sql, _ = conn.cursor_obj.executed[1]
+            assert f"ORDER BY rm.{key} DESC NULLS LAST" in sql
+
+    def test_risk_sort_fee_independent(self):
+        """fee 切换不影响波动列排序（同 scale_yi 费用无关）。"""
+        body, conn = _fetch_dca(fee="disc", sort="vol_1y")
+        sql, _ = conn.cursor_obj.executed[1]
+        assert "ORDER BY rm.vol_1y DESC NULLS LAST" in sql
+
+    def test_risk_sort_whitelist_rejects_injection(self):
+        """sort 波动列同样受白名单保护：注入串回落 w10_xirr，不得进 SQL。"""
+        body, conn = _fetch_dca(sort="vol_1y; DROP TABLE fund_risk_metrics")
+        sql, _ = conn.cursor_obj.executed[1]
+        assert "DROP" not in sql
+        assert "ORDER BY r.w10_xirr DESC" in sql
+
+    def test_row_mapping_round4_covers_risk(self):
+        """行映射 round4 覆盖波动列（sharpe 也 round4，前端 toFixed(2)）。"""
+        from app.dca_api import _LIST_ROUND4
+        for k in ("vol_1y", "vol_down_1y", "mdd_1y", "sharpe_1y",
+                  "roll_vol", "vol_pctile"):
+            assert k in _LIST_ROUND4
 
     def test_routes_accept_range_params_and_degrade(self, client, monkeypatch):
         """两个排行路由接受五维度区间参数：PG 不可达仍 200 status=down。"""
