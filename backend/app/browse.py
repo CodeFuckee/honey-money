@@ -83,7 +83,7 @@ SELECT b.code, b.name, b.fund_type,
        p.unit_nav, p.pct_chg, p.nav_date,
        COALESCE(s.navs, 0) AS navs,
        COALESCE(s.first_date, p.nav_date) AS first_date,
-       rm.vol_1y, rm.vol_down_1y, rm.mdd_1y, rm.sharpe_1y,
+       rm.vol_all, rm.vol_down_all, rm.mdd_all, rm.sharpe_all,
        rm.roll_vol, rm.vol_pctile
 FROM fund_basic b
 LEFT JOIN LATERAL (
@@ -130,10 +130,10 @@ FROM fund_risk_metrics WHERE code = %s
 # 排序恒 NULLS LAST（无指标行的退市/新基金沉底）+ b.code 稳定序
 _FUND_SORT_COLS = {
     "code": "b.code",
-    "vol_1y": "rm.vol_1y",
-    "vol_down_1y": "rm.vol_down_1y",
-    "mdd_1y": "rm.mdd_1y",
-    "sharpe_1y": "rm.sharpe_1y",
+    "vol_all": "rm.vol_all",
+    "vol_down_all": "rm.vol_down_all",
+    "mdd_all": "rm.mdd_all",
+    "sharpe_all": "rm.sharpe_all",
     "vol_pctile": "rm.vol_pctile",
 }
 
@@ -356,7 +356,7 @@ def fetch_fund_list(dsn: str, *, q: str = "", limit: int = 50,
                     cur.execute(_FUND_LIST_SQL, (codes,))
                     cols = ["code", "name", "fund_type", "unit_nav", "pct_chg",
                             "last_date", "navs", "first_date",
-                            "vol_1y", "vol_down_1y", "mdd_1y", "sharpe_1y",
+                            "vol_all", "vol_down_all", "mdd_all", "sharpe_all",
                             "roll_vol", "vol_pctile"]
                     by_code = {r[0]: dict(zip(cols, r)) for r in cur.fetchall()}
                     funds = [by_code[c] for c in codes]   # 保持 code 序
@@ -365,7 +365,7 @@ def fetch_fund_list(dsn: str, *, q: str = "", limit: int = 50,
         for f in funds:
             f["unit_nav"] = round(f["unit_nav"], 4) if f["unit_nav"] is not None else None
             f["pct_chg"] = round(f["pct_chg"], 2) if f["pct_chg"] is not None else None
-            for k in ("vol_1y", "vol_down_1y", "mdd_1y", "sharpe_1y",
+            for k in ("vol_all", "vol_down_all", "mdd_all", "sharpe_all",
                       "roll_vol", "vol_pctile"):
                 f[k] = round(f[k], 4) if f[k] is not None else None
             for k in ("last_date", "first_date"):

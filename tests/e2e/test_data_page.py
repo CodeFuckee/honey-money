@@ -7,7 +7,7 @@
 - E2E-304 过滤下拉切「仅在市」/「仅退市」→ 请求带 delisted=false/true，
   且过滤态下翻页请求仍携带（分页不丢过滤）；
 - E2E-317 基金列表波动指标五列渲染（格式化 + 无指标行 — 占位）；
-- E2E-318 点波动列表头 → sort=vol_1y&order=asc/desc 服务端排序；
+- E2E-318 点波动列表头 → sort=vol_all&order=asc/desc 服务端排序；
 - E2E-319 详情页风险指标区（指标卡 + 多窗口对照表 + 快照截至 note）；
 - E2E-320 无指标行 → 指标区不渲染、待生成占位。
 运行：python -m pytest tests/e2e/test_data_page.py
@@ -119,13 +119,13 @@ FUNDS_BODY = {"status": "up", "total": 2, "limit": 50, "offset": 0, "funds": [
     {"code": "000001", "name": "华夏成长混合", "fund_type": "混合型-灵活",
      "unit_nav": 1.046, "pct_chg": 2.05, "navs": 6029,
      "last_date": "2026-10-23", "first_date": "2001-12-18",
-     "vol_1y": 0.185, "vol_down_1y": 0.1201, "mdd_1y": 0.2533,
-     "sharpe_1y": 1.4233, "roll_vol": 0.0812, "vol_pctile": 0.6666},
+     "vol_all": 0.185, "vol_down_all": 0.1201, "mdd_all": 0.2533,
+     "sharpe_all": 1.4233, "roll_vol": 0.0812, "vol_pctile": 0.6666},
     {"code": "005827", "name": "易方达蓝筹精选", "fund_type": "混合型-偏股",
      "unit_nav": 1.8721, "pct_chg": -0.31, "navs": 3200,
      "last_date": "2026-10-23", "first_date": "2018-09-05",
-     "vol_1y": None, "vol_down_1y": None, "mdd_1y": None,
-     "sharpe_1y": None, "roll_vol": None, "vol_pctile": None},
+     "vol_all": None, "vol_down_all": None, "mdd_all": None,
+     "sharpe_all": None, "roll_vol": None, "vol_pctile": None},
 ]}
 FUND_NAV_BODY = {"status": "up", "code": "000001", "count": 3, "navs": [
     {"date": "2026-10-21", "unit_nav": 1.064, "accum_nav": 3.637,
@@ -135,14 +135,14 @@ FUND_NAV_BODY = {"status": "up", "code": "000001", "count": 3, "navs": [
     {"date": "2026-10-23", "unit_nav": 1.046, "accum_nav": 3.619,
      "pct_chg": 2.05, "unit_money": "0.018", "source": "fund_em"},
 ]}
-# 风险/波动指标快照（fund_risk_metrics 日更行；详情页指标区数据源）
+# 风险/波动指标快照（fund_risk_metrics 日更行；详情页指标区数据源）。
+# 四窗口全给：卡用 *_all（全史口径），窗口对照表四行各取 *_1y/3y/5y/all
 FUND_RISK = {
-    "vol_1y": 0.185, "vol_down_1y": 0.1201, "mdd_1y": 0.2533,
-    "sharpe_1y": 1.4233,
+    "vol_1y": 0.185, "vol_down_1y": 0.1201, "mdd_1y": 0.2533, "sharpe_1y": 1.4233,
     "vol_3y": 0.201, "vol_down_3y": 0.135, "mdd_3y": 0.301, "sharpe_3y": 1.1,
     "vol_5y": 0.22, "vol_down_5y": 0.14, "mdd_5y": 0.35, "sharpe_5y": 0.9,
     "vol_all": 0.23, "vol_down_all": 0.15, "mdd_all": 0.42, "sharpe_all": 0.8,
-    "roll_vol": 0.0812, "vol_pctile": 0.6666,
+    "roll_vol": 0.0812, "vol_pctile": 0.6666, "risk_score": 0.4123,
     "as_of": "2026-10-23", "computed_at": "2026-11-17T06:00:00",
 }
 FUND_NAV_BODY_WITH_RISK = {**FUND_NAV_BODY, "risk": FUND_RISK}
@@ -198,16 +198,16 @@ class TestFundRiskColumns:
         page.get_by_role("button", name="基金净值").click()
         expect(page.get_by_role("heading", name="基金净值")).to_be_visible()
         row = page.locator(".browse-pv tbody tr", has_text="华夏成长混合")
-        expect(row).to_contain_text("18.5%")          # vol_1y 0.185
-        expect(row).to_contain_text("12.0%")          # vol_down_1y 0.1201
-        expect(row).to_contain_text("-25.3%")         # mdd_1y 0.2533 显负号
-        expect(row).to_contain_text("1.42")           # sharpe_1y 两位裸数
+        expect(row).to_contain_text("18.5%")          # vol_all 0.185（全史）
+        expect(row).to_contain_text("12.0%")          # vol_down_all 0.1201
+        expect(row).to_contain_text("-25.3%")         # mdd_all 0.2533 显负号
+        expect(row).to_contain_text("1.42")           # sharpe_all 两位裸数
         expect(row).to_contain_text("67%")            # vol_pctile 0.6666 取整
         other = page.locator(".browse-pv tbody tr", has_text="易方达蓝筹精选")
         expect(other).to_contain_text("—")            # 无指标行
 
     def test_sort_header_sends_sort_param(self, servers, page):
-        """E2E-318：点波动列表头 → 请求带 sort=vol_1y&order=asc（PrimeVue
+        """E2E-318：点波动列表头 → 请求带 sort=vol_all&order=asc（PrimeVue
         首点升序），再点降序——服务端排序参数正确。"""
         _, frontend_port = servers
         calls = []
@@ -220,10 +220,10 @@ class TestFundRiskColumns:
         expect(page.get_by_role("heading", name="基金净值")).to_be_visible()
         page.locator(".browse-pv th", has_text="年化波动率").click()
         page.wait_for_timeout(500)
-        assert any("sort=vol_1y" in u and "order=asc" in u for u in calls), calls
+        assert any("sort=vol_all" in u and "order=asc" in u for u in calls), calls
         page.locator(".browse-pv th", has_text="年化波动率").click()
         page.wait_for_timeout(500)
-        assert any("sort=vol_1y" in u and "order=desc" in u for u in calls), calls
+        assert any("sort=vol_all" in u and "order=desc" in u for u in calls), calls
 
 
 class TestFundRiskDetail:
@@ -243,15 +243,17 @@ class TestFundRiskDetail:
         expect(page.locator("h2.h1")).to_contain_text("000001")
         card = page.locator(".risk-card")
         expect(card).to_be_visible()
-        expect(card).to_contain_text("18.5%")          # 年化波动率·近1年
-        expect(card).to_contain_text("12.0%")          # 下行波动率
-        expect(card).to_contain_text("-25.3%")         # 最大回撤
-        expect(card).to_contain_text("1.42")           # 夏普
+        expect(card).to_contain_text("23.0%")          # 年化波动率·全史卡 vol_all 0.23
+        expect(card).to_contain_text("15.0%")          # 下行波动率·全史 0.15
+        expect(card).to_contain_text("-42.0%")         # 最大回撤·全史 0.42 显负号
+        expect(card).to_contain_text("0.80")           # 夏普·全史
         expect(card).to_contain_text("8.1%")           # 当前滚动波动率 0.0812
         expect(card).to_contain_text("67%")            # 分位
+        expect(card).to_contain_text("41%")            # 综合波动分位 risk_score 0.4123
         table = card.locator(".risk-table")
         for label in ("近1年", "近3年", "近5年", "全史"):
             expect(table).to_contain_text(label)
+        expect(table).to_contain_text("18.5%")         # 近1年行 vol_1y 0.185
         expect(table).to_contain_text("22.0%")         # vol_5y 0.22
         expect(table).to_contain_text("23.0%")         # vol_all 0.23
         expect(card).to_contain_text("快照截至 2026-10-23")

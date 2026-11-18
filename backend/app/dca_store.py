@@ -397,8 +397,10 @@ _RISK_MIGRATE = (
 )
 
 # 综合波动分位回填（幂等，整表重算）：年化波动率/下行波动率/最大回撤三项
-# 在全样本（非 NULL 行）中的 percent_rank 横截面等权平均，round(4)，
-# 越低越稳（三项都偏低=波动小回撤浅）；三指标全缺 → NULL。
+# **全史口径**（*_all，2026-11-18 用户需求「波动指标统计整个历史」）在全样本
+# （非 NULL 行）中的 percent_rank 横截面等权平均，round(4)，越低越稳
+# （三项都偏低=波动小回撤浅）；三指标全缺 → NULL。全史窗口只需 ≥20 个收益
+# 样本（MIN_RETURNS），比 1y 窗口覆盖更多新基金。
 # 日更 import_risk 同事务调用 + 启动清单兜底调用（部署即得历史数据）。
 _RISK_SCORE_BACKFILL = """
 UPDATE fund_risk_metrics rm
@@ -412,15 +414,15 @@ FROM (
                ::numeric, 4) AS score
   FROM (
     SELECT code,
-           CASE WHEN vol_1y IS NULL THEN NULL
-                ELSE percent_rank() OVER (PARTITION BY vol_1y IS NULL
-                                          ORDER BY vol_1y) END AS pv,
-           CASE WHEN vol_down_1y IS NULL THEN NULL
-                ELSE percent_rank() OVER (PARTITION BY vol_down_1y IS NULL
-                                          ORDER BY vol_down_1y) END AS pd,
-           CASE WHEN mdd_1y IS NULL THEN NULL
-                ELSE percent_rank() OVER (PARTITION BY mdd_1y IS NULL
-                                          ORDER BY mdd_1y) END AS pm
+           CASE WHEN vol_all IS NULL THEN NULL
+                ELSE percent_rank() OVER (PARTITION BY vol_all IS NULL
+                                          ORDER BY vol_all) END AS pv,
+           CASE WHEN vol_down_all IS NULL THEN NULL
+                ELSE percent_rank() OVER (PARTITION BY vol_down_all IS NULL
+                                          ORDER BY vol_down_all) END AS pd,
+           CASE WHEN mdd_all IS NULL THEN NULL
+                ELSE percent_rank() OVER (PARTITION BY mdd_all IS NULL
+                                          ORDER BY mdd_all) END AS pm
     FROM fund_risk_metrics
   ) x
 ) t

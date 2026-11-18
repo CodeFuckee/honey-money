@@ -16,7 +16,7 @@
 - E2E-422 权益×费率共存：两开关独立生效，请求同时带 fee 与 equity；
 - E2E-423 散点联动：结论徽标与散点区按钮随类型口径切换；
 - E2E-440 波动指标五列渲染（数值格式化 + 无指标行 — 占位）；
-- E2E-441 点「年化波动率」列头 → sort=vol_1y&order=asc 服务端排序；
+- E2E-441 点「年化波动率」列头 → sort=vol_all&order=asc 服务端排序；
 - E2E-442 弹窗风险指标卡（navs 响应 risk 附带，五卡 + 分位）。
 运行：python -m pytest tests/e2e/test_fund_dca_page.py
 """
@@ -34,8 +34,8 @@ LIST_BODY = {
          "alive": True, "scale_yi": 1.2, "scale_date": "2026-09-30",
          "dd_current": -0.2712, "days_since_peak": 340, "dip_band": "25-30",
          "age_years": 2.9,
-         "vol_1y": 0.185, "vol_down_1y": 0.1201, "mdd_1y": 0.2533,
-         "sharpe_1y": 1.4233, "roll_vol": 0.0812, "vol_pctile": 0.6666,
+         "vol_all": 0.185, "vol_down_all": 0.1201, "mdd_all": 0.2533,
+         "sharpe_all": 1.4233, "roll_vol": 0.0812, "vol_pctile": 0.6666,
          "risk_score": 0.4123,
          "w10_start": "2023-11-28", "w10_end": "2026-10-28", "w10_months": 36,
          "w10_rounds": 6, "w10_invested": 36000, "w10_final_value": 42480,
@@ -46,8 +46,8 @@ LIST_BODY = {
          "alive": True, "scale_yi": 209.0, "scale_date": "2026-09-30",
          "dd_current": -0.625, "days_since_peak": 1380, "dip_band": "30+",
          "age_years": 10.4,
-         "vol_1y": None, "vol_down_1y": None, "mdd_1y": None,
-         "sharpe_1y": None, "roll_vol": None, "vol_pctile": None,
+         "vol_all": None, "vol_down_all": None, "mdd_all": None,
+         "sharpe_all": None, "roll_vol": None, "vol_pctile": None,
          "risk_score": None,
          "w10_start": "2016-10-31", "w10_end": "2026-10-28", "w10_months": 121,
          "w10_rounds": 7, "w10_invested": 121000, "w10_final_value": 102850,
@@ -482,14 +482,15 @@ class TestFundDcaPage:
         expect(page.locator(".p-dialog")).to_contain_text("9,000")
         expect(page.locator(".p-dialog")).to_contain_text("1,850.5")
         # 风险指标卡（E2E-442）：navs 响应 risk 附带 → 五卡渲染 + 分位 + 口径 note
-        expect(page.locator(".p-dialog")).to_contain_text("18.5%")
-        expect(page.locator(".p-dialog")).to_contain_text("12.0%")
-        expect(page.locator(".p-dialog")).to_contain_text("-25.3%")
-        expect(page.locator(".p-dialog")).to_contain_text("1.42")
+        expect(page.locator(".p-dialog")).to_contain_text("23.0%")   # vol_all 0.23（全史卡）
+        expect(page.locator(".p-dialog")).to_contain_text("15.0%")   # vol_down_all 0.15
+        expect(page.locator(".p-dialog")).to_contain_text("-42.0%")  # mdd_all 0.42 显负号
+        expect(page.locator(".p-dialog")).to_contain_text("0.80")    # sharpe_all
         expect(page.locator(".p-dialog")).to_contain_text("67%")
         expect(page.locator(".p-dialog")).to_contain_text("快照截至 2026-10-23")
-        # 注意：Vue DOM API 建表不会自动插入 tbody，tr 直接挂在 table 下
-        expect(page.locator(".p-dialog table tr")).to_have_count(3)
+        # 注意：Vue DOM API 建表不会自动插入 tbody，tr 直接挂在 table 下；
+        # 弹窗现含两张表：止盈明细 1+2 行 + 风险窗口对照 1+4 行 = 8 tr
+        expect(page.locator(".p-dialog table tr")).to_have_count(8)
         # 新列：止盈净值 / 申购费 / 赎回费 / 累计净收益（1,050.3 → 1,850.5）
         expect(page.locator(".p-dialog")).to_contain_text("1.2130")
         expect(page.locator(".p-dialog")).to_contain_text("36.9")
@@ -591,23 +592,23 @@ class TestDcaRiskColumns:
         open_dca(page, frontend_port)
         expect(page.get_by_role("heading", name="定投止盈回测")).to_be_visible()
         row = page.locator(".browse-pv tbody tr", has_text="中欧时代共赢")
-        expect(row).to_contain_text("18.5%")          # vol_1y 0.185
-        expect(row).to_contain_text("12.0%")          # vol_down_1y 0.1201
-        expect(row).to_contain_text("-25.3%")         # mdd_1y 0.2533 显负号
-        expect(row).to_contain_text("1.42")           # sharpe_1y 两位裸数
+        expect(row).to_contain_text("18.5%")          # vol_all 0.185（全史）
+        expect(row).to_contain_text("12.0%")          # vol_down_all 0.1201
+        expect(row).to_contain_text("-25.3%")         # mdd_all 0.2533 显负号
+        expect(row).to_contain_text("1.42")           # sharpe_all 两位裸数
         expect(row).to_contain_text("67%")            # vol_pctile 0.6666 取整
         other = page.locator(".browse-pv tbody tr", has_text="招商中证白酒")
         expect(other).to_contain_text("—")            # 无指标行
 
     def test_risk_sort_header_sends_param(self, servers, page, mock_dca):
-        """E2E-441：点「年化波动率」列头 → sort=vol_1y&order=asc（服务端
+        """E2E-441：点「年化波动率」列头 → sort=vol_all&order=asc（服务端
         排序白名单落 rm 表，与浏览表同款请求契约）。"""
         _, frontend_port = servers
         open_dca(page, frontend_port)
         expect(page.get_by_role("heading", name="定投止盈回测")).to_be_visible()
         page.locator(".browse-pv th", has_text="年化波动率").click()
         page.wait_for_timeout(400)
-        assert any("sort=vol_1y" in u and "order=asc" in u
+        assert any("sort=vol_all" in u and "order=asc" in u
                    for u in mock_dca), mock_dca
 
     def test_deeplink_restores_params(self, servers, page, mock_dca):

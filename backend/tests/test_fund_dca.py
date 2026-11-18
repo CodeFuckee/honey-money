@@ -668,8 +668,8 @@ class TestDcaTimingJoin:
         i = _LIST_COLS.index("dd_current")
         assert _LIST_COLS[i:i + 3] == ["dd_current", "days_since_peak",
                                        "dip_band"]
-        assert _LIST_COLS[i + 3:i + 9] == ["vol_1y", "vol_down_1y", "mdd_1y",
-                                           "sharpe_1y", "roll_vol",
+        assert _LIST_COLS[i + 3:i + 9] == ["vol_all", "vol_down_all", "mdd_all",
+                                           "sharpe_all", "roll_vol",
                                            "vol_pctile"]
         assert _TP_LIST_COLS == ["tp"] + _LIST_COLS
 
@@ -701,20 +701,20 @@ class TestDcaRiskJoin:
                                  _TP_LIST_COLS)
         join = "LEFT JOIN fund_risk_metrics rm ON rm.code = r.code"
         assert join in _DCA_LIST_SQL and join in _TP_LIST_SQL
-        for frag in ("rm.vol_1y, rm.vol_down_1y, rm.mdd_1y, rm.sharpe_1y,",
+        for frag in ("rm.vol_all, rm.vol_down_all, rm.mdd_all, rm.sharpe_all,",
                      "rm.roll_vol, rm.vol_pctile, rm.risk_score"):
             assert frag in _DCA_LIST_SQL and frag in _TP_LIST_SQL
-        assert _LIST_COLS[-7:] == ["vol_1y", "vol_down_1y", "mdd_1y",
-                                   "sharpe_1y", "roll_vol", "vol_pctile",
+        assert _LIST_COLS[-7:] == ["vol_all", "vol_down_all", "mdd_all",
+                                   "sharpe_all", "roll_vol", "vol_pctile",
                                    "risk_score"]
         assert _TP_LIST_COLS == ["tp"] + _LIST_COLS
 
     def test_sort_risk_columns_map_rm_table(self):
-        """波动列排序落 rm 表：sort=vol_1y → ORDER BY rm.vol_1y（费用无关）。"""
-        body, conn = _fetch_dca(sort="vol_1y", order="asc")
+        """波动列排序落 rm 表：sort=vol_all → ORDER BY rm.vol_all（费用无关）。"""
+        body, conn = _fetch_dca(sort="vol_all", order="asc")
         sql, _ = conn.cursor_obj.executed[1]
-        assert "ORDER BY rm.vol_1y ASC NULLS LAST" in sql
-        for key in ("vol_down_1y", "mdd_1y", "sharpe_1y", "roll_vol",
+        assert "ORDER BY rm.vol_all ASC NULLS LAST" in sql
+        for key in ("vol_down_all", "mdd_all", "sharpe_all", "roll_vol",
                     "vol_pctile"):
             body, conn = _fetch_dca(sort=key)
             sql, _ = conn.cursor_obj.executed[1]
@@ -722,13 +722,13 @@ class TestDcaRiskJoin:
 
     def test_risk_sort_fee_independent(self):
         """fee 切换不影响波动列排序（同 scale_yi 费用无关）。"""
-        body, conn = _fetch_dca(fee="disc", sort="vol_1y")
+        body, conn = _fetch_dca(fee="disc", sort="vol_all")
         sql, _ = conn.cursor_obj.executed[1]
-        assert "ORDER BY rm.vol_1y DESC NULLS LAST" in sql
+        assert "ORDER BY rm.vol_all DESC NULLS LAST" in sql
 
     def test_risk_sort_whitelist_rejects_injection(self):
         """sort 波动列同样受白名单保护：注入串回落 w10_xirr，不得进 SQL。"""
-        body, conn = _fetch_dca(sort="vol_1y; DROP TABLE fund_risk_metrics")
+        body, conn = _fetch_dca(sort="vol_all; DROP TABLE fund_risk_metrics")
         sql, _ = conn.cursor_obj.executed[1]
         assert "DROP" not in sql
         assert "ORDER BY r.w10_xirr DESC" in sql
@@ -736,7 +736,7 @@ class TestDcaRiskJoin:
     def test_row_mapping_round4_covers_risk(self):
         """行映射 round4 覆盖波动列（sharpe 也 round4，前端 toFixed(2)）。"""
         from app.dca_api import _LIST_ROUND4
-        for k in ("vol_1y", "vol_down_1y", "mdd_1y", "sharpe_1y",
+        for k in ("vol_all", "vol_down_all", "mdd_all", "sharpe_all",
                   "roll_vol", "vol_pctile"):
             assert k in _LIST_ROUND4
 
@@ -825,9 +825,9 @@ class TestRiskScoreBackfill:
         conn = FakeConn()
         store.backfill_risk_scores(conn)
         sql, _ = conn.cursor_obj.executed[0]
-        for frag in ("percent_rank() OVER (PARTITION BY vol_1y IS NULL",
-                     "percent_rank() OVER (PARTITION BY vol_down_1y IS NULL",
-                     "percent_rank() OVER (PARTITION BY mdd_1y IS NULL",
+        for frag in ("percent_rank() OVER (PARTITION BY vol_all IS NULL",
+                     "percent_rank() OVER (PARTITION BY vol_down_all IS NULL",
+                     "percent_rank() OVER (PARTITION BY mdd_all IS NULL",
                      "UPDATE fund_risk_metrics rm",
                      "rm.code = t.code"):
             assert frag in sql

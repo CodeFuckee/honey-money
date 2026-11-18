@@ -436,8 +436,8 @@ class TestBarsAdjust:
 # ---------------------------------------------------------- 基金列表/净值 ----
 
 # 基金列表第二段查询返回行（code, name, fund_type, unit_nav, pct_chg,
-# nav_date, navs, first_date, vol_1y, vol_down_1y, mdd_1y, sharpe_1y,
-# roll_vol, vol_pctile）——后 6 列 LEFT JOIN fund_risk_metrics（可为 NULL）
+# nav_date, navs, first_date, vol_all, vol_down_all, mdd_all, sharpe_all,
+# roll_vol, vol_pctile）——后 6 列 LEFT JOIN fund_risk_metrics（可为 NULL，全史口径）
 FUND_PAGE_ROW = ("000001", "华夏成长混合", "混合型-灵活",
                  1.046012, 2.054, dt.date(2026, 10, 23),
                  6029, dt.date(2001, 12, 18),
@@ -479,7 +479,7 @@ class TestFundList:
         assert "LEFT JOIN fund_risk_metrics rm" in ids_sql
         assert ids_params == ("华夏", "%华夏%", "%华夏%", 50, 0)
         assert "fund_nav" in page_sql and "LATERAL" in page_sql
-        assert "rm.vol_1y" in page_sql            # 波动指标列随页透出
+        assert "rm.vol_all" in page_sql           # 波动指标列随页透出（全史）
         assert page_params == (["000001"],)       # 只聚合当页代码
         assert "fund_basic b" in cnt_sql and "ILIKE" in cnt_sql
         assert cnt_params == ("华夏", "%华夏%", "%华夏%")
@@ -491,10 +491,10 @@ class TestFundList:
         assert row["navs"] == 6029
         assert row["last_date"] == "2026-10-23"
         assert row["first_date"] == "2001-12-18"
-        assert row["vol_1y"] == 0.185             # round 4 位
-        assert row["vol_down_1y"] == 0.1201
-        assert row["mdd_1y"] == 0.2533
-        assert row["sharpe_1y"] == 1.4233
+        assert row["vol_all"] == 0.185            # round 4 位（全史口径）
+        assert row["vol_down_all"] == 0.1201
+        assert row["mdd_all"] == 0.2533
+        assert row["sharpe_all"] == 1.4233
         assert row["roll_vol"] == 0.0812
         assert row["vol_pctile"] == 0.6666
 
@@ -509,8 +509,8 @@ class TestFundList:
 
     def test_sort_metric_desc(self, monkeypatch):
         """波动指标排序：白名单列落 rm 表 + DESC NULLS LAST（无行沉底）。"""
-        _, conn = self._fetch(monkeypatch, sort="vol_1y", order="desc")
-        assert "ORDER BY rm.vol_1y DESC NULLS LAST" in conn.executed[0][0]
+        _, conn = self._fetch(monkeypatch, sort="vol_all", order="desc")
+        assert "ORDER BY rm.vol_all DESC NULLS LAST" in conn.executed[0][0]
 
     def test_sort_metric_asc(self, monkeypatch):
         _, conn = self._fetch(monkeypatch, sort="vol_pctile", order="asc")
@@ -518,13 +518,13 @@ class TestFundList:
 
     def test_sort_all_whitelist_keys_map_to_rm(self, monkeypatch):
         import app.browse as browse_mod
-        for key in ("vol_down_1y", "mdd_1y", "sharpe_1y"):
+        for key in ("vol_down_all", "mdd_all", "sharpe_all"):
             _, conn = self._fetch(monkeypatch, sort=key, order="desc")
             assert f"ORDER BY rm.{key} DESC NULLS LAST" in conn.executed[0][0]
 
     def test_sort_invalid_falls_back_to_code(self, monkeypatch):
         """白名单外（含注入企图）回落 b.code——防注入锚点。"""
-        _, conn = self._fetch(monkeypatch, sort="rm.vol_1y; DROP TABLE x")
+        _, conn = self._fetch(monkeypatch, sort="rm.vol_all; DROP TABLE x")
         assert "ORDER BY b.code ASC NULLS LAST" in conn.executed[0][0]
         assert "DROP" not in conn.executed[0][0]
 
