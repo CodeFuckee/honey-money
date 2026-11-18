@@ -556,9 +556,9 @@ class TestFundNavs:
 
 
 # 基金风险指标行（fund_risk_metrics 单行：16 窗口指标 + roll_vol +
-# vol_pctile + as_of + computed_at），与 _FUND_RISK_SQL 列序逐位对齐
+# vol_pctile + risk_score + as_of + computed_at），与 _FUND_RISK_SQL 列序逐位对齐
 FUND_RISK_ROW = tuple([0.1850, 0.1201, 0.2533, 1.4233] * 4)
-FUND_RISK_ROW += (0.0812, 0.6666, dt.date(2026, 10, 23),
+FUND_RISK_ROW += (0.0812, 0.6666, 0.4123, dt.date(2026, 10, 23),
                   dt.datetime(2026, 11, 17, 6, 0, 0))
 
 
@@ -604,6 +604,7 @@ class TestFundNavsRisk:
         assert risk["mdd_1y"] == 0.2533 and risk["sharpe_1y"] == 1.4233
         assert risk["vol_all"] == 0.1850 and risk["sharpe_all"] == 1.4233
         assert risk["roll_vol"] == 0.0812 and risk["vol_pctile"] == 0.6666
+        assert risk["risk_score"] == 0.4123   # 综合波动分位（三指标横截面等权）
         assert risk["as_of"] == "2026-10-23"
         assert risk["computed_at"] == "2026-11-17T06:00:00"
 

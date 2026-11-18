@@ -383,11 +383,55 @@ CREATE TABLE IF NOT EXISTS fund_risk_metrics (
   mdd_all DOUBLE PRECISION, sharpe_all DOUBLE PRECISION,
   roll_vol        DOUBLE PRECISION,
   vol_pctile      DOUBLE PRECISION,
+  risk_score      DOUBLE PRECISION,
   as_of           DATE,
   nav_count       INTEGER,
   computed_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 """
+
+# 已有部署的表补列（CREATE TABLE IF NOT EXISTS 对已存在表不生效）
+_RISK_MIGRATE = (
+    "ALTER TABLE fund_risk_metrics "
+    "ADD COLUMN IF NOT EXISTS risk_score DOUBLE PRECISION;"
+)
+
+# 综合波动分位回填（幂等，整表重算）：年化波动率/下行波动率/最大回撤三项
+# 在全样本（非 NULL 行）中的 percent_rank 横截面等权平均，round(4)，
+# 越低越稳（三项都偏低=波动小回撤浅）；三指标全缺 → NULL。
+# 日更 import_risk 同事务调用 + 启动清单兜底调用（部署即得历史数据）。
+_RISK_SCORE_BACKFILL = """
+UPDATE fund_risk_metrics rm
+SET risk_score = t.score
+FROM (
+  SELECT code,
+         round(((coalesce(pv, 0) + coalesce(pd, 0) + coalesce(pm, 0))
+               / NULLIF((CASE WHEN pv IS NOT NULL THEN 1 ELSE 0 END
+                         + CASE WHEN pd IS NOT NULL THEN 1 ELSE 0 END
+                         + CASE WHEN pm IS NOT NULL THEN 1 ELSE 0 END), 0))
+               ::numeric, 4) AS score
+  FROM (
+    SELECT code,
+           CASE WHEN vol_1y IS NULL THEN NULL
+                ELSE percent_rank() OVER (PARTITION BY vol_1y IS NULL
+                                          ORDER BY vol_1y) END AS pv,
+           CASE WHEN vol_down_1y IS NULL THEN NULL
+                ELSE percent_rank() OVER (PARTITION BY vol_down_1y IS NULL
+                                          ORDER BY vol_down_1y) END AS pd,
+           CASE WHEN mdd_1y IS NULL THEN NULL
+                ELSE percent_rank() OVER (PARTITION BY mdd_1y IS NULL
+                                          ORDER BY mdd_1y) END AS pm
+    FROM fund_risk_metrics
+  ) x
+) t
+WHERE rm.code = t.code
+"""
+
+
+def backfill_risk_scores(conn) -> None:
+    """综合波动分位横截面回填（幂等整表重算；事务由调用方提交）。"""
+    with conn.cursor() as cur:
+        cur.execute(_RISK_SCORE_BACKFILL)
 
 
 def ensure_tp_schema(conn) -> None:
@@ -395,12 +439,16 @@ def ensure_tp_schema(conn) -> None:
     with conn.cursor() as cur:
         cur.execute(TP_DDL)
         cur.execute(RISK_DDL)
+        cur.execute(_RISK_MIGRATE)
+        cur.execute(_RISK_SCORE_BACKFILL)
 
 
 def ensure_risk_schema(conn) -> None:
     """波动指标表幂等建表（启动清单兜底，缺表时浏览接口不至于整页 down）。"""
     with conn.cursor() as cur:
         cur.execute(RISK_DDL)
+        cur.execute(_RISK_MIGRATE)
+        cur.execute(_RISK_SCORE_BACKFILL)
 
 
 def import_tp_rows(conn, rows: list[dict], *, params: dict | None = None) -> int:
@@ -460,11 +508,14 @@ VALUES ({", ".join(["%s"] * len(_RISK_COLS))})
 
 
 def import_risk(conn, rows: list[tuple]) -> int:
-    """波动指标整表替换（DELETE+INSERT，日更顺带刷新）；事务由调用方提交。"""
+    """波动指标整表替换（DELETE+INSERT，日更顺带刷新）；事务由调用方提交。
+
+    替换后同事务回填综合波动分位（横截面指标须全样本落库后统一计算）。"""
     with conn.cursor() as cur:
         cur.execute("DELETE FROM fund_risk_metrics")
         if rows:
             cur.executemany(_RISK_INSERT, rows)
+        cur.execute(_RISK_SCORE_BACKFILL)
     return len(rows)
 
 

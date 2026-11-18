@@ -630,6 +630,7 @@ const DCA_TOGGLE_COLS = [
   { key: 'mdd_1y', label: '最大回撤' },
   { key: 'sharpe_1y', label: '夏普' },
   { key: 'vol_pctile', label: '波动率分位' },
+  { key: 'risk_score', label: '综合波动分位' },
   { key: 'gap_avg_days', label: '止盈间隔' },
   { key: 'w10_rounds', label: '止盈次数' },
   { key: 'w10_profit_rate', label: '总收益率' },
@@ -3100,25 +3101,31 @@ watch(
                 <Column field="scale_yi" header="规模(亿)" style="width: 95px" sortable bodyClass="num-col" v-if="colVisible('scale_yi')">
                   <template #body="{ data }">{{ data.scale_yi != null ? data.scale_yi : '—' }}</template>
                 </Column>
-                <Column field="vol_1y" header="年化波动率" style="width: 104px" sortable bodyClass="num-col" v-if="colVisible('vol_1y')">
+                <!-- 注意：header 文字只写在 #header 插槽里——同时给 Column
+                     header 属性会被 PrimeVue 双重渲染（2026-11-18 用户报告） -->
+                <Column field="vol_1y" style="width: 104px" sortable bodyClass="num-col" v-if="colVisible('vol_1y')">
                   <template #header><span title="近1年（最近250个净值日）日收益率标准差 × √252，复权口径；fund_risk_metrics 日更快照">年化波动率</span></template>
                   <template #body="{ data }">{{ volpct(data.vol_1y) }}</template>
                 </Column>
-                <Column field="vol_down_1y" header="下行波动率" style="width: 104px" sortable bodyClass="num-col" v-if="colVisible('vol_down_1y')">
+                <Column field="vol_down_1y" style="width: 104px" sortable bodyClass="num-col" v-if="colVisible('vol_down_1y')">
                   <template #header><span title="近1年内只统计下跌日收益率的标准差 × √252（真实痛苦的方向）">下行波动率</span></template>
                   <template #body="{ data }">{{ volpct(data.vol_down_1y) }}</template>
                 </Column>
-                <Column field="mdd_1y" header="最大回撤" style="width: 96px" sortable bodyClass="num-col" v-if="colVisible('mdd_1y')">
+                <Column field="mdd_1y" style="width: 96px" sortable bodyClass="num-col" v-if="colVisible('mdd_1y')">
                   <template #header><span title="近1年窗口内复权净值峰谷最大回撤（正数存储，显示为负号）">最大回撤</span></template>
                   <template #body="{ data }">{{ mddneg(data.mdd_1y) }}</template>
                 </Column>
-                <Column field="sharpe_1y" header="夏普" style="width: 84px" sortable bodyClass="num-col" v-if="colVisible('sharpe_1y')">
+                <Column field="sharpe_1y" style="width: 84px" sortable bodyClass="num-col" v-if="colVisible('sharpe_1y')">
                   <template #header><span title="近1年夏普比率：日收益均值/标准差 × √252，无风险利率 0（每单位波动换回的收益）">夏普</span></template>
                   <template #body="{ data }">{{ sharpe2(data.sharpe_1y) }}</template>
                 </Column>
-                <Column field="vol_pctile" header="波动率分位" style="width: 100px" sortable bodyClass="num-col" v-if="colVisible('vol_pctile')">
+                <Column field="vol_pctile" style="width: 100px" sortable bodyClass="num-col" v-if="colVisible('vol_pctile')">
                   <template #header><span title="当前 60 日滚动年化波动率在该基金自身全史滚动序列中的百分位：越低=当前比历史更平静，越高=更颠簸">波动率分位</span></template>
                   <template #body="{ data }">{{ pctile(data.vol_pctile) }}</template>
+                </Column>
+                <Column field="risk_score" style="width: 108px" sortable bodyClass="num-col" v-if="colVisible('risk_score')">
+                  <template #header><span title="综合波动分位：年化波动率/下行波动率/最大回撤三项在全市场同类基金中的百分位排名等权平均（percent_rank），越低越稳——一眼排序三指标">综合波动分位</span></template>
+                  <template #body="{ data }">{{ pctile(data.risk_score) }}</template>
                 </Column>
                 <Column field="w10_rounds" header="止盈次数" style="width: 88px" sortable bodyClass="num-col" v-if="colVisible('w10_rounds')">
                   <template #body="{ data }">{{ dcaFeeVal(data, 'w10_rounds') ?? '—' }}</template>
@@ -3159,7 +3166,7 @@ watch(
                 </Column>
               </DataTable>
             </div>
-            <p class="note">口径：每月首个净值日投入固定金额，任一净值日持仓收益达止盈线即全仓赎回并重开新一轮（分红再投）；排行/统计/散点/详情共用同一费用口径，搜索栏或散点区可切换（不含费 / 含费·申购一折 / 含费·申购名义，赎回费各口径一致按持有天数阶梯收取）；排行/统计/散点共用同一基金类型口径，搜索栏或散点区可切换（默认仅权益类：股票型/偏股·灵活·平衡混合/股票指数/海外权益共 8 类，全市场可切回，债基·FOF·货币·偏债不在权益类内） · 统计卡为当前类型与在市口径全集分位，不随搜索与区间筛选变化 · 新基金（回测窗口 &lt;90 天）年化留空 · 「当前回撤」= 复权净值距历史最高的跌幅（日更顺带刷新），非在市基金无此数据；「甜蜜点」结论来自 2015~2026 权益基金 98 万起点历史模拟（-25~-30% 回撤起定投首轮止盈中位 582 天、成功率 63.2%、年化 32.0%，20% 止盈线含费口径） · 波动指标列（年化/下行波动率、最大回撤、夏普·近1年 + 波动率分位）为基金净值快照（复权日增长率、√252 年化、无风险利率 0，fund_risk_metrics 日更顺带刷新，无指标行显示 —），与回测口径独立、不随费用/止盈点切换 · 数据为离线回测快照，重跑 scripts/fund_dca_backtest.py 并经 app.dca_store 导入后刷新 · 点行或「详情」查看每轮止盈明细 · 止盈点切换（搜索栏按钮组或对比区块行/圆点）仅改排行/统计/明细数据源，散点/分箱固定 20% 口径 · 历史统计不构成任何操作建议</p>
+            <p class="note">口径：每月首个净值日投入固定金额，任一净值日持仓收益达止盈线即全仓赎回并重开新一轮（分红再投）；排行/统计/散点/详情共用同一费用口径，搜索栏或散点区可切换（不含费 / 含费·申购一折 / 含费·申购名义，赎回费各口径一致按持有天数阶梯收取）；排行/统计/散点共用同一基金类型口径，搜索栏或散点区可切换（默认仅权益类：股票型/偏股·灵活·平衡混合/股票指数/海外权益共 8 类，全市场可切回，债基·FOF·货币·偏债不在权益类内） · 统计卡为当前类型与在市口径全集分位，不随搜索与区间筛选变化 · 新基金（回测窗口 &lt;90 天）年化留空 · 「当前回撤」= 复权净值距历史最高的跌幅（日更顺带刷新），非在市基金无此数据；「甜蜜点」结论来自 2015~2026 权益基金 98 万起点历史模拟（-25~-30% 回撤起定投首轮止盈中位 582 天、成功率 63.2%、年化 32.0%，20% 止盈线含费口径） · 波动指标列（年化/下行波动率、最大回撤、夏普·近1年 + 波动率分位）为基金净值快照（复权日增长率、√252 年化、无风险利率 0，fund_risk_metrics 日更顺带刷新，无指标行显示 —），与回测口径独立、不随费用/止盈点切换 · 「综合波动分位」= 年化波动率/下行波动率/最大回撤三项在全市场同类基金中的百分位排名等权平均（percent_rank，0~100%，越低越稳），日更顺带重算（三指标缺任一按可得项平均，全缺为 —） · 数据为离线回测快照，重跑 scripts/fund_dca_backtest.py 并经 app.dca_store 导入后刷新 · 点行或「详情」查看每轮止盈明细 · 止盈点切换（搜索栏按钮组或对比区块行/圆点）仅改排行/统计/明细数据源，散点/分箱固定 20% 口径 · 历史统计不构成任何操作建议</p>
 
 
             <!-- ===== 年限 × 规模 三维散点（每基金一点） + 分箱统计 ===== -->
@@ -3346,6 +3353,10 @@ watch(
                 <div class="dc-item">
                   <div class="dc-label" title="当前 60 日滚动年化波动率及其在该基金自身全史滚动序列中的百分位（越低=比历史更平静）">当前滚动波动率<span class="dc-hint">60日</span></div>
                   <div class="dc-value">{{ volpct(dcaRoundsRisk.roll_vol) }} <span class="dc-hint">分位 {{ pctile(dcaRoundsRisk.vol_pctile) }}</span></div>
+                </div>
+                <div class="dc-item">
+                  <div class="dc-label" title="综合波动分位：年化波动率/下行波动率/最大回撤三项在全市场同类基金中的百分位排名等权平均（percent_rank），越低越稳——一眼比较三指标">综合波动分位<span class="dc-hint">全市场</span></div>
+                  <div class="dc-value">{{ pctile(dcaRoundsRisk.risk_score) }}</div>
                 </div>
               </div>
               <p v-if="dcaRoundsRisk" class="note" style="margin: 0 0 8px">波动指标口径：复权日增长率（分红再投）· 年化系数 √252、无风险利率 0 · 快照截至 {{ dcaRoundsRisk.as_of || '—' }}，日更顺带生成 · 与回测指标独立（回测口径为策略收益，此为基金净值波动）</p>
@@ -3549,6 +3560,10 @@ watch(
                 <div class="dc-item">
                   <div class="dc-label" title="当前 60 日滚动年化波动率及其在该基金自身全史滚动序列中的百分位（越低=比历史更平静）">当前滚动波动率<span class="dc-hint">60日</span></div>
                   <div class="dc-value">{{ volpct(fundRisk.roll_vol) }} <span class="dc-hint">分位 {{ pctile(fundRisk.vol_pctile) }}</span></div>
+                </div>
+                <div class="dc-item">
+                  <div class="dc-label" title="综合波动分位：年化波动率/下行波动率/最大回撤三项在全市场同类基金中的百分位排名等权平均（percent_rank），越低越稳——一眼比较三指标">综合波动分位<span class="dc-hint">全市场</span></div>
+                  <div class="dc-value">{{ pctile(fundRisk.risk_score) }}</div>
                 </div>
               </div>
               <div class="risk-table-wrap">
@@ -4179,7 +4194,7 @@ watch(
   --titlebar-h: 48px;
   --title-color: #f4f4f4;
   --sidebar-w: 256px;
-  --content-pad: 32px 40px 24px;
+  --content-pad: 32px 20px 24px;   /* 左右 20px（2026-11-18 用户反馈 40px 太宽） */
   --h1-size: 28px;
   --h1-weight: 600;
   --bar-h: 6px;

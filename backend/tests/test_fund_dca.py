@@ -702,10 +702,11 @@ class TestDcaRiskJoin:
         join = "LEFT JOIN fund_risk_metrics rm ON rm.code = r.code"
         assert join in _DCA_LIST_SQL and join in _TP_LIST_SQL
         for frag in ("rm.vol_1y, rm.vol_down_1y, rm.mdd_1y, rm.sharpe_1y,",
-                     "rm.roll_vol, rm.vol_pctile"):
+                     "rm.roll_vol, rm.vol_pctile, rm.risk_score"):
             assert frag in _DCA_LIST_SQL and frag in _TP_LIST_SQL
-        assert _LIST_COLS[-6:] == ["vol_1y", "vol_down_1y", "mdd_1y",
-                                   "sharpe_1y", "roll_vol", "vol_pctile"]
+        assert _LIST_COLS[-7:] == ["vol_1y", "vol_down_1y", "mdd_1y",
+                                   "sharpe_1y", "roll_vol", "vol_pctile",
+                                   "risk_score"]
         assert _TP_LIST_COLS == ["tp"] + _LIST_COLS
 
     def test_sort_risk_columns_map_rm_table(self):
@@ -748,6 +749,89 @@ class TestDcaRiskJoin:
             resp = client.get(url, params=rng)
             assert resp.status_code == 200
             assert resp.json()["status"] == "down"
+
+
+class TestDcaRiskScore:
+    """综合波动分位（2026-11-18 用户需求「三指标整合排名」）：年化波动率/
+    下行波动率/最大回撤的横截面百分位等权平均（percent_rank 口径，越低越稳），
+    fund_risk_metrics.risk_score 快照列——排行两端点透出 + 排序白名单。"""
+
+    def test_sort_risk_score_maps_rm_table(self):
+        """sort=risk_score → ORDER BY rm.risk_score（费用口径无关）。"""
+        body, conn = _fetch_dca(sort="risk_score", order="asc")
+        sql, _ = conn.cursor_obj.executed[1]
+        assert "ORDER BY rm.risk_score ASC NULLS LAST" in sql
+        body, conn = _fetch_dca(sort="risk_score")
+        sql, _ = conn.cursor_obj.executed[1]
+        assert "ORDER BY rm.risk_score DESC NULLS LAST" in sql
+
+    def test_risk_score_fee_independent(self):
+        """fee 切换不影响综合分位排序（同 scale_yi/vol 列费用无关）。"""
+        body, conn = _fetch_dca(fee="disc", sort="risk_score")
+        sql, _ = conn.cursor_obj.executed[1]
+        assert "ORDER BY rm.risk_score DESC NULLS LAST" in sql
+
+    def test_risk_score_sort_whitelist_rejects_injection(self):
+        """注入串同样回落 w10_xirr，不得进 SQL。"""
+        body, conn = _fetch_dca(sort="risk_score) --")
+        sql, _ = conn.cursor_obj.executed[1]
+        assert "ORDER BY r.w10_xirr DESC" in sql
+
+    def test_risk_score_in_round4(self):
+        """行映射 round4 覆盖 risk_score（前端 pctile 百分比格式化）。"""
+        from app.dca_api import _LIST_ROUND4
+        assert "risk_score" in _LIST_ROUND4
+
+    def test_row_mapping_aligns_with_cols(self):
+        """行 dict(zip(cols,row)) 列数对齐：SQL 列数 == _LIST_COLS 数（防错位）。"""
+        from app.dca_api import _DCA_LIST_SQL, _LIST_COLS
+        select_part = _DCA_LIST_SQL.split("FROM ")[0]
+        n_sql = select_part.count(",")
+        assert n_sql + 1 == len(_LIST_COLS)
+
+
+class TestRiskScoreBackfill:
+    """fund_risk_metrics.risk_score 落库与自愈：日更 import_risk 同事务
+    回填 + 启动清单幂等 ALTER + 兜底回填（部署即得历史数据，无需手工）。"""
+
+    def test_ddl_has_risk_score_and_idempotent_alter(self):
+        from app.dca_store import RISK_DDL, _RISK_MIGRATE
+        assert "risk_score" in RISK_DDL
+        assert ("ALTER TABLE fund_risk_metrics "
+                "ADD COLUMN IF NOT EXISTS risk_score DOUBLE PRECISION;"
+                ) in _RISK_MIGRATE
+
+    def test_ensure_risk_schema_runs_alter_and_backfill(self):
+        """启动兜底：建表 → ALTER 补列 → 回填 UPDATE（幂等，重启自愈）。"""
+        import app.dca_store as store
+        conn = FakeConn()
+        store.ensure_risk_schema(conn)
+        sqls = [s for s, _ in conn.cursor_obj.executed]
+        assert any("ADD COLUMN IF NOT EXISTS risk_score" in s for s in sqls)
+        assert any("percent_rank()" in s and "risk_score" in s for s in sqls)
+
+    def test_import_risk_backfills_same_session(self):
+        """日更整表替换后同会话回填 risk_score（事务由调用方提交）。"""
+        import app.dca_store as store
+        conn = FakeConn()
+        store.import_risk(conn, [])
+        sqls = [s for s, _ in conn.cursor_obj.executed]
+        assert sqls[0].startswith("DELETE FROM fund_risk_metrics")
+        assert any("percent_rank()" in s for s in sqls)
+
+    def test_backfill_sql_shape(self):
+        """回填 SQL：三指标 percent_rank 横截面 + 等权均值 + code 回连。"""
+        import app.dca_store as store
+        conn = FakeConn()
+        store.backfill_risk_scores(conn)
+        sql, _ = conn.cursor_obj.executed[0]
+        for frag in ("percent_rank() OVER (PARTITION BY vol_1y IS NULL",
+                     "percent_rank() OVER (PARTITION BY vol_down_1y IS NULL",
+                     "percent_rank() OVER (PARTITION BY mdd_1y IS NULL",
+                     "UPDATE fund_risk_metrics rm",
+                     "rm.code = t.code"):
+            assert frag in sql
+        assert "sharpe" not in sql   # 只用风险三指标，夏普不参与
 
 
 class TestDcaRangeFilters:

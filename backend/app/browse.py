@@ -122,7 +122,7 @@ SELECT vol_1y, vol_down_1y, mdd_1y, sharpe_1y,
        vol_3y, vol_down_3y, mdd_3y, sharpe_3y,
        vol_5y, vol_down_5y, mdd_5y, sharpe_5y,
        vol_all, vol_down_all, mdd_all, sharpe_all,
-       roll_vol, vol_pctile, as_of, computed_at
+       roll_vol, vol_pctile, risk_score, as_of, computed_at
 FROM fund_risk_metrics WHERE code = %s
 """
 
@@ -402,7 +402,8 @@ def fetch_fund_navs(dsn: str, code: str, *, limit: int = 250,
                              "vol_3y", "vol_down_3y", "mdd_3y", "sharpe_3y",
                              "vol_5y", "vol_down_5y", "mdd_5y", "sharpe_5y",
                              "vol_all", "vol_down_all", "mdd_all", "sharpe_all",
-                             "roll_vol", "vol_pctile", "as_of", "computed_at"]
+                             "roll_vol", "vol_pctile", "risk_score",
+                             "as_of", "computed_at"]
                     risk = dict(zip(rcols, rrow))
                     risk["as_of"] = (risk["as_of"].isoformat()
                                      if risk["as_of"] is not None else None)

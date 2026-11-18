@@ -113,3 +113,23 @@ class TestMobileDrawerUnaffected:
         expect(page.get_by_role("button", name="仪表盘")).to_be_visible()
         page.locator(MENU).click()
         expect(page.locator(SIDEBAR)).to_have_class(re.compile("open"))
+
+
+class TestContentSidePadding:
+    def test_content_side_padding_narrowed(self, servers, page):
+        """P1 内容区左右边距收窄（用户反馈 40px 太大）：--content-pad
+        左右 20px，折叠/展开两态一致。"""
+        _, frontend_port = servers
+        page.goto(f"http://127.0.0.1:{frontend_port}/")
+        pad = page.evaluate("""() => {
+          const cs = getComputedStyle(document.querySelector('.content'));
+          return [cs.paddingLeft, cs.paddingRight];
+        }""")
+        assert pad == ["20px", "20px"], pad
+        page.locator(MENU).click()                     # 折叠后同样 20px
+        expect(page.locator(SIDEBAR)).to_have_class(re.compile("collapsed"))
+        pad2 = page.evaluate("""() => {
+          const cs = getComputedStyle(document.querySelector('.content'));
+          return [cs.paddingLeft, cs.paddingRight];
+        }""")
+        assert pad2 == ["20px", "20px"], pad2

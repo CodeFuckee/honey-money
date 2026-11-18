@@ -6,6 +6,27 @@
 ## [Unreleased]
 
 ### Added
+- **综合波动分位（2026-11-18 用户需求「三指标整合出一个指标进行排名」）**：
+  年化波动率/下行波动率/最大回撤三项在**全市场同类基金**中的百分位排名
+  （percent_rank）等权平均，round(4) 0~1 快照列 `fund_risk_metrics.risk_score`，
+  **越低越稳**（三项都偏低=波动小回撤浅；三指标缺任一按可得项平均，全缺 NULL）。
+  ① 落库：日更 `import_risk` 整表替换后同事务回填（新 SQL：三列各
+  `percent_rank() OVER (PARTITION BY x IS NULL ORDER BY x)` 横截面 + 等权
+  均值，幂等整表重算）；启动清单 `ensure_risk_schema`/`ensure_tp_schema`
+  幂等 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` + 兜底回填——**部署即得
+  历史数据**（本次已在 NAS 生产库预回填 22853/22853 只，均值 0.498 居中）。
+  ② 排行：/api/funds/dca 与 /tp 两端点透出 `risk_score` 列（_LIST_COLS 尾
+  追加、dict(zip) 列数对齐）、排序白名单 `_SORTABLE`/`_RM_SORTABLE` 落
+  `rm.risk_score`（费用口径无关）、round4 映射；详情 navs 响应 risk 字段
+  附带（_FUND_RISK_SQL + rcols 同步）。③ 前端：定投排行新「综合波动分位」
+  可排序列（列显隐开关内，仅 #header 插槽写法）、两个详情弹窗风险区同名
+  指标卡（全市场 hint）、口径 note 补充。④ 测试：后端 622 绿（+9：
+  TestDcaRiskScore 5 例 + TestRiskScoreBackfill 4 例；TestDcaRiskJoin 列序
+  断言随列追加更新、TestFundNavsRisk 行补 risk_score）；E2E 121 绿（+5：
+  test_dca_risk_score——表头不重复回归/综合列渲染与 — 占位/sort=risk_score
+  契约/详情卡，test_sidebar_collapse 边距 20px 两态）。真实 PG 冒烟抓出
+  `round(double precision, int)` 不存在（FakeConn 形状测试不可见），已
+  `::numeric` 转型并在生产库回验。
 - **桌面端侧栏折叠/展开（2026-11-18 用户需求「左侧边栏可以折叠展开」）**：
   标题栏汉堡按钮统一为侧栏开关——桌面端（>820px）点击把侧栏收窄为 56px
   图标窄条（带宽度过渡动画，导航/数据源图标仍可直接点击跳转，悬停显示
@@ -103,6 +124,14 @@
   （规模列渲染 / E2E-438 筛选交互与请求参数断言）。
 
 ### Fixed
+- **定投页波动列表头文字双重渲染（2026-11-18 用户报告「同样的文字显示
+  两次」）**：五个波动列 `<Column>` 同时带 `header="X"` 属性与 `#header`
+  插槽，PrimeVue 两者都渲染（数据页只写插槽故正常）。去掉冗余属性、
+  文字只留插槽并留注释防再犯；E2E 回归断言各表头文字只出现一次
+  （test_dca_risk_score::TestHeaderNotDuplicated）。
+- **内容区左右边距过宽（2026-11-18 用户反馈，侧栏折叠后更明显）**：
+  `--content-pad` 左右 40px → 20px，折叠/展开两态一致；
+  test_sidebar_collapse::TestContentSidePadding 两态断言守护。
 - **昨晚（11-17）23:00 日更 run 122 失败诊断（环境性，非业务代码缺陷）**：
   run 122 跑 72 分钟后崩于 `ValueError: too many values to unpack (expected
   6, got 7)`——父进程以旧代码解包 6 元组、spawn 子进程从磁盘读到新代码
