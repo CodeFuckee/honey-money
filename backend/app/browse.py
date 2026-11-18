@@ -84,7 +84,7 @@ SELECT b.code, b.name, b.fund_type,
        COALESCE(s.navs, 0) AS navs,
        COALESCE(s.first_date, p.nav_date) AS first_date,
        rm.vol_all, rm.vol_down_all, rm.mdd_all, rm.sharpe_all,
-       rm.roll_vol, rm.vol_pctile
+       rm.roll_vol, rm.vol_pctile, rm.osc_per_year, rm.osc_pctile
 FROM fund_basic b
 LEFT JOIN LATERAL (
     SELECT unit_nav, pct_chg, nav_date
@@ -122,7 +122,8 @@ SELECT vol_1y, vol_down_1y, mdd_1y, sharpe_1y,
        vol_3y, vol_down_3y, mdd_3y, sharpe_3y,
        vol_5y, vol_down_5y, mdd_5y, sharpe_5y,
        vol_all, vol_down_all, mdd_all, sharpe_all,
-       roll_vol, vol_pctile, risk_score, as_of, computed_at
+       roll_vol, vol_pctile, risk_score,
+       osc_per_year, osc_regularity, osc_pctile, as_of, computed_at
 FROM fund_risk_metrics WHERE code = %s
 """
 
@@ -135,6 +136,8 @@ _FUND_SORT_COLS = {
     "mdd_all": "rm.mdd_all",
     "sharpe_all": "rm.sharpe_all",
     "vol_pctile": "rm.vol_pctile",
+    "osc_per_year": "rm.osc_per_year",
+    "osc_pctile": "rm.osc_pctile",
 }
 
 
@@ -357,7 +360,8 @@ def fetch_fund_list(dsn: str, *, q: str = "", limit: int = 50,
                     cols = ["code", "name", "fund_type", "unit_nav", "pct_chg",
                             "last_date", "navs", "first_date",
                             "vol_all", "vol_down_all", "mdd_all", "sharpe_all",
-                            "roll_vol", "vol_pctile"]
+                            "roll_vol", "vol_pctile",
+                            "osc_per_year", "osc_pctile"]
                     by_code = {r[0]: dict(zip(cols, r)) for r in cur.fetchall()}
                     funds = [by_code[c] for c in codes]   # 保持 code 序
                 cur.execute(count_sql, (q, like, like))
@@ -366,7 +370,7 @@ def fetch_fund_list(dsn: str, *, q: str = "", limit: int = 50,
             f["unit_nav"] = round(f["unit_nav"], 4) if f["unit_nav"] is not None else None
             f["pct_chg"] = round(f["pct_chg"], 2) if f["pct_chg"] is not None else None
             for k in ("vol_all", "vol_down_all", "mdd_all", "sharpe_all",
-                      "roll_vol", "vol_pctile"):
+                      "roll_vol", "vol_pctile", "osc_per_year", "osc_pctile"):
                 f[k] = round(f[k], 4) if f[k] is not None else None
             for k in ("last_date", "first_date"):
                 if f[k]:
@@ -403,6 +407,7 @@ def fetch_fund_navs(dsn: str, code: str, *, limit: int = 250,
                              "vol_5y", "vol_down_5y", "mdd_5y", "sharpe_5y",
                              "vol_all", "vol_down_all", "mdd_all", "sharpe_all",
                              "roll_vol", "vol_pctile", "risk_score",
+                             "osc_per_year", "osc_regularity", "osc_pctile",
                              "as_of", "computed_at"]
                     risk = dict(zip(rcols, rrow))
                     risk["as_of"] = (risk["as_of"].isoformat()

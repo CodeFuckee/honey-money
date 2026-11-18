@@ -384,6 +384,8 @@ CREATE TABLE IF NOT EXISTS fund_risk_metrics (
   roll_vol        DOUBLE PRECISION,
   vol_pctile      DOUBLE PRECISION,
   risk_score      DOUBLE PRECISION,
+  osc_per_year    DOUBLE PRECISION, osc_regularity DOUBLE PRECISION,
+  osc_pctile      DOUBLE PRECISION,
   as_of           DATE,
   nav_count       INTEGER,
   computed_at     TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -393,7 +395,13 @@ CREATE TABLE IF NOT EXISTS fund_risk_metrics (
 # 已有部署的表补列（CREATE TABLE IF NOT EXISTS 对已存在表不生效）
 _RISK_MIGRATE = (
     "ALTER TABLE fund_risk_metrics "
-    "ADD COLUMN IF NOT EXISTS risk_score DOUBLE PRECISION;"
+    "ADD COLUMN IF NOT EXISTS risk_score DOUBLE PRECISION;\n"
+    "ALTER TABLE fund_risk_metrics "
+    "ADD COLUMN IF NOT EXISTS osc_per_year DOUBLE PRECISION;\n"
+    "ALTER TABLE fund_risk_metrics "
+    "ADD COLUMN IF NOT EXISTS osc_regularity DOUBLE PRECISION;\n"
+    "ALTER TABLE fund_risk_metrics "
+    "ADD COLUMN IF NOT EXISTS osc_pctile DOUBLE PRECISION;"
 )
 
 # 综合波动分位回填（幂等，整表重算）：年化波动率/下行波动率/最大回撤三项
@@ -404,14 +412,18 @@ _RISK_MIGRATE = (
 # 日更 import_risk 同事务调用 + 启动清单兜底调用（部署即得历史数据）。
 _RISK_SCORE_BACKFILL = """
 UPDATE fund_risk_metrics rm
-SET risk_score = t.score
+SET risk_score = t.score, osc_pctile = t.opct
 FROM (
   SELECT code,
          round(((coalesce(pv, 0) + coalesce(pd, 0) + coalesce(pm, 0))
                / NULLIF((CASE WHEN pv IS NOT NULL THEN 1 ELSE 0 END
                          + CASE WHEN pd IS NOT NULL THEN 1 ELSE 0 END
                          + CASE WHEN pm IS NOT NULL THEN 1 ELSE 0 END), 0))
-               ::numeric, 4) AS score
+               ::numeric, 4) AS score,
+         CASE WHEN osc_per_year IS NULL THEN NULL
+              ELSE round(percent_rank() OVER (PARTITION BY osc_per_year IS NULL
+                                              ORDER BY osc_per_year)::numeric, 4)
+         END AS opct
   FROM (
     SELECT code,
            CASE WHEN vol_all IS NULL THEN NULL
@@ -422,7 +434,8 @@ FROM (
                                           ORDER BY vol_down_all) END AS pd,
            CASE WHEN mdd_all IS NULL THEN NULL
                 ELSE percent_rank() OVER (PARTITION BY mdd_all IS NULL
-                                          ORDER BY mdd_all) END AS pm
+                                          ORDER BY mdd_all) END AS pm,
+           osc_per_year
     FROM fund_risk_metrics
   ) x
 ) t
@@ -502,7 +515,8 @@ _RISK_COLS = ["code", "vol_1y", "vol_down_1y", "mdd_1y", "sharpe_1y",
               "vol_3y", "vol_down_3y", "mdd_3y", "sharpe_3y",
               "vol_5y", "vol_down_5y", "mdd_5y", "sharpe_5y",
               "vol_all", "vol_down_all", "mdd_all", "sharpe_all",
-              "roll_vol", "vol_pctile", "as_of", "nav_count"]
+              "roll_vol", "vol_pctile", "osc_per_year", "osc_regularity",
+              "as_of", "nav_count"]
 _RISK_INSERT = f"""
 INSERT INTO fund_risk_metrics ({", ".join(_RISK_COLS)})
 VALUES ({", ".join(["%s"] * len(_RISK_COLS))})

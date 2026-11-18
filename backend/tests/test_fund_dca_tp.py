@@ -244,7 +244,7 @@ class TestRunFullBacktestTp:
         assert stats["fund_count"] == 2
         assert stats["risk_count"] == 2
         assert {r[0] for r in risk_rows} == {"000001", "000002"}
-        assert all(len(r) == 1 + 20 for r in risk_rows)   # code + ROW_FIELDS
+        assert all(len(r) == 1 + 22 for r in risk_rows)   # code + ROW_FIELDS
         # 平躺基金：恒定净值 → vol_all=0.0、sharpe None（None 行照常落库）
         flat = [r for r in risk_rows if r[0] == "000002"][0]
         assert flat[1] == 0.0                             # vol_1y

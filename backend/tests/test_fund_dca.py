@@ -702,11 +702,12 @@ class TestDcaRiskJoin:
         join = "LEFT JOIN fund_risk_metrics rm ON rm.code = r.code"
         assert join in _DCA_LIST_SQL and join in _TP_LIST_SQL
         for frag in ("rm.vol_all, rm.vol_down_all, rm.mdd_all, rm.sharpe_all,",
-                     "rm.roll_vol, rm.vol_pctile, rm.risk_score"):
+                     "rm.roll_vol, rm.vol_pctile, rm.risk_score,",
+                     "rm.osc_per_year, rm.osc_pctile"):
             assert frag in _DCA_LIST_SQL and frag in _TP_LIST_SQL
-        assert _LIST_COLS[-7:] == ["vol_all", "vol_down_all", "mdd_all",
+        assert _LIST_COLS[-9:] == ["vol_all", "vol_down_all", "mdd_all",
                                    "sharpe_all", "roll_vol", "vol_pctile",
-                                   "risk_score"]
+                                   "risk_score", "osc_per_year", "osc_pctile"]
         assert _TP_LIST_COLS == ["tp"] + _LIST_COLS
 
     def test_sort_risk_columns_map_rm_table(self):
@@ -715,7 +716,7 @@ class TestDcaRiskJoin:
         sql, _ = conn.cursor_obj.executed[1]
         assert "ORDER BY rm.vol_all ASC NULLS LAST" in sql
         for key in ("vol_down_all", "mdd_all", "sharpe_all", "roll_vol",
-                    "vol_pctile"):
+                    "vol_pctile", "osc_pctile"):
             body, conn = _fetch_dca(sort=key)
             sql, _ = conn.cursor_obj.executed[1]
             assert f"ORDER BY rm.{key} DESC NULLS LAST" in sql
@@ -737,7 +738,7 @@ class TestDcaRiskJoin:
         """行映射 round4 覆盖波动列（sharpe 也 round4，前端 toFixed(2)）。"""
         from app.dca_api import _LIST_ROUND4
         for k in ("vol_all", "vol_down_all", "mdd_all", "sharpe_all",
-                  "roll_vol", "vol_pctile"):
+                  "roll_vol", "vol_pctile", "osc_per_year", "osc_pctile"):
             assert k in _LIST_ROUND4
 
     def test_routes_accept_range_params_and_degrade(self, client, monkeypatch):
@@ -797,9 +798,10 @@ class TestRiskScoreBackfill:
     def test_ddl_has_risk_score_and_idempotent_alter(self):
         from app.dca_store import RISK_DDL, _RISK_MIGRATE
         assert "risk_score" in RISK_DDL
-        assert ("ALTER TABLE fund_risk_metrics "
-                "ADD COLUMN IF NOT EXISTS risk_score DOUBLE PRECISION;"
-                ) in _RISK_MIGRATE
+        for col in ("osc_per_year", "osc_regularity", "osc_pctile"):
+            assert col in RISK_DDL
+            assert f"ADD COLUMN IF NOT EXISTS {col} DOUBLE PRECISION" \
+                in _RISK_MIGRATE
 
     def test_ensure_risk_schema_runs_alter_and_backfill(self):
         """启动兜底：建表 → ALTER 补列 → 回填 UPDATE（幂等，重启自愈）。"""
@@ -828,10 +830,12 @@ class TestRiskScoreBackfill:
         for frag in ("percent_rank() OVER (PARTITION BY vol_all IS NULL",
                      "percent_rank() OVER (PARTITION BY vol_down_all IS NULL",
                      "percent_rank() OVER (PARTITION BY mdd_all IS NULL",
+                     "percent_rank() OVER (PARTITION BY osc_per_year IS NULL",
                      "UPDATE fund_risk_metrics rm",
                      "rm.code = t.code"):
             assert frag in sql
         assert "sharpe" not in sql   # 只用风险三指标，夏普不参与
+        assert "osc_pctile" in sql   # 震荡分位横截面同语句重算
 
 
 class TestDcaRangeFilters:

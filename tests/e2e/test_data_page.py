@@ -120,12 +120,14 @@ FUNDS_BODY = {"status": "up", "total": 2, "limit": 50, "offset": 0, "funds": [
      "unit_nav": 1.046, "pct_chg": 2.05, "navs": 6029,
      "last_date": "2026-10-23", "first_date": "2001-12-18",
      "vol_all": 0.185, "vol_down_all": 0.1201, "mdd_all": 0.2533,
-     "sharpe_all": 1.4233, "roll_vol": 0.0812, "vol_pctile": 0.6666},
+     "sharpe_all": 1.4233, "roll_vol": 0.0812, "vol_pctile": 0.6666,
+     "osc_per_year": 2.3456, "osc_pctile": 0.7777},
     {"code": "005827", "name": "易方达蓝筹精选", "fund_type": "混合型-偏股",
      "unit_nav": 1.8721, "pct_chg": -0.31, "navs": 3200,
      "last_date": "2026-10-23", "first_date": "2018-09-05",
      "vol_all": None, "vol_down_all": None, "mdd_all": None,
-     "sharpe_all": None, "roll_vol": None, "vol_pctile": None},
+     "sharpe_all": None, "roll_vol": None, "vol_pctile": None,
+     "osc_per_year": None, "osc_pctile": None},
 ]}
 FUND_NAV_BODY = {"status": "up", "code": "000001", "count": 3, "navs": [
     {"date": "2026-10-21", "unit_nav": 1.064, "accum_nav": 3.637,
@@ -143,6 +145,7 @@ FUND_RISK = {
     "vol_5y": 0.22, "vol_down_5y": 0.14, "mdd_5y": 0.35, "sharpe_5y": 0.9,
     "vol_all": 0.23, "vol_down_all": 0.15, "mdd_all": 0.42, "sharpe_all": 0.8,
     "roll_vol": 0.0812, "vol_pctile": 0.6666, "risk_score": 0.4123,
+    "osc_per_year": 2.3456, "osc_regularity": 0.8125, "osc_pctile": 0.7777,
     "as_of": "2026-10-23", "computed_at": "2026-11-17T06:00:00",
 }
 FUND_NAV_BODY_WITH_RISK = {**FUND_NAV_BODY, "risk": FUND_RISK}
@@ -250,6 +253,8 @@ class TestFundRiskDetail:
         expect(card).to_contain_text("8.1%")           # 当前滚动波动率 0.0812
         expect(card).to_contain_text("67%")            # 分位
         expect(card).to_contain_text("41%")            # 综合波动分位 risk_score 0.4123
+        expect(card).to_contain_text("78%")            # 震荡分位 osc_pctile 0.7777
+        expect(card).to_contain_text("2.35 轮/年")      # 年均规则摆动轮数
         table = card.locator(".risk-table")
         for label in ("近1年", "近3年", "近5年", "全史"):
             expect(table).to_contain_text(label)

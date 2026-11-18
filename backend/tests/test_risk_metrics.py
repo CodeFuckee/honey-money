@@ -170,7 +170,7 @@ class TestRowShape:
         vals = np.tile([1.01, 0.99], 130)[:251]
         m = _metrics(vals)
         row = risk_row("000001", m)
-        assert len(row) == 1 + len(ROW_FIELDS) == 21
+        assert len(row) == 1 + len(ROW_FIELDS) == 23
         assert row[0] == "000001"
         expected = ("000001",) + tuple(m[k] for k in ROW_FIELDS)
         assert row == expected
@@ -179,4 +179,60 @@ class TestRowShape:
         for suf in ("1y", "3y", "5y", "all"):
             for metric in ("vol", "vol_down", "mdd", "sharpe"):
                 assert f"{metric}_{suf}" in ROW_FIELDS
-        assert set(ROW_FIELDS) >= {"roll_vol", "vol_pctile", "as_of", "nav_count"}
+        assert set(ROW_FIELDS) >= {"roll_vol", "vol_pctile", "osc_per_year",
+                            "osc_regularity", "as_of", "nav_count"}
+
+
+class TestZigzagOscillation:
+    """震荡指标（2026-11-18 用户需求「找净值像余弦一样不断上上下下的基金」）：
+    zigzag ±10% 摆动检测——osc_per_year = 年均完整摆动轮数 × 规则度
+    （同向极值间隔变异系数 CV 的 1/(1+CV)，越高间隔越均匀越像余弦）。"""
+
+    def test_sine_like_high_freq_high_regularity(self):
+        """正弦净值：±20% 振幅、120 净值日一个周期 → 高频高规则。"""
+        t = np.arange(1200)
+        m = _metrics(1.0 + 0.2 * np.sin(2 * np.pi * t / 120))
+        assert m["osc_per_year"] > 1.0            # ~10 轮 / 4.76 年 × 规则度
+        assert m["osc_regularity"] > 0.8          # 间隔均匀 ≈ 余弦
+
+    def test_monotonic_ramp_zero_oscillation(self):
+        """单调上涨：无完整上下轮 → osc_per_year=0。"""
+        m = _metrics(np.linspace(1.0, 3.0, 500))
+        assert m["osc_per_year"] == 0.0
+        assert m["osc_regularity"] is None
+
+    def test_irregular_swing_low_regularity(self):
+        """周期悬殊（20 vs 200 净值日交替）→ 规则度显著低于均匀摆动。"""
+        segs, v = [], 1.0
+        for up_len, down_len in ((20, 20), (200, 200), (20, 20), (200, 200)):
+            for _ in range(up_len):               # 涨 20%（每日复合）
+                v *= 1.001 ** 1
+                segs.append(v)
+            # 精确 20%：终点重标定
+        # 改用显式构造：每段线性拉到 ±20% 再线性回
+        vals = [1.0]
+        v = 1.0
+        for up_len, down_len in ((20, 20), (200, 200), (20, 20), (200, 200)):
+            for i in range(1, up_len + 1):
+                vals.append(v * (1 + 0.2 * i / up_len))
+            v = vals[-1]
+            for i in range(1, down_len + 1):
+                vals.append(v * (1 - 0.2 * i / down_len))
+            v = vals[-1]
+        m = _metrics(np.asarray(vals))
+        sine = _metrics(1.0 + 0.2 * np.sin(
+            2 * np.pi * np.arange(len(vals)) / 80))
+        assert m["osc_regularity"] < sine["osc_regularity"]
+        assert m["osc_per_year"] > 0
+
+    def test_short_series_none(self):
+        """净值样本 < OSC_MIN_NAVS（≈1 年）→ None：年化轮数在极短样本上
+        会被放大成虚高分（曾致 0.1 年新基金以 10 轮/年霸榜）。"""
+        m = _metrics([1.0])
+        assert m["osc_per_year"] is None and m["osc_regularity"] is None
+        m = _metrics(1.0 + 0.2 * np.sin(2 * np.pi * np.arange(100) / 40))
+        assert m["osc_per_year"] is None and m["osc_regularity"] is None
+
+    def test_osc_in_row_fields_aligned(self):
+        """osc 两字段进 ROW_FIELDS（落库列序锚点）。"""
+        assert "osc_per_year" in ROW_FIELDS and "osc_regularity" in ROW_FIELDS

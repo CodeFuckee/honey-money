@@ -25,7 +25,8 @@ SELECT r.code, r.name, r.fund_type, r.alive, r.scale_yi, r.scale_date,
        r.gap_avg_days_disc, r.gap_avg_days_nom,
        t.dd_current, t.days_since_peak, t.dip_band,
        rm.vol_all, rm.vol_down_all, rm.mdd_all, rm.sharpe_all,
-       rm.roll_vol, rm.vol_pctile, rm.risk_score
+       rm.roll_vol, rm.vol_pctile, rm.risk_score,
+       rm.osc_per_year, rm.osc_pctile
 FROM fund_dca_result r
 LEFT JOIN fund_dip_timing t ON t.code = r.code
 LEFT JOIN fund_risk_metrics rm ON rm.code = r.code
@@ -83,6 +84,7 @@ _SORTABLE = {
     "vol_all", "vol_down_all", "mdd_all", "sharpe_all", "roll_vol",
     "vol_pctile",   # 波动指标列（LEFT JOIN fund_risk_metrics，全史口径）
     "risk_score",   # 综合波动分位（三指标横截面等权，越低越稳）
+    "osc_pctile",   # 震荡分位（zigzag ±10% 频率×规则度，越高越像余弦）
 }
 # 费用口径后缀（gross=不含费沿用原列；disc=申购一折；nom=申购名义）。
 # fee 只影响 ORDER BY 与统计卡的列替换；SELECT 恒返回全部口径列，
@@ -95,7 +97,8 @@ _FEE_SORTABLE = {"w10_xirr", "full_xirr", "w10_profit_rate", "full_profit_rate",
 _T_SORTABLE = {"dd_current", "days_since_peak"}
 # 排序落在波动指标表（rm 别名）的字段（费用口径无关，同 scale_yi）
 _RM_SORTABLE = {"vol_all", "vol_down_all", "mdd_all", "sharpe_all",
-                "roll_vol", "vol_pctile", "risk_score"}
+                "roll_vol", "vol_pctile", "risk_score",
+                "osc_per_year", "osc_pctile"}
 
 
 def _list_sort_col(sort_base: str, suffix: str) -> str:
@@ -179,7 +182,8 @@ _LIST_COLS = ["code", "name", "fund_type", "alive", "scale_yi",
               "dd_current", "days_since_peak", "dip_band",
               # 波动指标列（LEFT JOIN fund_risk_metrics；全史口径，缺行为 NULL）
               "vol_all", "vol_down_all", "mdd_all", "sharpe_all",
-              "roll_vol", "vol_pctile", "risk_score"]
+              "roll_vol", "vol_pctile", "risk_score",
+              "osc_per_year", "osc_pctile"]
 # 浮点保留 4 位的字段（口径变体与原字段同规则）
 _LIST_ROUND4 = ("w10_xirr", "full_xirr", "w10_profit_rate",
                 "full_profit_rate", "w10_xirr_disc", "w10_xirr_nom",
@@ -187,7 +191,8 @@ _LIST_ROUND4 = ("w10_xirr", "full_xirr", "w10_profit_rate",
                 "w10_profit_rate_disc", "w10_profit_rate_nom",
                 "full_profit_rate_disc", "full_profit_rate_nom",
                 "vol_all", "vol_down_all", "mdd_all", "sharpe_all",
-                "roll_vol", "vol_pctile", "risk_score")
+                "roll_vol", "vol_pctile", "risk_score",
+                "osc_per_year", "osc_pctile")
 
 
 def _safe(fn, default):
@@ -653,7 +658,8 @@ SELECT r.tp, r.code, r.name, r.fund_type, r.alive, r.scale_yi, r.scale_date,
        r.gap_avg_days_disc, r.gap_avg_days_nom,
        t.dd_current, t.days_since_peak, t.dip_band,
        rm.vol_all, rm.vol_down_all, rm.mdd_all, rm.sharpe_all,
-       rm.roll_vol, rm.vol_pctile, rm.risk_score
+       rm.roll_vol, rm.vol_pctile, rm.risk_score,
+       rm.osc_per_year, rm.osc_pctile
 FROM fund_dca_tp_result r
 LEFT JOIN fund_dip_timing t ON t.code = r.code
 LEFT JOIN fund_risk_metrics rm ON rm.code = r.code

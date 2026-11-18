@@ -74,3 +74,22 @@ class TestRiskScoreDetailCard:
         card = page.locator(".p-dialog .dc-item", has_text="综合波动分位")
         expect(card).to_be_visible()
         expect(card).to_contain_text("41%")
+
+
+class TestOscPctileColumn:
+    def test_osc_pctile_renders(self, servers, page, mock_dca):
+        """P0 震荡分位列：0.7777 → 78%（越高净值越规律地上上下下）；无指标行 —。"""
+        _, frontend_port = servers
+        open_dca(page, frontend_port)
+        row = page.locator(".browse-pv tbody tr", has_text="中欧时代共赢")
+        expect(row).to_contain_text("78%")
+        other = page.locator(".browse-pv tbody tr", has_text="招商中证白酒")
+        expect(other).to_contain_text("—")
+
+    def test_osc_pctile_sort_sends_param(self, servers, page, mock_dca):
+        """P1 点「震荡分位」列头 → 服务端排序请求带 sort=osc_pctile。"""
+        _, frontend_port = servers
+        open_dca(page, frontend_port)
+        page.locator(".browse-pv th", has_text="震荡分位").click()
+        page.wait_for_timeout(400)
+        assert any("sort=osc_pctile" in u for u in mock_dca), mock_dca

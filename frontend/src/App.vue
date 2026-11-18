@@ -586,6 +586,7 @@ const ddpct = v => v == null ? '—' : (v * 100).toFixed(1) + '%'
 const volpct = v => v == null ? '—' : (v * 100).toFixed(1) + '%'          // 波动率
 const mddneg = v => v == null ? '—' : (v > 0 ? '-' : '') + (v * 100).toFixed(1) + '%' // 最大回撤（存正数显负号）
 const pctile = v => v == null ? '—' : Math.round(v * 100) + '%'           // 波动率历史分位
+const oscyr = v => v == null ? '—' : v.toFixed(2) + ' 轮/年'               // 年均规则摆动轮数
 const sharpe2 = v => v == null ? '—' : v.toFixed(2)                        // 夏普（裸数值两位）
 // 五维度区间筛选（空=不筛；回撤输入正数幅度）。应用后服务端过滤（分页
 // 表格客户端筛当前页无意义）；筛选面板常显（2026-11-17 用户反馈，去折叠
@@ -631,6 +632,7 @@ const DCA_TOGGLE_COLS = [
   { key: 'sharpe_all', label: '夏普' },
   { key: 'vol_pctile', label: '波动率分位' },
   { key: 'risk_score', label: '综合波动分位' },
+  { key: 'osc_pctile', label: '震荡分位' },
   { key: 'gap_avg_days', label: '止盈间隔' },
   { key: 'w10_rounds', label: '止盈次数' },
   { key: 'w10_profit_rate', label: '总收益率' },
@@ -2801,6 +2803,10 @@ watch(
                   <template #header><span title="当前 60 日滚动年化波动率在该基金自身全史滚动序列中的百分位：越低=当前比历史更平静，越高=更颠簸">波动率分位</span></template>
                   <template #body="{ data }">{{ pctile(data.vol_pctile) }}</template>
                 </Column>
+                <Column field="osc_pctile" sortable bodyClass="num-col" style="width: 100px">
+                  <template #header><span title="震荡分位：全史净值 zigzag（±10% 确认反转）检测的年均规则摆动轮数（频率 × 间隔均匀度）在全市场的百分位排名，越高 = 净值越像余弦一样规律地上上下下">震荡分位</span></template>
+                  <template #body="{ data }">{{ pctile(data.osc_pctile) }}</template>
+                </Column>
                 <Column field="navs" header="净值条数" style="width: 100px">
                   <template #body="{ data }">{{ data.navs || 0 }}</template>
                 </Column>
@@ -2812,7 +2818,7 @@ watch(
                 </Column>
               </DataTable>
             </div>
-            <p class="note">来源：本地 PG（fund_basic / fund_nav，任务源 fund）· 点击行查看基金净值走势与明细 · 货币基金无净值走势不在此列 · 波动指标列（年化/下行波动率、最大回撤、夏普）为全史口径 = 全部历史净值（2026-11-18 起由近1年改全史；样本不足 20 个收益为 —），日收益率取复权日增长率、年化系数 √252、无风险利率 0，日更任务（回测）顺带快照；分位 = 当前 60 日滚动波动率在该基金自身全史滚动序列中的百分位，越低越平静——日更未跑过时全列为 —</p>
+            <p class="note">来源：本地 PG（fund_basic / fund_nav，任务源 fund）· 点击行查看基金净值走势与明细 · 货币基金无净值走势不在此列 · 波动指标列（年化/下行波动率、最大回撤、夏普）为全史口径 = 全部历史净值（2026-11-18 起由近1年改全史；样本不足 20 个收益为 —），日收益率取复权日增长率、年化系数 √252、无风险利率 0，日更任务（回测）顺带快照；分位 = 当前 60 日滚动波动率在该基金自身全史滚动序列中的百分位，越低越平静 · 震荡分位 = 全史净值 zigzag（±10% 确认反转）年均规则摆动轮数的横截面百分位，越高 = 净值越规律地上上下下——日更未跑过时全列为 —</p>
           </template>
 
           <!-- ===== 定投止盈回测排行（离线回测快照：scripts/fund_dca_backtest.py → app.dca_store 导入） ===== -->
@@ -3127,6 +3133,10 @@ watch(
                   <template #header><span title="综合波动分位：年化波动率/下行波动率/最大回撤三项在全市场同类基金中的百分位排名等权平均（percent_rank），越低越稳——一眼排序三指标">综合波动分位</span></template>
                   <template #body="{ data }">{{ pctile(data.risk_score) }}</template>
                 </Column>
+                <Column field="osc_pctile" style="width: 100px" sortable bodyClass="num-col" v-if="colVisible('osc_pctile')">
+                  <template #header><span title="震荡分位：全史净值 zigzag（±10% 确认反转）检测的年均规则摆动轮数（频率 × 间隔均匀度）在全市场的百分位排名，越高 = 净值越像余弦一样规律地上上下下，定投止盈机会越频繁">震荡分位</span></template>
+                  <template #body="{ data }">{{ pctile(data.osc_pctile) }}</template>
+                </Column>
                 <Column field="w10_rounds" header="止盈次数" style="width: 88px" sortable bodyClass="num-col" v-if="colVisible('w10_rounds')">
                   <template #body="{ data }">{{ dcaFeeVal(data, 'w10_rounds') ?? '—' }}</template>
                 </Column>
@@ -3166,7 +3176,7 @@ watch(
                 </Column>
               </DataTable>
             </div>
-            <p class="note">口径：每月首个净值日投入固定金额，任一净值日持仓收益达止盈线即全仓赎回并重开新一轮（分红再投）；排行/统计/散点/详情共用同一费用口径，搜索栏或散点区可切换（不含费 / 含费·申购一折 / 含费·申购名义，赎回费各口径一致按持有天数阶梯收取）；排行/统计/散点共用同一基金类型口径，搜索栏或散点区可切换（默认仅权益类：股票型/偏股·灵活·平衡混合/股票指数/海外权益共 8 类，全市场可切回，债基·FOF·货币·偏债不在权益类内） · 统计卡为当前类型与在市口径全集分位，不随搜索与区间筛选变化 · 新基金（回测窗口 &lt;90 天）年化留空 · 「当前回撤」= 复权净值距历史最高的跌幅（日更顺带刷新），非在市基金无此数据；「甜蜜点」结论来自 2015~2026 权益基金 98 万起点历史模拟（-25~-30% 回撤起定投首轮止盈中位 582 天、成功率 63.2%、年化 32.0%，20% 止盈线含费口径） · 波动指标列（年化/下行波动率、最大回撤、夏普 + 波动率分位）为基金净值快照，全史口径（全部历史复权净值，2026-11-18 起由近1年改全史；复权日增长率、√252 年化、无风险利率 0，fund_risk_metrics 日更顺带刷新，样本不足 20 个收益为 —），与回测口径独立、不随费用/止盈点切换 · 「综合波动分位」= 全史年化波动率/下行波动率/最大回撤三项在全市场同类基金中的百分位排名等权平均（percent_rank，0~100%，越低越稳），日更顺带重算（三指标缺任一按可得项平均，全缺为 —） · 数据为离线回测快照，重跑 scripts/fund_dca_backtest.py 并经 app.dca_store 导入后刷新 · 点行或「详情」查看每轮止盈明细 · 止盈点切换（搜索栏按钮组或对比区块行/圆点）仅改排行/统计/明细数据源，散点/分箱固定 20% 口径 · 历史统计不构成任何操作建议</p>
+            <p class="note">口径：每月首个净值日投入固定金额，任一净值日持仓收益达止盈线即全仓赎回并重开新一轮（分红再投）；排行/统计/散点/详情共用同一费用口径，搜索栏或散点区可切换（不含费 / 含费·申购一折 / 含费·申购名义，赎回费各口径一致按持有天数阶梯收取）；排行/统计/散点共用同一基金类型口径，搜索栏或散点区可切换（默认仅权益类：股票型/偏股·灵活·平衡混合/股票指数/海外权益共 8 类，全市场可切回，债基·FOF·货币·偏债不在权益类内） · 统计卡为当前类型与在市口径全集分位，不随搜索与区间筛选变化 · 新基金（回测窗口 &lt;90 天）年化留空 · 「当前回撤」= 复权净值距历史最高的跌幅（日更顺带刷新），非在市基金无此数据；「甜蜜点」结论来自 2015~2026 权益基金 98 万起点历史模拟（-25~-30% 回撤起定投首轮止盈中位 582 天、成功率 63.2%、年化 32.0%，20% 止盈线含费口径） · 波动指标列（年化/下行波动率、最大回撤、夏普 + 波动率分位）为基金净值快照，全史口径（全部历史复权净值，2026-11-18 起由近1年改全史；复权日增长率、√252 年化、无风险利率 0，fund_risk_metrics 日更顺带刷新，样本不足 20 个收益为 —），与回测口径独立、不随费用/止盈点切换 · 「综合波动分位」= 全史年化波动率/下行波动率/最大回撤三项在全市场同类基金中的百分位排名等权平均（percent_rank，0~100%，越低越稳），日更顺带重算（三指标缺任一按可得项平均，全缺为 —） · 「震荡分位」= 全史净值 zigzag（±10% 确认反转）年均规则摆动轮数（频率 × 间隔均匀度）的横截面百分位，越高 = 净值越规律地上上下下 · 数据为离线回测快照，重跑 scripts/fund_dca_backtest.py 并经 app.dca_store 导入后刷新 · 点行或「详情」查看每轮止盈明细 · 止盈点切换（搜索栏按钮组或对比区块行/圆点）仅改排行/统计/明细数据源，散点/分箱固定 20% 口径 · 历史统计不构成任何操作建议</p>
 
 
             <!-- ===== 年限 × 规模 三维散点（每基金一点） + 分箱统计 ===== -->
@@ -3357,6 +3367,10 @@ watch(
                 <div class="dc-item">
                   <div class="dc-label" title="综合波动分位：全史年化波动率/下行波动率/最大回撤三项在全市场同类基金中的百分位排名等权平均（percent_rank），越低越稳——一眼比较三指标">综合波动分位<span class="dc-hint">全市场</span></div>
                   <div class="dc-value">{{ pctile(dcaRoundsRisk.risk_score) }}</div>
+                </div>
+                <div class="dc-item">
+                  <div class="dc-label" title="震荡分位：全史净值 zigzag（±10% 确认反转）检测的年均规则摆动轮数（频率 × 间隔均匀度）在全市场的百分位排名，越高 = 净值越像余弦一样规律地上上下下">震荡分位<span class="dc-hint">全市场</span></div>
+                  <div class="dc-value">{{ pctile(dcaRoundsRisk.osc_pctile) }} <span class="dc-hint">年均 {{ oscyr(dcaRoundsRisk.osc_per_year) }}</span></div>
                 </div>
               </div>
               <div v-if="dcaRoundsRisk" class="risk-table-wrap">
@@ -3580,6 +3594,10 @@ watch(
                 <div class="dc-item">
                   <div class="dc-label" title="综合波动分位：全史年化波动率/下行波动率/最大回撤三项在全市场同类基金中的百分位排名等权平均（percent_rank），越低越稳——一眼比较三指标">综合波动分位<span class="dc-hint">全市场</span></div>
                   <div class="dc-value">{{ pctile(fundRisk.risk_score) }}</div>
+                </div>
+                <div class="dc-item">
+                  <div class="dc-label" title="震荡分位：全史净值 zigzag（±10% 确认反转）检测的年均规则摆动轮数（频率 × 间隔均匀度）在全市场的百分位排名，越高 = 净值越像余弦一样规律地上上下下">震荡分位<span class="dc-hint">全市场</span></div>
+                  <div class="dc-value">{{ pctile(fundRisk.osc_pctile) }} <span class="dc-hint">年均 {{ oscyr(fundRisk.osc_per_year) }}</span></div>
                 </div>
               </div>
               <div class="risk-table-wrap">

@@ -24,12 +24,16 @@ ANNUALIZE = float(np.sqrt(252))   # 年化系数（与 perf_metrics sharpe 同�
 ROLL_WINDOW = 60                  # 滚动波动率窗口（收益个数）
 MIN_RETURNS = 20                  # 单窗口指标最少收益样本
 WINDOWS = (("1y", 250), ("3y", 750), ("5y", 1250), ("all", None))
+OSC_THETA = 0.10                  # 震荡检测反转阈值（净值 ±10% 确认一次摆动）
+OSC_MIN_NAVS = 250                # 震荡指标最少净值日（≈1 年：年化轮数在极短
+                                  # 样本上会被放大成无意义的虚高分）
 
 ROW_FIELDS = tuple(
     f"{metric}_{suf}"
     for suf, _ in WINDOWS
     for metric in ("vol", "vol_down", "mdd", "sharpe")
-) + ("roll_vol", "vol_pctile", "as_of", "nav_count")
+) + ("roll_vol", "vol_pctile", "osc_per_year", "osc_regularity",
+     "as_of", "nav_count")
 
 
 def _window_metrics(rets: np.ndarray, adj_win: np.ndarray) -> tuple:
@@ -63,6 +67,66 @@ def _rolling_vol(rets: np.ndarray) -> tuple:
     return round(cur, 4), round(float((roll <= cur).mean()), 4)
 
 
+def zigzag_oscillation(adj, theta: float = OSC_THETA) -> dict:
+    """全史净值的 zigzag 摆动检测（±theta 确认反转，2026-11-18 震荡分位）。
+
+    「上上下下」一轮 = 一个低点极值经上行 leg 触达高点极值、再经下行 leg
+    回落的完整往返；间隔（同向极值间净值日个数）越均匀越像余弦。
+    极值一律「确认制」：反向变动达 theta 才入列，趋势中的未确认极值不记
+    （单调上涨永不确认高点 → 零轮）。
+
+    - osc_per_year：年均规则摆动轮数 = 完整轮数 / (净值日数/252)
+      × 规则度 1/(1+CV)；无完整轮 → 0.0；净值样本 < OSC_MIN_NAVS → None
+      （年化轮数在极短样本上会被放大成虚高分，如 0.1 年 1 轮 → 10 轮/年）；
+    - osc_regularity：规则度（同向极值间隔 < 2 个 → None）。
+    横截面百分位（osc_pctile）由 dca_store 回填 SQL 统一计算。
+    """
+    adj = np.asarray(adj, dtype=float)
+    n = adj.size
+    if n < OSC_MIN_NAVS:
+        return {"osc_per_year": None, "osc_regularity": None}
+    pivots: list[int] = []      # 已确认极值点索引，低/高交替
+    direction = 0               # 0 未定向 / 1 上行找高点 / -1 下行找低点
+    hi = lo = ext = 0
+    for i in range(1, n):
+        if adj[i] > adj[hi]:
+            hi = i
+        if adj[i] < adj[lo]:
+            lo = i
+        if direction == 0:
+            if adj[hi] >= adj[lo] * (1 + theta):
+                pivots.append(lo)       # 低点确认（首个反向变动起点）
+                direction = 1
+                ext = hi
+            elif adj[lo] <= adj[hi] * (1 - theta):
+                pivots.append(hi)       # 高点确认（自高点回落起步）
+                direction = -1
+                ext = lo
+        elif direction == 1:
+            if adj[i] > adj[ext]:
+                ext = i
+            elif adj[i] <= adj[ext] * (1 - theta):
+                pivots.append(ext)      # 高点确认
+                direction = -1
+                ext = i
+        else:
+            if adj[i] < adj[ext]:
+                ext = i
+            elif adj[i] >= adj[ext] * (1 + theta):
+                pivots.append(ext)      # 低点确认
+                direction = 1
+                ext = i
+    cycles = max(len(pivots) - 1, 0) // 2
+    years = n / 252.0
+    freq = cycles / years if years > 0 else 0.0
+    # 同向极值间隔（净值日个数）：低点列 pivots[0::2]、高点列 pivots[1::2]
+    durs = [b - a for a, b in zip(pivots, pivots[2:])]
+    reg = round(1.0 / (1.0 + float(np.std(durs, ddof=1) / np.mean(durs))), 4) \
+        if len(durs) >= 2 and np.mean(durs) > 0 else None
+    osc = round(freq * (reg if reg is not None else 1.0), 4)
+    return {"osc_per_year": osc, "osc_regularity": reg}
+
+
 def compute_risk_metrics(dates, adj) -> dict:
     """单基金风险指标（ROW_FIELDS 各键）；净值不足 2 个 → 全 None 行。"""
     adj = np.asarray(adj, dtype=float)
@@ -84,6 +148,7 @@ def compute_risk_metrics(dates, adj) -> dict:
         out[f"vol_down_{suf}"] = vol_down
         out[f"mdd_{suf}"] = mdd
         out[f"sharpe_{suf}"] = sharpe
+    out.update(zigzag_oscillation(adj))
     return out
 
 

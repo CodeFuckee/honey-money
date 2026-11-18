@@ -36,7 +36,7 @@ LIST_BODY = {
          "age_years": 2.9,
          "vol_all": 0.185, "vol_down_all": 0.1201, "mdd_all": 0.2533,
          "sharpe_all": 1.4233, "roll_vol": 0.0812, "vol_pctile": 0.6666,
-         "risk_score": 0.4123,
+         "risk_score": 0.4123, "osc_per_year": 2.3456, "osc_pctile": 0.7777,
          "w10_start": "2023-11-28", "w10_end": "2026-10-28", "w10_months": 36,
          "w10_rounds": 6, "w10_invested": 36000, "w10_final_value": 42480,
          "w10_profit_rate": 0.18, "w10_xirr": 1.003, "gap_avg_days": 95.4,
@@ -48,7 +48,7 @@ LIST_BODY = {
          "age_years": 10.4,
          "vol_all": None, "vol_down_all": None, "mdd_all": None,
          "sharpe_all": None, "roll_vol": None, "vol_pctile": None,
-         "risk_score": None,
+         "risk_score": None, "osc_per_year": None, "osc_pctile": None,
          "w10_start": "2016-10-31", "w10_end": "2026-10-28", "w10_months": 121,
          "w10_rounds": 7, "w10_invested": 121000, "w10_final_value": 102850,
          "w10_profit_rate": -0.15, "w10_xirr": -0.147, "gap_avg_days": None,
@@ -450,7 +450,9 @@ class TestFundDcaPage:
                          "mdd_5y": None, "sharpe_5y": None, "vol_all": 0.23,
                          "vol_down_all": 0.15, "mdd_all": 0.42,
                          "sharpe_all": 0.8, "roll_vol": 0.0812,
-                         "vol_pctile": 0.6666, "as_of": "2026-10-23",
+                         "vol_pctile": 0.6666, "risk_score": 0.4123,
+                         "osc_per_year": 2.3456, "osc_regularity": 0.8125,
+                         "osc_pctile": 0.7777, "as_of": "2026-10-23",
                          "computed_at": "2026-11-17T06:00:00"}})))
         page.route("**/api/funds/dca/019387/rounds*", lambda route: (
             calls.append(route.request.url),
@@ -487,6 +489,8 @@ class TestFundDcaPage:
         expect(page.locator(".p-dialog")).to_contain_text("-42.0%")  # mdd_all 0.42 显负号
         expect(page.locator(".p-dialog")).to_contain_text("0.80")    # sharpe_all
         expect(page.locator(".p-dialog")).to_contain_text("67%")
+        expect(page.locator(".p-dialog")).to_contain_text("78%")   # 震荡分位卡 osc_pctile 0.7777
+        expect(page.locator(".p-dialog")).to_contain_text("2.35 轮/年")
         expect(page.locator(".p-dialog")).to_contain_text("快照截至 2026-10-23")
         # 注意：Vue DOM API 建表不会自动插入 tbody，tr 直接挂在 table 下；
         # 弹窗现含两张表：止盈明细 1+2 行 + 风险窗口对照 1+4 行 = 8 tr

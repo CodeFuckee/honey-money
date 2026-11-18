@@ -437,11 +437,13 @@ class TestBarsAdjust:
 
 # 基金列表第二段查询返回行（code, name, fund_type, unit_nav, pct_chg,
 # nav_date, navs, first_date, vol_all, vol_down_all, mdd_all, sharpe_all,
-# roll_vol, vol_pctile）——后 6 列 LEFT JOIN fund_risk_metrics（可为 NULL，全史口径）
+# roll_vol, vol_pctile, osc_per_year, osc_pctile）——后 8 列 LEFT JOIN
+# fund_risk_metrics（可为 NULL，全史口径）
 FUND_PAGE_ROW = ("000001", "华夏成长混合", "混合型-灵活",
                  1.046012, 2.054, dt.date(2026, 10, 23),
                  6029, dt.date(2001, 12, 18),
-                 0.1850, 0.1201, 0.2533, 1.4233, 0.0812, 0.6666)
+                 0.1850, 0.1201, 0.2533, 1.4233, 0.0812, 0.6666,
+                 2.3456, 0.7777)
 # 基金净值明细行（nav_date, unit_nav, accum_nav, pct_chg, unit_money, source）
 FUND_NAV_NEW = (dt.date(2026, 10, 23), 1.046, 3.619, 2.05, "0.018", "fund_em")
 FUND_NAV_OLD = (dt.date(2026, 10, 22), 1.025, 3.598, -3.67, None, "fund_em")
@@ -479,7 +481,7 @@ class TestFundList:
         assert "LEFT JOIN fund_risk_metrics rm" in ids_sql
         assert ids_params == ("华夏", "%华夏%", "%华夏%", 50, 0)
         assert "fund_nav" in page_sql and "LATERAL" in page_sql
-        assert "rm.vol_all" in page_sql           # 波动指标列随页透出（全史）
+        assert "rm.osc_pctile" in page_sql        # 波动+震荡指标列随页透出
         assert page_params == (["000001"],)       # 只聚合当页代码
         assert "fund_basic b" in cnt_sql and "ILIKE" in cnt_sql
         assert cnt_params == ("华夏", "%华夏%", "%华夏%")
@@ -491,10 +493,12 @@ class TestFundList:
         assert row["navs"] == 6029
         assert row["last_date"] == "2026-10-23"
         assert row["first_date"] == "2001-12-18"
-        assert row["vol_all"] == 0.185            # round 4 位（全史口径）
+        assert row["osc_per_year"] == 2.3456      # round 4 位（全史口径）
+        assert row["osc_pctile"] == 0.7777
         assert row["vol_down_all"] == 0.1201
         assert row["mdd_all"] == 0.2533
         assert row["sharpe_all"] == 1.4233
+        assert row["vol_all"] == 0.185            # round 4 位（全史口径）
         assert row["roll_vol"] == 0.0812
         assert row["vol_pctile"] == 0.6666
 
@@ -509,8 +513,8 @@ class TestFundList:
 
     def test_sort_metric_desc(self, monkeypatch):
         """波动指标排序：白名单列落 rm 表 + DESC NULLS LAST（无行沉底）。"""
-        _, conn = self._fetch(monkeypatch, sort="vol_all", order="desc")
-        assert "ORDER BY rm.vol_all DESC NULLS LAST" in conn.executed[0][0]
+        _, conn = self._fetch(monkeypatch, sort="osc_pctile", order="desc")
+        assert "ORDER BY rm.osc_pctile DESC NULLS LAST" in conn.executed[0][0]
 
     def test_sort_metric_asc(self, monkeypatch):
         _, conn = self._fetch(monkeypatch, sort="vol_pctile", order="asc")
@@ -518,7 +522,7 @@ class TestFundList:
 
     def test_sort_all_whitelist_keys_map_to_rm(self, monkeypatch):
         import app.browse as browse_mod
-        for key in ("vol_down_all", "mdd_all", "sharpe_all"):
+        for key in ("vol_down_all", "mdd_all", "sharpe_all", "osc_pctile"):
             _, conn = self._fetch(monkeypatch, sort=key, order="desc")
             assert f"ORDER BY rm.{key} DESC NULLS LAST" in conn.executed[0][0]
 
@@ -556,10 +560,11 @@ class TestFundNavs:
 
 
 # 基金风险指标行（fund_risk_metrics 单行：16 窗口指标 + roll_vol +
-# vol_pctile + risk_score + as_of + computed_at），与 _FUND_RISK_SQL 列序逐位对齐
+# vol_pctile + risk_score + osc 三列 + as_of + computed_at），与
+# _FUND_RISK_SQL 列序逐位对齐
 FUND_RISK_ROW = tuple([0.1850, 0.1201, 0.2533, 1.4233] * 4)
-FUND_RISK_ROW += (0.0812, 0.6666, 0.4123, dt.date(2026, 10, 23),
-                  dt.datetime(2026, 11, 17, 6, 0, 0))
+FUND_RISK_ROW += (0.0812, 0.6666, 0.4123, 2.3456, 0.8125, 0.7777,
+                  dt.date(2026, 10, 23), dt.datetime(2026, 11, 17, 6, 0, 0))
 
 
 class TestFundNavsRisk:
@@ -605,6 +610,9 @@ class TestFundNavsRisk:
         assert risk["vol_all"] == 0.1850 and risk["sharpe_all"] == 1.4233
         assert risk["roll_vol"] == 0.0812 and risk["vol_pctile"] == 0.6666
         assert risk["risk_score"] == 0.4123   # 综合波动分位（三指标横截面等权）
+        assert risk["osc_per_year"] == 2.3456  # 年均规则摆动轮数
+        assert risk["osc_regularity"] == 0.8125
+        assert risk["osc_pctile"] == 0.7777   # 震荡分位（越高越像余弦）
         assert risk["as_of"] == "2026-10-23"
         assert risk["computed_at"] == "2026-11-17T06:00:00"
 
@@ -634,8 +642,8 @@ class TestFundsSortRoute:
                     "offset": offset, "funds": []}
 
         monkeypatch.setattr(main_mod, "fetch_fund_list", fake_funds)
-        client.get("/api/funds", params={"sort": "vol_1y", "order": "desc"})
-        assert captured["sort"] == "vol_1y" and captured["order"] == "desc"
+        client.get("/api/funds", params={"sort": "osc_pctile", "order": "desc"})
+        assert captured["sort"] == "osc_pctile" and captured["order"] == "desc"
         client.get("/api/funds")
         assert captured["sort"] == "code" and captured["order"] == "asc"
 
