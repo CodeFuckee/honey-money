@@ -1054,6 +1054,10 @@ function renderDcaRoundsChart() {
   dcaRoundsChart.setOption(opt)
   window.__dcaRoundsChart = dcaRoundsChart      // E2E 断言钩子（series 检查）
 }
+// 弹窗宽度随视口（100vw-10vh）变化，窗口缩放时图表跟随重排
+const _onDcaRoundsResize = () => dcaRoundsChart && dcaRoundsChart.resize()
+onMounted(() => window.addEventListener('resize', _onDcaRoundsResize))
+onUnmounted(() => window.removeEventListener('resize', _onDcaRoundsResize))
 const gapLabel = d => d == null ? '—' : `${d} 天（≈${(d / 30.44).toFixed(1)} 月）`
 
 function disposeDcaScatterChart() {
@@ -3294,9 +3298,17 @@ watch(
               <div v-else class="browse-empty">散点数据加载中…</div>
             </div>
             <!-- ===== 每次止盈明细弹窗（点排行行或「详情」按钮触发） ===== -->
+            <!-- 尺寸 100vw-10vh × 90vh（2026-11-18 用户反馈四边距应统一）：
+                 PrimeVue 弹窗在遮罩内居中，高度上限 90%（=90vh）→ 上下边距 5vh，
+                 宽度跟随取 100vw-10vh 使左右边距同为 5vh——四边严格等距；
+                 高度钉死 90vh 后内容不足部分由净值曲线区弹性吸收（.dca-rounds-body），
+                 1920×1080 下由固定 1000×902（左右各空 460px）变为 1812×972 铺满 -->
             <Dialog v-model:visible="dcaRoundsVisible" modal
               :header="dcaRoundsFund ? `${dcaRoundsFund.code} ${dcaRoundsFund.name} · 每次止盈明细${dcaRoundsFund.age_years != null ? '（运作 ' + dcaRoundsFund.age_years + ' 年）' : ''}` : '每次止盈明细'"
-              :style="{ width: '1000px' }" @hide="disposeDcaRoundsChart">
+              :style="{ width: 'calc(100vw - 10vh)', height: '90vh' }" @hide="disposeDcaRoundsChart">
+              <div class="dca-rounds-body">
+              <!-- 两段按钮组同行排布（body 为 flex column 会块化子元素，内包一层恢复行内流） -->
+              <div class="dca-rounds-segrow">
               <div class="src-seg" v-if="!STATIC_MODE" style="margin: 0 0 10px"
                    title="切换止盈线：下方统计与轮次表跟随；曲线同时叠加全部档位止盈点（颜色=档位，实心大三角=当前查看档位）；不影响页面排行阈值">
                 <button v-for="t in DCA_TP_OPTIONS" :key="t"
@@ -3312,6 +3324,7 @@ watch(
                         :class="{ active: dcaRoundsFee === o.key }"
                         @click="onDcaRoundsFeeChange(o.key)"
                         :data-modal-fee="o.key">{{ o.label }}</button>
+              </div>
               </div>
               <div class="dc-grid" style="grid-template-columns: repeat(3, 1fr); margin: 0 0 12px">
                 <div class="dc-item">
@@ -3391,8 +3404,7 @@ watch(
               </div>
               <p v-if="dcaRoundsRisk" class="note" style="margin: 0 0 8px">波动指标口径：复权日增长率（分红再投）· 年化系数 √252、无风险利率 0 · 指标卡为全史口径（全部历史净值，2026-11-18 起由近1年改全史），下方对照表可看近1/3/5 年窗口 · 快照截至 {{ dcaRoundsRisk.as_of || '—' }}，日更顺带生成 · 与回测指标独立（回测口径为策略收益，此为基金净值波动）</p>
               <p v-else class="note" style="margin: 0 0 8px">波动指标待生成：日更任务（回测）跑过一轮后在此展示（静态快照模式不含）</p>
-              <div v-show="dcaRoundsNavs.length" ref="dcaRoundsChartEl"
-                style="width: 100%; height: 300px; margin-bottom: 10px"></div>
+              <div v-show="dcaRoundsNavs.length" ref="dcaRoundsChartEl" class="dca-rounds-chart"></div>
               <p class="note" style="margin: 0 0 8px"
                 v-if="dcaRounds.rounds?.length && dcaRoundsNavs.length">
                 ▲ = 每轮止盈卖点（颜色对应止盈线档位，实心大三角=当前查看档位）· 曲线为复权净值（分红再投，窗口起点=1，与回测同口径）
@@ -3426,6 +3438,7 @@ watch(
               </div>
               <div v-else-if="dcaRounds.status === 'loading'" class="browse-empty">加载中…</div>
               <div v-else class="browse-empty">该基金在统计窗口内没有止盈记录（从未达到 +{{ dcaTpLabel(dcaRoundsTp) }}）</div>
+              </div>
             </Dialog>
 
             <!-- ===== 分箱格点击 → 格内基金清单 ===== -->
@@ -4855,6 +4868,11 @@ body {
   padding: 2px 10px; white-space: nowrap; }
 .dc-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
   gap: 12px 28px; margin-top: 12px; }
+/* 止盈明细弹窗内容纵向弹性布局（弹窗钉死 90vh，四边边距统一 5vh）：
+   各区块禁止压缩，净值曲线区吸收内容不足时的剩余高度（内容超出则弹窗滚动） */
+.dca-rounds-body { display: flex; flex-direction: column; height: 100%; }
+.dca-rounds-body > * { flex-shrink: 0; }
+.dca-rounds-chart { flex: 1 1 auto; min-height: 300px; width: 100%; margin-bottom: 10px; }
 .dc-label { font-size: 12px; color: #5a6b85; }
 .dc-value { font-size: 16px; font-weight: 600; margin-top: 2px; }
 .dc-value .pos { color: #da1e28; }   /* 红涨（同 .lm-v.chg-up 口径） */

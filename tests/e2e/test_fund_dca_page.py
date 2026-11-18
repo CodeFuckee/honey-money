@@ -18,6 +18,8 @@
 - E2E-440 波动指标五列渲染（数值格式化 + 无指标行 — 占位）；
 - E2E-441 点「年化波动率」列头 → sort=vol_all&order=asc 服务端排序；
 - E2E-442 弹窗风险指标卡（navs 响应 risk 附带，五卡 + 分位）。
+- E2E-443 弹窗四边边距统一（宽度 100vw-10vh × 高度 90vh，遮罩居中后四边
+  gap 同为 5vh；弹窗内两段按钮组保持同行）。
 运行：python -m pytest tests/e2e/test_fund_dca_page.py
 """
 
@@ -524,6 +526,42 @@ class TestFundDcaPage:
         expect(page.locator(".p-dialog")).to_be_visible()
         expect(page.locator(".p-dialog")).to_contain_text("没有止盈记录")
         assert len(calls) == 1, calls
+
+    def test_dialog_uniform_margins(self, servers, page, mock_dca):
+        """E2E-443：详情弹窗四边边距统一（2026-11-18 用户反馈「四边距统一
+        大小、左右两边太空」）——尺寸 100vw-10vh × 90vh，遮罩内居中后四边
+        gap 同为 5vh；弹窗内止盈线/费率两段按钮组保持同行
+        （.dca-rounds-body 为 flex column，子元素会被块化，回归守护）。"""
+        page.route("**/api/funds/dca/019387/rounds*", lambda route: route.fulfill(
+            status=200, content_type="application/json", body=json.dumps({
+                "status": "up", "code": "019387", "fee": "nom", "rounds": [],
+                "totals": {"rounds": 0, "invested": 0, "net_profit": 0,
+                           "sub_fee": 0, "redeem_fee": 0}})))
+        page.route("**/api/funds/019387/navs*", lambda route: route.fulfill(
+            status=200, content_type="application/json", body=json.dumps({
+                "status": "up", "code": "019387", "navs": [
+                    {"date": "2023-11-28", "unit_nav": 1.0, "accum_nav": 1.0,
+                     "pct_chg": 0, "unit_money": None, "source": "fund_em"},
+                    {"date": "2024-05-20", "unit_nav": 1.02, "accum_nav": 1.02,
+                     "pct_chg": 1.4, "unit_money": None, "source": "fund_em"},
+                ]})))
+        _, frontend_port = servers
+        open_dca(page, frontend_port)
+        page.locator(".browse-pv tbody tr", has_text="中欧时代共赢").click()
+        expect(page.locator(".p-dialog")).to_be_visible()
+        gaps = page.evaluate("""() => {
+            const r = document.querySelector('.p-dialog').getBoundingClientRect();
+            return {left: r.x, top: r.y,
+                    right: innerWidth - r.x - r.width,
+                    bottom: innerHeight - r.y - r.height};
+        }""")
+        expected = page.viewport_size["height"] * 0.05   # 默认视口 1280x720 → 36px
+        for side, v in gaps.items():
+            assert abs(v - expected) <= 2, (side, v, expected)
+        ys = page.evaluate(
+            "[...document.querySelectorAll('.dca-rounds-segrow .src-seg')]"
+            ".map(e => e.getBoundingClientRect().y)")
+        assert len(ys) == 2 and abs(ys[0] - ys[1]) <= 1, ys
 
     def test_no_rounds_dialog_still_shows_nav_chart(self, servers, page, mock_dca):
         """E2E-417：从未止盈的基金 → 弹窗仍渲染复权净值曲线（无止盈点/图例），

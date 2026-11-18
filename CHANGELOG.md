@@ -163,6 +163,17 @@
   （规模列渲染 / E2E-438 筛选交互与请求参数断言）。
 
 ### Fixed
+- **定投详情弹窗四边边距统一（2026-11-18 用户反馈「弹窗四边距统一大小，
+  左右两边太空」）**：每次止盈明细弹窗由固定 1000px 宽改为视口自适应
+  `100vw-10vh × 90vh`——PrimeVue 弹窗在遮罩内居中且高度上限 90%（=90vh，
+  上下边距 5vh），宽度跟随取 100vw-10vh 使左右边距同为 5vh，四边严格等距
+  （1920×1080 下由 1000×902、左右各空 460px 变为 1812×972 铺满）。高度钉
+  90vh 后内容不足部分由净值曲线区弹性吸收（.dca-rounds-body flex column，
+  各区块 flex-shrink:0、图表 flex:1 min-height 300px；内容超出照常滚动），
+  并补窗口 resize 时图表跟随重排；止盈线/费率两段按钮组内包一层
+  .dca-rounds-segrow 保持同行（flex column 会把 inline-flex 子项块化换行，
+  实测发现即修）。E2E-443 守护：四边 gap 与 5vh 误差 ≤2px + 两段按钮组
+  同行（test_fund_dca_page::TestFundDcaPage::test_dialog_uniform_margins）。
 - **定投页波动列表头文字双重渲染（2026-11-18 用户报告「同样的文字显示
   两次」）**：五个波动列 `<Column>` 同时带 `header="X"` 属性与 `#header`
   插槽，PrimeVue 两者都渲染（数据页只写插槽故正常）。去掉冗余属性、
