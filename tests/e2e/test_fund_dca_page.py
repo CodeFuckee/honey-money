@@ -549,6 +549,11 @@ class TestFundDcaPage:
         open_dca(page, frontend_port)
         page.locator(".browse-pv tbody tr", has_text="中欧时代共赢").click()
         expect(page.locator(".p-dialog")).to_be_visible()
+        # PrimeVue Dialog 打开有 scale 过渡，动画中 getBoundingClientRect 是缩放中间值
+        # （首跑抓到 left gap 78/41 两样）——等 rect 达到最终尺寸再量
+        page.wait_for_function(
+            "() => { const r = document.querySelector('.p-dialog').getBoundingClientRect();"
+            " return Math.abs(r.width - (innerWidth - innerHeight * 0.10)) < 2; }")
         gaps = page.evaluate("""() => {
             const r = document.querySelector('.p-dialog').getBoundingClientRect();
             return {left: r.x, top: r.y,
