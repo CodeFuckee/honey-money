@@ -169,3 +169,57 @@ class TestLifespanSchemaInit:
         ddl = "\n".join(executed)
         assert "CREATE TABLE IF NOT EXISTS fund_basic" in ddl
         assert "CREATE TABLE IF NOT EXISTS fund_nav" in ddl
+
+    def test_startup_inits_tp_tables(self, monkeypatch):
+        """启动初始化须建多阈值表并补列（ensure_tp_schema）。
+
+        该迁移此前只在日更回测任务里跑——新代码 SELECT 新列后、当日日更前
+        生产接口整页 down（UndefinedColumn，2026-11-19 线上事故回归锚点）：
+        部署到日更之间存在空窗，必须启动即补列。"""
+        monkeypatch.setattr(
+            "app.config.DATABASE_URL",
+            "postgresql://nobody:x@127.0.0.1:59999/none")   # 秒拒，不真连
+        monkeypatch.setattr("app.backtest.engine.warmup", lambda: None)
+        executed: list[str] = []
+
+        class FakeCur:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def execute(self, q, p=None):
+                executed.append(q)
+
+            def fetchone(self):
+                return None
+
+        class FakeConn:
+            def cursor(self):
+                return FakeCur()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def commit(self):
+                pass
+
+        class FakeSched:
+            async def start(self):
+                pass
+
+            async def stop(self):
+                pass
+
+        app = create_app(scheduler=FakeSched(), task_store=TaskStore(),
+                         connect=lambda *a, **k: FakeConn())
+        with TestClient(app):          # with 上下文才触发 lifespan
+            pass
+        ddl = "\n".join(executed)
+        assert ("CREATE TABLE IF NOT EXISTS fund_dca_tp_result" in ddl)
+        assert ("ALTER TABLE fund_dca_tp_result "
+                "ADD COLUMN IF NOT EXISTS full_cur_xirr" in ddl)

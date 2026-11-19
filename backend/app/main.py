@@ -50,12 +50,15 @@ def create_app(*, scheduler: TaskScheduler | None = None,
         # 四个初始化各自独立事务/失败域：一个挂不回滚其他
         # （教训：任务 seed 曾与建表同事务，NULL 违约连带回滚新表；
         # 教训2：基金表漏在启动清单里，调度执行体不建表，首次基金任务
-        # UndefinedTable 秒退且无 run 记录——2026-10-26）
+        # UndefinedTable 秒退且无 run 记录——2026-10-26；
+        # 教训3：多阈值表迁移只在日更里跑，新代码 SELECT 新列后、当日日更前
+        # 生产接口整页 down——2026-11-19，与教训2同根：启动即兜底建表补列）
         for name, init in (("基础表", Store().init_schema),
                            ("任务表", task_store.init_schema),
                            ("基金表", FundStore().init_schema),
                            ("全量回测表", backtest_full.ensure_schema),
                            ("定投回测表", dca_store.ensure_schema),
+                           ("多阈值回测表", dca_store.ensure_tp_schema),
                            ("基金波动表", dca_store.ensure_risk_schema)):
             try:
                 with connect(config.DATABASE_URL) as conn:

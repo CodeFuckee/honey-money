@@ -99,6 +99,16 @@
   ~1.2GB）——返回值 pickle 传回父进程时 buffer 与结果集同时在内存，缓解
   子进程 RSS 峰值（背景见 Fixed 的 run 122 诊断）。
 
+### Fixed
+- **部署空窗降级（2026-11-19 线上事故）**：多阈值表迁移 `ensure_tp_schema`
+  此前只在日更回测任务里跑——「最近一次止盈后」新代码 SELECT 新列部署后、
+  当日日更前生产 `/api/funds/dca*` 整页 down（UndefinedColumn，与
+  2026-10-26 基金表漏初始化同根，教训3）。修复：`ensure_tp_schema` 加入
+  启动初始化清单（幂等补列，部署即生效）；线上当即用容器内同款幂等迁移
+  手动补列恢复（total 15450 行 up）。守护测试
+  `test_startup_inits_tp_tables`（断言启动 DDL 含
+  `ALTER TABLE fund_dca_tp_result ADD COLUMN IF NOT EXISTS full_cur_xirr`）。
+
 ### Added
 - **基金波动率指标列 + 详情页指标区（2026-11-17 用户需求「评判波动率的
   指标列」）**：① 数据页「基金净值浏览」表格新增五个波动指标列（可服务端
