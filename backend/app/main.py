@@ -59,7 +59,8 @@ def create_app(*, scheduler: TaskScheduler | None = None,
                            ("全量回测表", backtest_full.ensure_schema),
                            ("定投回测表", dca_store.ensure_schema),
                            ("多阈值回测表", dca_store.ensure_tp_schema),
-                           ("基金波动表", dca_store.ensure_risk_schema)):
+                           ("基金波动表", dca_store.ensure_risk_schema),
+                           ("熊市断缴表", dca_store.ensure_bear_pause_schema)):
             try:
                 with connect(config.DATABASE_URL) as conn:
                     init(conn)

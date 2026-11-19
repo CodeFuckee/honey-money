@@ -598,6 +598,126 @@ def import_dip_validation(conn, rows: list[tuple]) -> int:
     return len(rows)
 
 
+# ===== 熊市断缴实验存储（离线脚本导入，fund_dip_validation 同族；2026-11-19） =====
+# 三表：fund_bear_pause_fund（每基金 A/B/C/D 四组 × 止盈20%/无止盈两口径）/
+# fund_bear_pause_market（子样本×口径配对统计）/ fund_bear_pause_meta（单行
+# 参数）。计算引擎 app/bear_pause.py；导入 scripts/bear_pause_import.py；
+# 重跑整表替换，静态快照不进日更。
+
+BEAR_PAUSE_DDL = """
+CREATE TABLE IF NOT EXISTS fund_bear_pause_fund (
+  code         VARCHAR(10) PRIMARY KEY,
+  span_days    INTEGER,
+  months       INTEGER,
+  ever_paused  BOOLEAN,
+  episodes     INTEGER,
+  pause_months INTEGER,
+  dd_end       DOUBLE PRECISION,
+  dd_min       DOUBLE PRECISION,
+  in_universe  BOOLEAN NOT NULL DEFAULT TRUE,
+  tp_a_wallet DOUBLE PRECISION, tp_a_xirr DOUBLE PRECISION,
+  tp_a_out DOUBLE PRECISION, tp_a_rounds INTEGER,
+  tp_b_wallet DOUBLE PRECISION, tp_b_xirr DOUBLE PRECISION,
+  tp_b_out DOUBLE PRECISION, tp_b_rounds INTEGER,
+  tp_c_wallet DOUBLE PRECISION, tp_c_xirr DOUBLE PRECISION,
+  tp_c_out DOUBLE PRECISION, tp_c_rounds INTEGER,
+  tp_d_wallet DOUBLE PRECISION, tp_d_xirr DOUBLE PRECISION,
+  tp_d_out DOUBLE PRECISION, tp_d_rounds INTEGER,
+  nt_a_wallet DOUBLE PRECISION, nt_a_xirr DOUBLE PRECISION,
+  nt_a_out DOUBLE PRECISION, nt_a_rounds INTEGER,
+  nt_b_wallet DOUBLE PRECISION, nt_b_xirr DOUBLE PRECISION,
+  nt_b_out DOUBLE PRECISION, nt_b_rounds INTEGER,
+  nt_c_wallet DOUBLE PRECISION, nt_c_xirr DOUBLE PRECISION,
+  nt_c_out DOUBLE PRECISION, nt_c_rounds INTEGER,
+  nt_d_wallet DOUBLE PRECISION, nt_d_xirr DOUBLE PRECISION,
+  nt_d_out DOUBLE PRECISION, nt_d_rounds INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS fund_bear_pause_market (
+  subset       VARCHAR(16) NOT NULL,
+  mode         VARCHAR(4) NOT NULL,
+  n            INTEGER,
+  med_out_a    DOUBLE PRECISION,
+  med_wallet_a DOUBLE PRECISION,
+  xirr_a_med   DOUBLE PRECISION,
+  xirr_a_p25   DOUBLE PRECISION,
+  xirr_a_p75   DOUBLE PRECISION,
+  b_xirr_med DOUBLE PRECISION, b_xirr_lower_pct DOUBLE PRECISION,
+  b_wallet_delta_med DOUBLE PRECISION, b_wallet_delta_p25 DOUBLE PRECISION,
+  b_wallet_delta_p75 DOUBLE PRECISION, b_wallet_lower_pct DOUBLE PRECISION,
+  c_xirr_med DOUBLE PRECISION, c_xirr_lower_pct DOUBLE PRECISION,
+  c_wallet_delta_med DOUBLE PRECISION, c_wallet_delta_p25 DOUBLE PRECISION,
+  c_wallet_delta_p75 DOUBLE PRECISION, c_wallet_lower_pct DOUBLE PRECISION,
+  d_xirr_med DOUBLE PRECISION, d_xirr_lower_pct DOUBLE PRECISION,
+  d_wallet_delta_med DOUBLE PRECISION, d_wallet_delta_p25 DOUBLE PRECISION,
+  d_wallet_delta_p75 DOUBLE PRECISION, d_wallet_lower_pct DOUBLE PRECISION,
+  PRIMARY KEY (subset, mode)
+);
+
+CREATE TABLE IF NOT EXISTS fund_bear_pause_meta (
+  id           BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
+  generated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  fund_count   INTEGER,
+  params       JSONB
+);
+"""
+
+# 元组列序契约（scripts/bear_pause_import.py 按此序构造行；键名与引擎
+# bear_pause.run_fund / aggregate_market 产出的扁平 dict 一致）
+BEAR_PAUSE_FUND_COLS = (["code", "span_days", "months", "ever_paused",
+                         "episodes", "pause_months", "dd_end", "dd_min",
+                         "in_universe"]
+                        + [f"{p}_{a}_{k}" for p in ("tp", "nt")
+                           for a in ("a", "b", "c", "d")
+                           for k in ("wallet", "xirr", "out", "rounds")])
+BEAR_PAUSE_MARKET_COLS = (["subset", "mode", "n", "med_out_a", "med_wallet_a",
+                           "xirr_a_med", "xirr_a_p25", "xirr_a_p75"]
+                          + [f"{a}_{k}" for a in ("b", "c", "d")
+                             for k in ("xirr_med", "xirr_lower_pct",
+                                       "wallet_delta_med", "wallet_delta_p25",
+                                       "wallet_delta_p75", "wallet_lower_pct")])
+_BEAR_PAUSE_FUND_INSERT = f"""
+INSERT INTO fund_bear_pause_fund ({", ".join(BEAR_PAUSE_FUND_COLS)})
+VALUES ({", ".join(["%s"] * len(BEAR_PAUSE_FUND_COLS))})
+"""
+_BEAR_PAUSE_MARKET_INSERT = f"""
+INSERT INTO fund_bear_pause_market ({", ".join(BEAR_PAUSE_MARKET_COLS)})
+VALUES ({", ".join(["%s"] * len(BEAR_PAUSE_MARKET_COLS))})
+"""
+_BEAR_PAUSE_META_UPSERT = """
+INSERT INTO fund_bear_pause_meta (id, generated_at, fund_count, params)
+VALUES (TRUE, now(), %s, %s::jsonb)
+ON CONFLICT (id) DO UPDATE SET
+  generated_at = now(), fund_count = EXCLUDED.fund_count,
+  params = EXCLUDED.params
+"""
+
+
+def ensure_bear_pause_schema(conn) -> None:
+    """断缴实验三表幂等建表（启动清单 + 导入脚本双保险）。"""
+    with conn.cursor() as cur:
+        cur.execute(BEAR_PAUSE_DDL)
+
+
+def import_bear_pause(conn, fund_rows: list[tuple],
+                      market_rows: list[tuple],
+                      *, params: dict | None = None) -> tuple[int, int]:
+    """断缴实验三表整表替换（重跑后旧数据不得残留）；事务由调用方提交。
+
+    返回 (基金行数, 市场级行数)。"""
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM fund_bear_pause_fund")
+        if fund_rows:
+            cur.executemany(_BEAR_PAUSE_FUND_INSERT, fund_rows)
+        cur.execute("DELETE FROM fund_bear_pause_market")
+        if market_rows:
+            cur.executemany(_BEAR_PAUSE_MARKET_INSERT, market_rows)
+        cur.execute(_BEAR_PAUSE_META_UPSERT,
+                    (len(fund_rows),
+                     json.dumps(params or {}, ensure_ascii=False)))
+    return len(fund_rows), len(market_rows)
+
+
 def import_rows(conn, rows: list[dict], *, params: dict | None = None) -> int:
     """快照整体替换（DELETE+INSERT）+ meta 单行 upsert；单事务由调用方提交。"""
     with conn.cursor() as cur:

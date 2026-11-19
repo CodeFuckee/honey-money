@@ -32,7 +32,9 @@ backend/            Python 后端（FastAPI）
                       fund_dca_tp_result / fund_dca_tp_rounds / fund_dca_tp_meta
                       多阈值三表（5%~40% 八档，与旧表同构 + tp 维度，完全隔离）+
                       fund_dip_timing 时机表（当前回撤/距前高/回撤桶，日更顺带刷新）+
-                      fund_risk_metrics 波动指标表（近1/3/5年与全史四窗口，日更顺带刷新）；
+                      fund_risk_metrics 波动指标表（近1/3/5年与全史四窗口，日更顺带刷新）+
+                      fund_dip_validation 起点条件验证表 / fund_bear_pause_fund
+                      · _market · _meta 断缴实验三表（离线脚本导入，重跑整表替换）；
                       python -m app.dca_store <csv> 导入 scripts 离线回测产物，幂等）
   app/dca_api.py      /api/funds/dca 回测排行 API（搜索/在市/年限/规模/权益类
                       （EQUITY_TYPES 白名单）过滤/排序白名单/分页 + 在市全集
@@ -53,7 +55,14 @@ backend/            Python 后端（FastAPI）
                       「最近一次止盈后」当前轮十字段 full_last_tp(+_disc/_nom)/
                       full_cur_invested/full_cur_profit_rate(+_disc/_nom)/
                       full_cur_xirr(+_disc/_nom)（全史窗口，2026-11-19；
-                      summary 端点行内同附，弹窗按 tp/fee 切换取值）
+                      summary 端点行内同附，弹窗按 tp/fee 切换取值）+
+                      /api/funds/dca/pause-experiment（熊市断缴实验市场级：
+                      子样本×口径 A/B/C/D 配对统计 + meta + 案例基金）+
+                      /api/funds/dca/bear-pause/{code}（单基金四组对照）
+  app/bear_pause.py   熊市断缴实验引擎（bear_state 迟滞带熊市态
+                      （回撤 ≤-20% 进入 / >-10% 恢复）+ A 坚持定投/
+                      B 断缴闲置/C 断缴补投/D 熊市加倍四组模拟 + 市场级
+                      配对聚合；校验锚 A≡simulate_multi 转正单测）
   tests/              离线 pytest 用例（API 骨架 + 爬虫 + 任务调度）
 frontend/           Vue3 + Vite 前端
   src/App.vue         服务仪表盘（Carbon 风格）：四状态（加载骨架/空态插画/
@@ -86,6 +95,11 @@ frontend/           Vue3 + Vite 前端
                       「起点条件回测」区块（三组对照/
                       回撤深度梯度/起点年份三段统计表：不同起点开始定投的
                       首轮止盈周期、成功率与年化分布，静态验证快照）+
+                      「熊市断缴实验」区块（KPI 四卡 + 子样本分层表 +
+                      案例基金表 + 止盈20%/无止盈口径切换，静态实验快照
+                      scripts/bear_pause_import.py 落数据；详情弹窗新增
+                      「断缴对照」四卡——这只基金上 A/B/C/D 四条时间线的
+                      期末钱包/投入/年化）+
                       7 张统计卡 + 服务端排序表格，费率口径
                       三档切换联动排行/统计/散点/详情（默认含费·申购名义；
                       不含费/含费·申购一折可选，搜索栏与散点区各有开关），
@@ -148,7 +162,10 @@ scripts/            离线研究/数据管道脚本（不入 CI）：fund_scale_
                     导入后页面可见；含申赎费用三场景建模：gross 不含费/
                     disc 申购一折/nom 申购名义，赎回费按每笔持有天数阶梯；
                     simulate_multi 单遍多阈值状态机供日更 run_full_backtest_tp
-                    八档止盈点共用，tp=0.20 档与旧引擎逐字段一致）
+                    八档止盈点共用，tp=0.20 档与旧引擎逐字段一致）/
+                    bear_pause_import.py（熊市断缴实验数据导入：权益池
+                    全量 × A/B/C/D 四组 → fund_bear_pause_* 三表，
+                    重跑整表替换，~3 分钟）
 ```
 
 ## MCP server（agent 接入回测与行情）

@@ -10,6 +10,7 @@ import datetime as dt
 import psycopg
 
 from . import config
+from . import bear_pause                              # 断缴实验常量（案例码）
 from .dca_backtest import TAKE_PROFIT, TP_THRESHOLDS   # 阈值事实源单一
 
 _DCA_LIST_SQL = """
@@ -544,6 +545,21 @@ def register_fund_dca_routes(app):
         各组首轮止盈天数分位、3 年成功率、首轮年化分位）。静态快照，验证
         重跑后刷新。历史统计不构成操作建议。降级约定同 /api/funds/dca。"""
         return fetch_dca_dip_report(config.DATABASE_URL)
+
+    @app.get("/api/funds/dca/pause-experiment")
+    def funds_dca_pause_experiment():
+        """熊市断缴实验市场级统计（2026-11-19 scratch 实验产品化，导入
+        scripts/bear_pause_import.py 落库）：子样本（全体/仅断缴/末回撤
+        三分层）× 口径（止盈20%/无止盈）的 A/B/C/D 配对比较 + 案例基金 +
+        实验参数 meta。静态快照，重跑导入脚本后刷新；历史统计不构成操作
+        建议。降级约定同 /api/funds/dca。"""
+        return fetch_dca_pause_experiment(config.DATABASE_URL)
+
+    @app.get("/api/funds/dca/bear-pause/{code}")
+    def funds_dca_bear_pause(code: str):
+        """单基金熊市断缴实验四组对照（A 坚持/B 断缴闲置/C 断缴补投/
+        D 熊市加倍；全史·gross 无费·双口径）。降级约定同 /api/funds/dca。"""
+        return fetch_bear_pause_fund(config.DATABASE_URL, code.strip())
 
 
 
@@ -1223,3 +1239,99 @@ def fetch_dca_dip_report(dsn: str) -> dict:
     return _safe(run, {"status": "down", "detail": "pg unreachable",
                        "tp_list": [], "groups": [], "buckets": [],
                        "years": []})
+
+
+# ===== 熊市断缴实验（scratch 实验产品化，2026-11-19；表见 dca_store） =====
+
+_PAUSE_MARKET_HEAD = ("subset", "mode", "n", "med_out_a", "med_wallet_a",
+                      "xirr_a_med", "xirr_a_p25", "xirr_a_p75")
+_PAUSE_ARM_STATS = ("xirr_med", "xirr_lower_pct", "wallet_delta_med",
+                    "wallet_delta_p25", "wallet_delta_p75", "wallet_lower_pct")
+_PAUSE_MARKET_SELECT = (", ".join(_PAUSE_MARKET_HEAD) + ", "
+                        + ", ".join(f"{a}_{c}" for a in ("b", "c", "d")
+                                    for c in _PAUSE_ARM_STATS))
+_PAUSE_FUND_HEAD = ("code", "span_days", "months", "ever_paused", "episodes",
+                    "pause_months", "dd_end", "dd_min", "in_universe")
+_PAUSE_FUND_SELECT = ", ".join(
+    _PAUSE_FUND_HEAD
+    + tuple(f"{p}_{a}_{k}" for p in ("tp", "nt") for a in ("a", "b", "c", "d")
+            for k in ("wallet", "xirr", "out", "rounds")))
+
+
+def _pause_fund_dict(row) -> dict:
+    """断缴实验基金行 → dict（金额两位/比率与回撤四位，同排行表约定）。"""
+    d = dict(zip(_PAUSE_FUND_HEAD
+                 + tuple(f"{p}_{a}_{k}" for p in ("tp", "nt")
+                         for a in ("a", "b", "c", "d")
+                         for k in ("wallet", "xirr", "out", "rounds")), row))
+    for k, v in d.items():
+        if isinstance(v, float):
+            d[k] = (round(v, 2) if (k.endswith("_wallet") or k.endswith("_out"))
+                    else round(v, 4))
+    return d
+
+
+def _pause_market_dict(row) -> dict:
+    keys = _PAUSE_MARKET_HEAD + tuple(
+        f"{a}_{c}" for a in ("b", "c", "d") for c in _PAUSE_ARM_STATS)
+    d = dict(zip(keys, row))
+    for k, v in d.items():
+        if isinstance(v, float):
+            d[k] = (round(v, 2) if ("wallet" in k or k.startswith("med_"))
+                    else round(v, 4))
+    return d
+
+
+def fetch_dca_pause_experiment(dsn: str) -> dict:
+    """熊市断缴实验市场级统计 + meta + 案例基金（静态快照，只读三表）。
+
+    market 按 mode（tp/nt）→ subset（all/paused_only/near_high/mid/stuck）
+    两层分拣；cases 按 meta.params.case_codes 读基金表（缺省回落引擎常量）。
+    降级约定同旧端点。
+    """
+
+    def run():
+        with psycopg.connect(dsn, connect_timeout=3) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT fund_count, params "
+                            "FROM fund_bear_pause_meta LIMIT 1")
+                meta_row = cur.fetchone()
+                cur.execute(f"SELECT {_PAUSE_MARKET_SELECT} "
+                            "FROM fund_bear_pause_market")
+                market_rows = cur.fetchall()
+                case_codes = (((meta_row[1] or {}).get("case_codes"))
+                              if meta_row else None) \
+                    or list(bear_pause.CASE_CODES)
+                cur.execute(f"SELECT {_PAUSE_FUND_SELECT} "
+                            "FROM fund_bear_pause_fund "
+                            "WHERE code = ANY(%s) ORDER BY code",
+                            ([str(c) for c in case_codes],))
+                case_rows = cur.fetchall()
+        market = {"tp": {}, "nt": {}}
+        for r in market_rows:
+            block = _pause_market_dict(r)
+            market[block.pop("mode")][block.pop("subset")] = block
+        return {"status": "up",
+                "meta": {"fund_count": meta_row[0] if meta_row else None,
+                         "params": dict(meta_row[1]) if meta_row
+                         and meta_row[1] else {}},
+                "market": market,
+                "cases": [_pause_fund_dict(r) for r in case_rows]}
+    return _safe(run, {"status": "down", "detail": "pg unreachable",
+                       "meta": {}, "market": {}, "cases": []})
+
+
+def fetch_bear_pause_fund(dsn: str, code: str) -> dict:
+    """单基金断缴实验四组对照（无数据 → fund=None，仍是 up 语义）。"""
+
+    def run():
+        with psycopg.connect(dsn, connect_timeout=3) as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT {_PAUSE_FUND_SELECT} "
+                            "FROM fund_bear_pause_fund WHERE code = %s",
+                            (code,))
+                row = cur.fetchone()
+        return {"status": "up",
+                "fund": _pause_fund_dict(row) if row else None}
+    return _safe(run, {"status": "down", "detail": "pg unreachable",
+                       "fund": None})

@@ -668,6 +668,42 @@ function dipRowLabel(r) {
   if (r.grp === 'DIP') return DIP_BUCKET_LABELS[r.bucket] || r.bucket
   return `${r.bucket} 年起`
 }
+
+// ===== 熊市断缴实验区块（2026-11-19 scratch 实验产品化：熊市态断缴 vs 坚持
+// 定投，同基金四条时间线配对比较；静态快照 fund_bear_pause_*，导入脚本
+// scripts/bear_pause_import.py 重跑后刷新；gross 无费固定口径，不随费率/
+// 权益开关变化，因此不挂 watch 只在进入子页时加载一次）
+const dcaPauseExp = ref(null)
+const dcaPauseMode = ref('tp')   // 口径：tp=止盈20%（主线）/ nt=无止盈（躺平）
+const PAUSE_MODES = [{ key: 'tp', label: '止盈 20%' }, { key: 'nt', label: '无止盈（躺平）' }]
+const PAUSE_SUBSET_ORDER = ['all', 'paused_only', 'near_high', 'mid', 'stuck']
+const PAUSE_SUBSET_LABELS = { all: '全体基金', paused_only: '仅断缴过的基金',
+  near_high: '末回撤 >-10%（接近前高）', mid: '末回撤 -30%~-10%（中间地带）',
+  stuck: '末回撤 ≤-30%（起不来）' }
+const PAUSE_ARMS = [
+  { key: 'a', label: 'A 坚持定投', tip: '每月首个净值日投 1000，从不间断（基准组）' },
+  { key: 'b', label: 'B 断缴闲置', tip: '熊市态停扣，钱囤现金 0 收益，恢复后继续月投' },
+  { key: 'c', label: 'C 断缴补投', tip: '同 B 停扣，恢复确认日把囤的钱一次性补回' },
+  { key: 'd', label: 'D 熊市加倍', tip: '熊市态每月投 2000（钱包差已按多投入 0 收益折算同额）' },
+]
+async function loadDcaPauseExperiment() {
+  if (STATIC_MODE) return
+  try {
+    const r = await fetch('/api/funds/dca/pause-experiment')
+    dcaPauseExp.value = await r.json()
+  } catch (e) {
+    dcaPauseExp.value = { status: 'down', detail: String(e), meta: {}, market: {}, cases: [] }
+  }
+}
+const dcaPauseUniverse = computed(() => dcaPauseExp.value?.meta?.params?.universe || {})
+const dcaPauseBlocks = computed(() => dcaPauseExp.value?.market?.[dcaPauseMode.value] || {})
+// 断缴实验格式化（金额取整带符号；XIRR/占比百分位）
+const pauseMoney = v => v == null ? '—' : (v > 0 ? '+' : '') + Math.round(v).toLocaleString() + ' 元'
+const pauseXirr = v => v == null ? '—' : (v * 100).toFixed(1) + '%'
+const ddPct = v => v == null ? '—' : (v * 100).toFixed(1) + '%'
+// 弹窗「断缴对照」：单基金四组（打开时拉一次，固定全史 gross 口径，
+// 不随弹窗止盈点/费率切换——实验数据只有这一种口径）
+const dcaRoundsPause = ref(null)
 // 年限/规模输入即时生效：model 随键入更新，但 InputNumber 在值未再变时回车不发
 // change 事件（清空后回车失灵实测）——对两个输入防抖 400ms 直接触发搜索
 let _dcaFilterTimer = null
@@ -865,6 +901,7 @@ function openDcaRounds(e) {
   dcaRoundsFee.value = dcaFeeMode.value  // 弹窗局部费率口径同起步
   dcaRoundsAll.value = {}
   dcaRoundsSummary.value = null
+  dcaRoundsPause.value = null
   disposeDcaRoundsChart()
   dcaRoundsVisible.value = true
   fetch(`/api/funds/dca/tp/${data.code}/summary`)
@@ -879,6 +916,11 @@ function openDcaRounds(e) {
       }
     })
     .catch(() => { dcaRoundsSummary.value = null })
+  // 断缴实验对照（打开时拉一次；未参与实验的基金返回 fund=null 区块隐藏）
+  fetch(`/api/funds/dca/bear-pause/${data.code}`)
+    .then(r => r.json())
+    .then(body => { dcaRoundsPause.value = (body && body.status === 'up') ? body.fund : null })
+    .catch(() => { dcaRoundsPause.value = null })
   const emptyRounds = () => ({ status: 'up', code: data.code, fee: dcaFeeMode.value,
                                rounds: [], totals: { rounds: 0 } })
   if (STATIC_MODE) {
@@ -1237,7 +1279,7 @@ const _onFundResize = () => fundChartInstance && fundChartInstance.resize()
 
 watch(activeNav, (nav, prev) => {
   if (nav === 'funds') loadFunds()
-  if (nav === 'fundDca') { loadDca(); loadDcaScatter(); loadDcaTpCompare(); loadDcaDipReport() }
+  if (nav === 'fundDca') { loadDca(); loadDcaScatter(); loadDcaTpCompare(); loadDcaDipReport(); loadDcaPauseExperiment() }
   if (nav === 'fund' && fund.value) {
     loadFundChart()
     loadFundDetail()
@@ -2941,6 +2983,81 @@ watch(
                 <p class="note" style="margin: 10px 0 0">口径：每月首个净值日投 1000 元（无费口径），任一净值日市值 ≥ 投入×(1+止盈线) 即首轮止盈并结束该次模拟；「3 年内止盈成功率」分母含数据结束仍未触发者（"起不来"如实计入）· 深回撤起点 = 回撤进入 ≥20% 的首日（不知是否谷底）· 「甜蜜点」在 -25%~-30% 桶（快/成功率高/年化高），&gt;-30% 超深回撤显著变差 · 历史统计不构成任何操作建议</p>
               </template>
             </div>
+
+            <!-- ===== 熊市断缴实验（2026-11-19 scratch 实验产品化：熊市态断缴 vs 坚持
+                 定投，同基金四条时间线配对比较；静态快照 fund_bear_pause_*，
+                 scripts/bear_pause_import.py 重跑后刷新；gross 无费固定口径，
+                 不随费率/权益开关变化，只在进入子页时加载一次） ===== -->
+            <div class="card pause-exp-block" data-pause-exp v-if="!STATIC_MODE && dcaPauseExp" style="margin-top: 16px; padding: 14px 16px 18px">
+              <div class="toolbar" style="margin: 0 0 6px">
+                <div>
+                  <h2 class="h1" style="font-size: 18px">熊市断缴实验：跌深了停扣，代价有多大？</h2>
+                  <p class="sub">熊市态 = 距历史高点回撤 ≤-20% 进入、收窄回 &gt;-10% 才恢复 · 同一只基金四条平行时间线配对（A 坚持定投 / B 断缴闲置 / C 断缴+恢复补投 / D 熊市加倍）· 权益基金全史 {{ dcaPauseUniverse.backtested?.toLocaleString() || '—' }} 只（截数 {{ dcaPauseUniverse.data_end || '—' }}）· 无费口径 · 历史实验统计，不构成任何操作建议</p>
+                </div>
+                <div class="src-seg" data-pause-mode style="flex-shrink: 0">
+                  <button v-for="m in PAUSE_MODES" :key="m.key" class="src-seg-btn"
+                    :class="{ active: dcaPauseMode === m.key }" @click="dcaPauseMode = m.key">{{ m.label }}</button>
+                </div>
+              </div>
+              <div v-if="dcaPauseExp.status === 'down'" class="browse-empty">
+                断缴实验数据不可用：{{ dcaPauseExp.detail || '数据库连接失败' }}
+              </div>
+              <template v-else-if="Object.keys(dcaPauseBlocks).length">
+                <div class="learn-metrics" data-pause-kpis style="margin: 8px 0 12px">
+                  <div class="card lm"><div class="lm-k">曾断缴基金<br><span class="dc-hint">全史触发过 ≥20% 回撤</span></div><div class="lm-v">{{ pct0(dcaPauseUniverse.ever_paused_pct) }}</div></div>
+                  <div class="card lm"><div class="lm-k">B 断缴闲置<br><span class="dc-hint">钱包差中位</span></div><div class="lm-v">{{ pauseMoney(dcaPauseBlocks.all?.b_wallet_delta_med) }}</div></div>
+                  <div class="card lm"><div class="lm-k">C 断缴补投<br><span class="dc-hint">钱包差中位</span></div><div class="lm-v">{{ pauseMoney(dcaPauseBlocks.all?.c_wallet_delta_med) }}</div></div>
+                  <div class="card lm"><div class="lm-k">D 熊市加倍<br><span class="dc-hint">同额钱包差中位</span></div><div class="lm-v">{{ pauseMoney(dcaPauseBlocks.all?.d_wallet_delta_med) }}</div></div>
+                </div>
+                <div style="overflow-x: auto" data-pause-strata>
+                  <table class="dca-matrix" style="width: 100%; min-width: 820px">
+                    <thead><tr>
+                      <th>子样本</th><th>样本数</th><th>A 坚持·年化中位</th>
+                      <th>B 钱包差中位</th><th>B 比 A 薄</th>
+                      <th>C 钱包差中位</th><th>C 比 A 薄</th>
+                      <th>D 同额钱包差中位</th><th>D 年化更低</th>
+                    </tr></thead>
+                    <tbody>
+                      <tr v-for="s in PAUSE_SUBSET_ORDER" :key="s" v-show="dcaPauseBlocks[s]">
+                        <td><b>{{ PAUSE_SUBSET_LABELS[s] }}</b><span v-if="s === 'paused_only'" class="dc-hint" style="margin-left: 6px">主比较</span></td>
+                        <td>{{ dcaPauseBlocks[s]?.n?.toLocaleString() }}</td>
+                        <td>{{ pauseXirr(dcaPauseBlocks[s]?.xirr_a_med) }}</td>
+                        <td><span :class="(dcaPauseBlocks[s]?.b_wallet_delta_med ?? 0) < 0 ? 'chg-down' : 'chg-up'">{{ pauseMoney(dcaPauseBlocks[s]?.b_wallet_delta_med) }}</span></td>
+                        <td>{{ pct0(dcaPauseBlocks[s]?.b_wallet_lower_pct) }}</td>
+                        <td><span :class="(dcaPauseBlocks[s]?.c_wallet_delta_med ?? 0) < 0 ? 'chg-down' : 'chg-up'">{{ pauseMoney(dcaPauseBlocks[s]?.c_wallet_delta_med) }}</span></td>
+                        <td>{{ pct0(dcaPauseBlocks[s]?.c_wallet_lower_pct) }}</td>
+                        <td><span :class="(dcaPauseBlocks[s]?.d_wallet_delta_med ?? 0) < 0 ? 'chg-down' : 'chg-up'">{{ pauseMoney(dcaPauseBlocks[s]?.d_wallet_delta_med) }}</span></td>
+                        <td>{{ pct0(dcaPauseBlocks[s]?.d_xirr_lower_pct) }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <h3 style="font-size: 14px; margin: 14px 0 6px">案例基金（点击行看单基金四组明细）</h3>
+                <div style="overflow-x: auto" data-pause-cases>
+                  <table class="dca-matrix" style="width: 100%; min-width: 720px">
+                    <thead><tr>
+                      <th>基金</th><th>末回撤</th><th>断缴</th>
+                      <th>A 坚持·钱包</th><th>B 断缴闲置·钱包</th><th>C 断缴补投·钱包</th><th>D 熊市加倍·钱包</th>
+                    </tr></thead>
+                    <tbody>
+                      <tr v-for="c in dcaPauseExp.cases" :key="c.code" style="cursor: pointer"
+                          title="点击打开该基金的定投止盈明细弹窗"
+                          @click="openDcaRounds({ data: { code: c.code, name: (c.code || '') + ' ' + (c.name || '') } })">
+                        <td><b class="mono">{{ c.code }}</b> {{ c.name }}</td>
+                        <td>{{ ddPct(c.dd_end) }}</td>
+                        <td>{{ c.ever_paused ? c.episodes + ' 次 / ' + c.pause_months + ' 月' : '从未' }}</td>
+                        <td>{{ pauseMoney(c[dcaPauseMode + '_a_wallet']) }}</td>
+                        <td>{{ pauseMoney(c[dcaPauseMode + '_b_wallet']) }}</td>
+                        <td>{{ pauseMoney(c[dcaPauseMode + '_c_wallet']) }}</td>
+                        <td>{{ pauseMoney(c[dcaPauseMode + '_d_wallet']) }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <p class="note" style="margin: 10px 0 0">口径：月投 1000（无费），钱包 = 止盈累计回款 + 期末市值 + 期末囤现金（0% 机会成本，最保守）·「钱包差中位」= 与同基金坚持定投组的期末钱包差的中位数：B/C 与坚持组花出去的钱完全一致可直接比，D 多投的钱按 0 收益折算 ·「止盈 20%」= 任一净值日市值 ≥ 投入×1.2 全清重来，「无止盈」= 只买不卖持有到期末 · 2026-11-19 全市场结论：断缴闲置 82% 基金更薄（中位 −7 千）、恢复补投基本追平（+68 元）、熊市加倍 68% 基金更好；断缴该不该做取决于标的是否涨得回来——而那在当下不可知 · 分层主结论见上表「仅断缴过的基金」行</p>
+              </template>
+              <div v-else class="browse-empty">断缴实验数据尚未生成（运行 scripts/bear_pause_import.py 后可用）</div>
+            </div>
             <p class="note" v-if="STATIC_MODE && dca.meta?.generated_at"
               style="margin: 0 0 8px">静态快照（GitHub Pages）· 数据生成于 {{ dca.meta.generated_at.slice(0, 10) }} · 明细不含净值曲线 · 实时数据以内网部署为准</p>
             <!-- 统一筛选面板（2026-11-17 用户反馈：筛选区显乱）——一个面板三行分组，
@@ -3397,6 +3514,21 @@ watch(
                     :class="summaryFeeVal(dcaRoundsSummaryRow, 'full_cur_xirr') >= 0 ? 'chg-up' : 'chg-down'">{{ pct1(summaryFeeVal(dcaRoundsSummaryRow, 'full_cur_xirr')) }}</span><span v-else>—</span></div>
                 </div>
               </div>
+              <!-- 熊市断缴对照（2026-11-19 实验产品化：这只基金上四条平行时间线
+                   的期末钱包与年化；全史·gross 无费·止盈 20% 固定口径，不随弹窗
+                   tp/fee 切换；未参与实验的基金 fund=null 整块隐藏） -->
+              <template v-if="dcaRoundsPause">
+                <div class="dc-grid" data-pause-dialog style="grid-template-columns: repeat(4, 1fr); margin: 0 0 12px">
+                  <div class="dc-item" v-for="a in PAUSE_ARMS" :key="a.key" :title="a.tip">
+                    <div class="dc-label">{{ a.label }}<span class="dc-hint">断缴实验</span></div>
+                    <div class="dc-value">{{ pauseMoney(dcaRoundsPause['tp_' + a.key + '_wallet']) }}</div>
+                    <div class="dc-label" style="font-weight: 400">投入 {{ fmt(dcaRoundsPause['tp_' + a.key + '_out']) }} 元 · 年化
+                      <span :class="(dcaRoundsPause['tp_' + a.key + '_xirr'] ?? 0) >= 0 ? 'chg-up' : 'chg-down'">{{ pauseXirr(dcaRoundsPause['tp_' + a.key + '_xirr']) }}</span>
+                    </div>
+                  </div>
+                </div>
+                <p class="note" style="margin: -6px 0 12px">熊市断缴对照：熊市态 = 回撤 ≤-20% 进入、收窄回 &gt;-10% 恢复；本基金断缴 {{ dcaRoundsPause.pause_months }} / 共 {{ dcaRoundsPause.months }} 月（{{ dcaRoundsPause.episodes }} 次）· 钱包 = 止盈回款 + 期末市值 + 囤现金 · 无费·止盈 20% 固定口径（不随上方止盈点/费率切换）· 市场级结论见「熊市断缴实验」区块</p>
+              </template>
               <!-- 风险/波动指标（fund_risk_metrics 日更快照，随 navs 响应附带） -->
               <div v-if="dcaRoundsRisk" class="dc-grid"
                 style="grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); margin: 0 0 12px">
