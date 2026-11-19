@@ -315,6 +315,14 @@ def _tp_row(code="000001", tp=0.15):
          "full_rounds_disc": 4, "full_rounds_nom": 4,
          "w10_profit_rate_disc": 0.19, "w10_profit_rate_nom": 0.18,
          "full_profit_rate_disc": 0.24, "full_profit_rate_nom": 0.23,
+         # 「最近一次止盈后」当前轮（2026-11-19；本 fixture 不关心取值，
+         # 仅保列齐全防 import_tp_rows KeyError）
+         "full_last_tp": None, "full_last_tp_disc": None,
+         "full_last_tp_nom": None, "full_cur_invested": None,
+         "full_cur_profit_rate": None, "full_cur_profit_rate_disc": None,
+         "full_cur_profit_rate_nom": None,
+         "full_cur_xirr": None, "full_cur_xirr_disc": None,
+         "full_cur_xirr_nom": None,
          "tp": tp}
     return r
 
@@ -503,11 +511,13 @@ class TestDcaTpRoutes:
 
     def test_tp_summary_sql_and_rows(self, client, monkeypatch):
         """summary SQL 形状：WHERE code 精确匹配 ORDER BY tp；行映射带
-        三口径总收益率/年化字段并四舍五入。"""
+        三口径总收益率/年化字段并四舍五入（2026-11-19 追加止盈后当前轮
+        十字段，列序见 _TP_SUMMARY_SQL）。"""
         import app.dca_api as dca_mod
         import datetime as dt
         row = (0.15, 0.20, 0.12, 0.19, 0.11, 0.18, 0.10,
-               dt.date(2026, 11, 16) - dt.timedelta(days=3653))
+               dt.date(2026, 11, 16) - dt.timedelta(days=3653),
+               None, None, None, None, None, None, None, None, None, None)
         # ref 查询先行（fetchone 给 ref；fetchall 走 rows）
         conn = FakeConnOne((dt.date(2026, 11, 16),), rows=[row])
         _patch_connect(monkeypatch, dca_mod, conn)
@@ -520,6 +530,7 @@ class TestDcaTpRoutes:
         assert r["w10_profit_rate"] == 0.20 and r["w10_xirr"] == 0.12
         assert r["w10_profit_rate_disc"] == 0.19
         assert r["w10_xirr_nom"] == 0.10
+        assert r["full_last_tp"] is None and r["full_cur_xirr"] is None
         assert "tp = %s" not in "".join(conn.executed)
         assert any("WHERE code = %s" in sql and "ORDER BY tp" in sql
                    for sql in conn.executed)

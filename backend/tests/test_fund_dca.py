@@ -705,9 +705,18 @@ class TestDcaRiskJoin:
                      "rm.roll_vol, rm.vol_pctile, rm.risk_score,",
                      "rm.osc_per_year, rm.osc_pctile"):
             assert frag in _DCA_LIST_SQL and frag in _TP_LIST_SQL
-        assert _LIST_COLS[-9:] == ["vol_all", "vol_down_all", "mdd_all",
-                                   "sharpe_all", "roll_vol", "vol_pctile",
-                                   "risk_score", "osc_per_year", "osc_pctile"]
+        assert _LIST_COLS[-19:-10] == ["vol_all", "vol_down_all", "mdd_all",
+                                       "sharpe_all", "roll_vol", "vol_pctile",
+                                       "risk_score", "osc_per_year",
+                                       "osc_pctile"]
+        # 尾部十列 = 「最近一次止盈后」当前轮（2026-11-19，全史窗口）
+        assert _LIST_COLS[-10:] == ["full_last_tp", "full_last_tp_disc",
+                                    "full_last_tp_nom", "full_cur_invested",
+                                    "full_cur_profit_rate",
+                                    "full_cur_profit_rate_disc",
+                                    "full_cur_profit_rate_nom",
+                                    "full_cur_xirr", "full_cur_xirr_disc",
+                                    "full_cur_xirr_nom"]
         assert _TP_LIST_COLS == ["tp"] + _LIST_COLS
 
     def test_sort_risk_columns_map_rm_table(self):

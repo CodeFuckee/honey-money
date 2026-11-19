@@ -145,10 +145,11 @@ class TestDipReportRoutes:
         import datetime as dt
 
         import app.dca_api as dca_mod
-        # summary SELECT 8 列：tp, w10_profit_rate, w10_xirr, _disc×2, _nom×2,
-        # full_start；fetchone 按调用序返回 ref → summary 行
+        # summary SELECT 18 列：tp, w10 收益/年化×三口径, full_start,
+        # 止盈后当前轮十字段（2026-11-19）；fetchone 按调用序返回 ref → summary 行
         row = (0.20, 0.18, 0.92, 0.175, 0.90, 0.17, 0.88,
-               dt.date(2016, 11, 16))
+               dt.date(2016, 11, 16),
+               None, None, None, None, None, None, None, None, None, None)
         calls = {"i": 0}
 
         class SeqConn(FakeConnOne):

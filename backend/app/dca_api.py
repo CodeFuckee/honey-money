@@ -26,7 +26,12 @@ SELECT r.code, r.name, r.fund_type, r.alive, r.scale_yi, r.scale_date,
        t.dd_current, t.days_since_peak, t.dip_band,
        rm.vol_all, rm.vol_down_all, rm.mdd_all, rm.sharpe_all,
        rm.roll_vol, rm.vol_pctile, rm.risk_score,
-       rm.osc_per_year, rm.osc_pctile
+       rm.osc_per_year, rm.osc_pctile,
+       r.full_last_tp, r.full_last_tp_disc, r.full_last_tp_nom,
+       r.full_cur_invested,
+       r.full_cur_profit_rate, r.full_cur_profit_rate_disc,
+       r.full_cur_profit_rate_nom,
+       r.full_cur_xirr, r.full_cur_xirr_disc, r.full_cur_xirr_nom
 FROM fund_dca_result r
 LEFT JOIN fund_dip_timing t ON t.code = r.code
 LEFT JOIN fund_risk_metrics rm ON rm.code = r.code
@@ -85,6 +90,7 @@ _SORTABLE = {
     "vol_pctile",   # 波动指标列（LEFT JOIN fund_risk_metrics，全史口径）
     "risk_score",   # 综合波动分位（三指标横截面等权，越低越稳）
     "osc_pctile",   # 震荡分位（zigzag ±10% 频率×规则度，越高越像余弦）
+    "full_cur_xirr", "full_cur_profit_rate",   # 止盈后年化/收益率（全史当前轮）
 }
 # 费用口径后缀（gross=不含费沿用原列；disc=申购一折；nom=申购名义）。
 # fee 只影响 ORDER BY 与统计卡的列替换；SELECT 恒返回全部口径列，
@@ -92,7 +98,8 @@ _SORTABLE = {
 _LIST_FEE_SUFFIX = {"gross": "", "disc": "_disc", "nom": "_nom"}
 # 这些排序字段区分口径；scale_yi / code / full_start 与费用无关
 _FEE_SORTABLE = {"w10_xirr", "full_xirr", "w10_profit_rate", "full_profit_rate",
-                 "w10_rounds", "full_rounds", "gap_avg_days"}
+                 "w10_rounds", "full_rounds", "gap_avg_days",
+                 "full_cur_xirr", "full_cur_profit_rate"}
 # 排序落在时机表（t 别名）的字段；其余白名单字段在主表（r 别名）
 _T_SORTABLE = {"dd_current", "days_since_peak"}
 # 排序落在波动指标表（rm 别名）的字段（费用口径无关，同 scale_yi）
@@ -183,7 +190,13 @@ _LIST_COLS = ["code", "name", "fund_type", "alive", "scale_yi",
               # 波动指标列（LEFT JOIN fund_risk_metrics；全史口径，缺行为 NULL）
               "vol_all", "vol_down_all", "mdd_all", "sharpe_all",
               "roll_vol", "vol_pctile", "risk_score",
-              "osc_per_year", "osc_pctile"]
+              "osc_per_year", "osc_pctile",
+              # 「最近一次止盈后」当前轮（全史窗口；未止盈基金全 NULL）
+              "full_last_tp", "full_last_tp_disc", "full_last_tp_nom",
+              "full_cur_invested",
+              "full_cur_profit_rate", "full_cur_profit_rate_disc",
+              "full_cur_profit_rate_nom",
+              "full_cur_xirr", "full_cur_xirr_disc", "full_cur_xirr_nom"]
 # 浮点保留 4 位的字段（口径变体与原字段同规则）
 _LIST_ROUND4 = ("w10_xirr", "full_xirr", "w10_profit_rate",
                 "full_profit_rate", "w10_xirr_disc", "w10_xirr_nom",
@@ -192,7 +205,10 @@ _LIST_ROUND4 = ("w10_xirr", "full_xirr", "w10_profit_rate",
                 "full_profit_rate_disc", "full_profit_rate_nom",
                 "vol_all", "vol_down_all", "mdd_all", "sharpe_all",
                 "roll_vol", "vol_pctile", "risk_score",
-                "osc_per_year", "osc_pctile")
+                "osc_per_year", "osc_pctile",
+                "full_cur_profit_rate", "full_cur_profit_rate_disc",
+                "full_cur_profit_rate_nom",
+                "full_cur_xirr", "full_cur_xirr_disc", "full_cur_xirr_nom")
 
 
 def _safe(fn, default):
@@ -308,7 +324,8 @@ def fetch_dca_list(dsn: str, *, q: str = "", alive: str = "true",
             r["age_years"] = (round((ref - r["full_start"]).days / 365.25, 1)
                               if ref and r["full_start"] else None)
             r.pop("full_start", None)
-            for k in ("scale_date", "w10_start", "w10_end"):
+            for k in ("scale_date", "w10_start", "w10_end",
+                      "full_last_tp", "full_last_tp_disc", "full_last_tp_nom"):
                 if r[k]:
                     r[k] = r[k].isoformat()
         stats = None
@@ -659,7 +676,12 @@ SELECT r.tp, r.code, r.name, r.fund_type, r.alive, r.scale_yi, r.scale_date,
        t.dd_current, t.days_since_peak, t.dip_band,
        rm.vol_all, rm.vol_down_all, rm.mdd_all, rm.sharpe_all,
        rm.roll_vol, rm.vol_pctile, rm.risk_score,
-       rm.osc_per_year, rm.osc_pctile
+       rm.osc_per_year, rm.osc_pctile,
+       r.full_last_tp, r.full_last_tp_disc, r.full_last_tp_nom,
+       r.full_cur_invested,
+       r.full_cur_profit_rate, r.full_cur_profit_rate_disc,
+       r.full_cur_profit_rate_nom,
+       r.full_cur_xirr, r.full_cur_xirr_disc, r.full_cur_xirr_nom
 FROM fund_dca_tp_result r
 LEFT JOIN fund_dip_timing t ON t.code = r.code
 LEFT JOIN fund_risk_metrics rm ON rm.code = r.code
@@ -824,7 +846,8 @@ def fetch_dca_tp_list(dsn: str, *, tp: float = TAKE_PROFIT, q: str = "",
             r["age_years"] = (round((ref - r["full_start"]).days / 365.25, 1)
                               if ref and r["full_start"] else None)
             r.pop("full_start", None)
-            for k in ("scale_date", "w10_start", "w10_end"):
+            for k in ("scale_date", "w10_start", "w10_end",
+                      "full_last_tp", "full_last_tp_disc", "full_last_tp_nom"):
                 if r[k]:
                     r[k] = r[k].isoformat()
         stats = None
@@ -939,7 +962,12 @@ def fetch_dca_tp_rounds(dsn: str, code: str, fee: str = "nom",
 _TP_SUMMARY_SQL = """
 SELECT tp, w10_profit_rate, w10_xirr,
        w10_profit_rate_disc, w10_xirr_disc,
-       w10_profit_rate_nom, w10_xirr_nom, full_start
+       w10_profit_rate_nom, w10_xirr_nom, full_start,
+       full_last_tp, full_last_tp_disc, full_last_tp_nom,
+       full_cur_invested,
+       full_cur_profit_rate, full_cur_profit_rate_disc,
+       full_cur_profit_rate_nom,
+       full_cur_xirr, full_cur_xirr_disc, full_cur_xirr_nom
 FROM fund_dca_tp_result WHERE code = %s ORDER BY tp
 """
 
@@ -948,7 +976,8 @@ def fetch_dca_tp_summary(dsn: str, code: str) -> dict:
     """单基金全阈值总收益率/年化汇总（fund_dca_tp_result，w10 窗口）。
 
     每阈值一行，恒带三口径字段（gross 原列 / _disc / _nom 后缀）——前端
-    弹窗按当前费率口径取值，切口径无需重拉。降级约定同旧端点。
+    弹窗按当前费率口径取值，切口径无需重拉；另附「最近一次止盈后」当前轮
+    十字段（全史窗口，2026-11-19；未止盈基金全 NULL）。降级约定同旧端点。
     """
 
     def run():
@@ -967,7 +996,22 @@ def fetch_dca_tp_summary(dsn: str, code: str) -> dict:
                 "w10_xirr_nom": round(r[6], 4) if r[6] is not None else None,
                 "w10_start_iso": r[7].isoformat() if r[7] else None,
                 "age_years": (round((ref - r[7]).days / 365.25, 1)
-                              if ref and r[7] else None)}
+                              if ref and r[7] else None),
+                "full_last_tp": r[8].isoformat() if r[8] else None,
+                "full_last_tp_disc": r[9].isoformat() if r[9] else None,
+                "full_last_tp_nom": r[10].isoformat() if r[10] else None,
+                "full_cur_invested": r[11],
+                "full_cur_profit_rate": (round(r[12], 4)
+                                         if r[12] is not None else None),
+                "full_cur_profit_rate_disc": (round(r[13], 4)
+                                              if r[13] is not None else None),
+                "full_cur_profit_rate_nom": (round(r[14], 4)
+                                             if r[14] is not None else None),
+                "full_cur_xirr": round(r[15], 4) if r[15] is not None else None,
+                "full_cur_xirr_disc": (round(r[16], 4)
+                                       if r[16] is not None else None),
+                "full_cur_xirr_nom": (round(r[17], 4)
+                                      if r[17] is not None else None)}
                for r in rows]
         return {"status": "up", "code": code, "rows": out}
     return _safe(run, {"status": "down", "detail": "pg unreachable",

@@ -638,6 +638,8 @@ const DCA_TOGGLE_COLS = [
   { key: 'w10_profit_rate', label: '总收益率' },
   { key: 'w10_xirr', label: '年化·近10年' },
   { key: 'full_xirr', label: '年化·全史' },
+  { key: 'full_cur_profit_rate', label: '止盈后收益率' },
+  { key: 'full_cur_xirr', label: '止盈后年化' },
   { key: 'w10_range', label: '回测区间' },
 ]
 const dcaVisibleCols = ref(DCA_TOGGLE_COLS.map(c => c.key))
@@ -3168,6 +3170,25 @@ watch(
                     <span v-else>—</span>
                   </template>
                 </Column>
+                <!-- 「最近一次止盈后」当前轮（2026-11-19 用户需求，全史窗口
+                     口径——与近10年列不可直接对比）：止盈重新开始定投至今
+                     的进行中轮次收益；从未止盈显示 — -->
+                <Column field="full_cur_profit_rate" style="width: 112px" sortable bodyClass="num-col" v-if="colVisible('full_cur_profit_rate')">
+                  <template #header><span title="止盈后总收益率（全史口径）：最近一次止盈日全仓赎回后重新开始定投的当前轮（进行中）市值/已投入-1，随费用口径与止盈点切换；全史从未止盈的基金显示 —；与「总收益率」（近10年窗口）口径不同、不可直接对比">止盈后收益率</span></template>
+                  <template #body="{ data }">
+                    <span v-if="dcaFeeVal(data, 'full_cur_profit_rate') != null"
+                      :class="dcaFeeVal(data, 'full_cur_profit_rate') >= 0 ? 'chg-up' : 'chg-down'">{{ pct1(dcaFeeVal(data, 'full_cur_profit_rate')) }}</span>
+                    <span v-else>—</span>
+                  </template>
+                </Column>
+                <Column field="full_cur_xirr" style="width: 104px" sortable bodyClass="num-col" v-if="colVisible('full_cur_xirr')">
+                  <template #header><span title="止盈后年化（全史口径）：最近一次止盈日重新开始定投的当前轮 XIRR（资金加权，投入现金流=止盈后每月定投、回收=当前市值），轮次不足 90 天留空；随费用口径与止盈点切换；与「年化·近10年」口径不同、不可直接对比">止盈后年化</span></template>
+                  <template #body="{ data }">
+                    <span v-if="dcaFeeVal(data, 'full_cur_xirr') != null"
+                      :class="dcaFeeVal(data, 'full_cur_xirr') >= 0 ? 'chg-up' : 'chg-down'">{{ pct1(dcaFeeVal(data, 'full_cur_xirr')) }}</span>
+                    <span v-else>—</span>
+                  </template>
+                </Column>
                 <Column header="回测区间" style="width: 205px" v-if="colVisible('w10_range')">
                   <template #body="{ data }">
                     <span class="mono">{{ data.w10_start || '—' }} ~ {{ data.w10_end || '—' }}</span>
@@ -3180,7 +3201,7 @@ watch(
                 </Column>
               </DataTable>
             </div>
-            <p class="note">口径：每月首个净值日投入固定金额，任一净值日持仓收益达止盈线即全仓赎回并重开新一轮（分红再投）；排行/统计/散点/详情共用同一费用口径，搜索栏或散点区可切换（不含费 / 含费·申购一折 / 含费·申购名义，赎回费各口径一致按持有天数阶梯收取）；排行/统计/散点共用同一基金类型口径，搜索栏或散点区可切换（默认仅权益类：股票型/偏股·灵活·平衡混合/股票指数/海外权益共 8 类，全市场可切回，债基·FOF·货币·偏债不在权益类内） · 统计卡为当前类型与在市口径全集分位，不随搜索与区间筛选变化 · 新基金（回测窗口 &lt;90 天）年化留空 · 「当前回撤」= 复权净值距历史最高的跌幅（日更顺带刷新），非在市基金无此数据；「甜蜜点」结论来自 2015~2026 权益基金 98 万起点历史模拟（-25~-30% 回撤起定投首轮止盈中位 582 天、成功率 63.2%、年化 32.0%，20% 止盈线含费口径） · 波动指标列（年化/下行波动率、最大回撤、夏普 + 波动率分位）为基金净值快照，全史口径（全部历史复权净值，2026-11-18 起由近1年改全史；复权日增长率、√252 年化、无风险利率 0，fund_risk_metrics 日更顺带刷新，样本不足 20 个收益为 —），与回测口径独立、不随费用/止盈点切换 · 「综合波动分位」= 全史年化波动率/下行波动率/最大回撤三项在全市场同类基金中的百分位排名等权平均（percent_rank，0~100%，越低越稳），日更顺带重算（三指标缺任一按可得项平均，全缺为 —） · 「震荡分位」= 全史净值 zigzag（±10% 确认反转）年均规则摆动轮数（频率 × 间隔均匀度）的横截面百分位，越高 = 净值越规律地上上下下 · 数据为离线回测快照，重跑 scripts/fund_dca_backtest.py 并经 app.dca_store 导入后刷新 · 点行或「详情」查看每轮止盈明细 · 止盈点切换（搜索栏按钮组或对比区块行/圆点）仅改排行/统计/明细数据源，散点/分箱固定 20% 口径 · 历史统计不构成任何操作建议</p>
+            <p class="note">口径：每月首个净值日投入固定金额，任一净值日持仓收益达止盈线即全仓赎回并重开新一轮（分红再投）；排行/统计/散点/详情共用同一费用口径，搜索栏或散点区可切换（不含费 / 含费·申购一折 / 含费·申购名义，赎回费各口径一致按持有天数阶梯收取）；排行/统计/散点共用同一基金类型口径，搜索栏或散点区可切换（默认仅权益类：股票型/偏股·灵活·平衡混合/股票指数/海外权益共 8 类，全市场可切回，债基·FOF·货币·偏债不在权益类内） · 统计卡为当前类型与在市口径全集分位，不随搜索与区间筛选变化 · 新基金（回测窗口 &lt;90 天）年化留空 · 「当前回撤」= 复权净值距历史最高的跌幅（日更顺带刷新），非在市基金无此数据；「甜蜜点」结论来自 2015~2026 权益基金 98 万起点历史模拟（-25~-30% 回撤起定投首轮止盈中位 582 天、成功率 63.2%、年化 32.0%，20% 止盈线含费口径） · 波动指标列（年化/下行波动率、最大回撤、夏普 + 波动率分位）为基金净值快照，全史口径（全部历史复权净值，2026-11-18 起由近1年改全史；复权日增长率、√252 年化、无风险利率 0，fund_risk_metrics 日更顺带刷新，样本不足 20 个收益为 —），与回测口径独立、不随费用/止盈点切换 · 「综合波动分位」= 全史年化波动率/下行波动率/最大回撤三项在全市场同类基金中的百分位排名等权平均（percent_rank，0~100%，越低越稳），日更顺带重算（三指标缺任一按可得项平均，全缺为 —） · 「震荡分位」= 全史净值 zigzag（±10% 确认反转）年均规则摆动轮数（频率 × 间隔均匀度）的横截面百分位，越高 = 净值越规律地上上下下 · 「止盈后收益率/止盈后年化」= 最近一次止盈日全仓赎回后重新开始定投的当前轮（进行中）总收益率与 XIRR（全史窗口口径，与「总收益率/年化·近10年」列不可直接对比；随费用口径与止盈点切换，轮次不足 90 天年化留空，全史从未止盈显示 —，日更回测顺带刷新）· 数据为离线回测快照，重跑 scripts/fund_dca_backtest.py 并经 app.dca_store 导入后刷新 · 点行或「详情」查看每轮止盈明细 · 止盈点切换（搜索栏按钮组或对比区块行/圆点）仅改排行/统计/明细数据源，散点/分箱固定 20% 口径 · 历史统计不构成任何操作建议</p>
 
 
             <!-- ===== 年限 × 规模 三维散点（每基金一点） + 分箱统计 ===== -->
@@ -3352,6 +3373,28 @@ watch(
                   <div class="dc-label">年化 XIRR·近10年<span class="dc-hint">{{ dcaRoundsFeeLabel }}</span></div>
                   <div class="dc-value"><span v-if="summaryFeeVal(dcaRoundsSummaryRow, 'w10_xirr') != null"
                     :class="summaryFeeVal(dcaRoundsSummaryRow, 'w10_xirr') >= 0 ? 'chg-up' : 'chg-down'">{{ pct1(summaryFeeVal(dcaRoundsSummaryRow, 'w10_xirr')) }}</span><span v-else>—</span></div>
+                </div>
+              </div>
+              <!-- 「最近一次止盈后」当前轮（全史窗口，2026-11-19）：止盈重新
+                   开始定投至今的进行中轮次；随弹窗止盈点/费率切换取值 -->
+              <div class="dc-grid" style="grid-template-columns: repeat(4, 1fr); margin: 0 0 12px">
+                <div class="dc-item">
+                  <div class="dc-label" title="全史回测中最近一次止盈的日期（该日全仓赎回并重新开始定投）；随费用口径可能位移；从未止盈显示 —">上次止盈日<span class="dc-hint">全史</span></div>
+                  <div class="dc-value mono">{{ summaryFeeVal(dcaRoundsSummaryRow, 'full_last_tp') || '—' }}</div>
+                </div>
+                <div class="dc-item">
+                  <div class="dc-label" title="上次止盈日以来重新投入的定投金额（每月首个净值日投入，与费用口径无关）">本轮已投入<span class="dc-hint">全史</span></div>
+                  <div class="dc-value">{{ summaryFeeVal(dcaRoundsSummaryRow, 'full_cur_invested') != null ? fmt(summaryFeeVal(dcaRoundsSummaryRow, 'full_cur_invested')) + ' 元' : '—' }}</div>
+                </div>
+                <div class="dc-item">
+                  <div class="dc-label" title="止盈后总收益率（全史）：当前轮（进行中）市值/已投入-1，随费率口径切换；与上方「总收益率·近10年」口径不同、不可直接对比；从未止盈显示 —">止盈后收益率<span class="dc-hint">全史·{{ dcaRoundsFeeLabel }}</span></div>
+                  <div class="dc-value"><span v-if="summaryFeeVal(dcaRoundsSummaryRow, 'full_cur_profit_rate') != null"
+                    :class="summaryFeeVal(dcaRoundsSummaryRow, 'full_cur_profit_rate') >= 0 ? 'chg-up' : 'chg-down'">{{ pct1(summaryFeeVal(dcaRoundsSummaryRow, 'full_cur_profit_rate')) }}</span><span v-else>—</span></div>
+                </div>
+                <div class="dc-item">
+                  <div class="dc-label" title="止盈后年化（全史）：当前轮 XIRR（资金加权：止盈后每月定投为投入、当前市值为回收），轮次不足 90 天留空；随费率口径切换；与上方「年化·近10年」口径不同、不可直接对比">止盈后年化<span class="dc-hint">全史·{{ dcaRoundsFeeLabel }}</span></div>
+                  <div class="dc-value"><span v-if="summaryFeeVal(dcaRoundsSummaryRow, 'full_cur_xirr') != null"
+                    :class="summaryFeeVal(dcaRoundsSummaryRow, 'full_cur_xirr') >= 0 ? 'chg-up' : 'chg-down'">{{ pct1(summaryFeeVal(dcaRoundsSummaryRow, 'full_cur_xirr')) }}</span><span v-else>—</span></div>
                 </div>
               </div>
               <!-- 风险/波动指标（fund_risk_metrics 日更快照，随 navs 响应附带） -->

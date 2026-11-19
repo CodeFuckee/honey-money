@@ -185,6 +185,20 @@ def _finalize_tp_state(st: dict, dates: pd.DatetimeIndex, adj: np.ndarray,
     profit = (st["realized"] + (end_value - st["invested"])
               if st["basis_units"] > 0 else st["realized"])
     span = (dates[-1] - dates[0]).days
+    # 「最近一次止盈后」当前轮（进行中，2026-11-19 用户需求）：止盈重新
+    # 开始定投至窗口末日的收益。rounds=0 时前提不存在 → 全 None；
+    # end_value 即当前轮期末市值（净赎回口径，与窗口 profit_rate 一致）
+    last_tp = st["last_tp"]
+    cur_invested = cur_pr = cur_xirr = None
+    if st["rounds"] > 0 and last_tp is not None:
+        cur_invested = st["invested"]
+        if st["invested"] > 0:
+            cur_pr = end_value / st["invested"] - 1.0
+            cur_flows = [(d, a) for d, a in st["flows"] if d > last_tp]
+            cur_flows.append((dates[-1], end_value))
+            cur_xirr = (xirr(cur_flows)
+                        if (dates[-1] - last_tp).days >= MIN_SPAN_DAYS
+                        else None)
     return {
         "start": str(dates[0].date()),
         "end": str(dates[-1].date()),
@@ -196,6 +210,10 @@ def _finalize_tp_state(st: dict, dates: pd.DatetimeIndex, adj: np.ndarray,
         "final_value": round(invested_total + profit, 2),
         "profit_rate": profit / invested_total if invested_total > 0 else None,
         "xirr": xirr(st["flows"]) if span >= MIN_SPAN_DAYS else None,
+        "last_tp": str(last_tp.date()) if last_tp is not None else None,
+        "cur_invested": cur_invested,
+        "cur_profit_rate": cur_pr,
+        "cur_xirr": cur_xirr,
     }
 
 
@@ -276,6 +294,10 @@ def simulate(dates: pd.DatetimeIndex, adj: np.ndarray,
     profit 为市值口径收益率（≥阈值，含跳空越过部分）；tp_nav=止盈日
     复权净值；invested=本轮累计投入；sub_fee/redeem_fee=本轮申购费
     合计/赎回费（无费场景为 0）；net_profit=本轮净收益（回款-投入）。
+    res["last_tp"]/["cur_invested"]/["cur_profit_rate"]/["cur_xirr"]：
+    「最近一次止盈后」当前轮（进行中）四字段——止盈日/本轮已投入/
+    本轮市值口径收益率/本轮 XIRR（<90 天置 None）；rounds=0 全 None
+    （cur_profit_rate 用净赎回口径期末市值，与窗口 profit_rate 一致）。
     """
     return simulate_multi(dates, adj, fee, [take_profit])[take_profit]
 
@@ -336,6 +358,27 @@ def run_backtest(nav: pd.DataFrame, basic: pd.DataFrame,
             # 随场景份额略有差异，各自自洽）
             disc_res = simulate(*prep, fee["disc"]) if prep else None
             nom_res = simulate(*prep, fee["nom"]) if prep else None
+            if prefix == "full":
+                # 全史「最近一次止盈后」当前轮三口径字段（止盈日随费用
+                # 口径位移，invested 与费用无关记一份）
+                row["full_last_tp"] = res["last_tp"] if res else None
+                row["full_cur_invested"] = (res["cur_invested"]
+                                            if res else None)
+                row["full_cur_profit_rate"] = (res["cur_profit_rate"]
+                                               if res else None)
+                row["full_cur_xirr"] = res["cur_xirr"] if res else None
+                row["full_last_tp_disc"] = (disc_res["last_tp"]
+                                            if disc_res else None)
+                row["full_cur_profit_rate_disc"] = (disc_res["cur_profit_rate"]
+                                                    if disc_res else None)
+                row["full_cur_xirr_disc"] = (disc_res["cur_xirr"]
+                                             if disc_res else None)
+                row["full_last_tp_nom"] = (nom_res["last_tp"]
+                                           if nom_res else None)
+                row["full_cur_profit_rate_nom"] = (nom_res["cur_profit_rate"]
+                                                   if nom_res else None)
+                row["full_cur_xirr_nom"] = (nom_res["cur_xirr"]
+                                            if nom_res else None)
             row[f"{prefix}_xirr_disc"] = disc_res["xirr"] if disc_res else None
             row[f"{prefix}_xirr_nom"] = nom_res["xirr"] if nom_res else None
             # 排行表格口径切换不止年化：轮次/总收益率也随口径入库
@@ -422,6 +465,26 @@ def run_backtest_tp(nav: pd.DataFrame, basic: pd.DataFrame,
                                                              "profit_rate")
                 row[f"{prefix}_profit_rate_nom"] = _or_none(p_res["nom"],
                                                             "profit_rate")
+                if prefix == "full":
+                    # 全史「最近一次止盈后」当前轮三口径字段（与旧引擎
+                    # run_backtest 行键集合一致——tp=0.20 锚点测试依赖）
+                    row["full_last_tp"] = _or_none(p_res["gross"], "last_tp")
+                    row["full_cur_invested"] = _or_none(p_res["gross"],
+                                                        "cur_invested")
+                    row["full_cur_profit_rate"] = _or_none(p_res["gross"],
+                                                           "cur_profit_rate")
+                    row["full_cur_xirr"] = _or_none(p_res["gross"], "cur_xirr")
+                    row["full_last_tp_disc"] = _or_none(p_res["disc"],
+                                                        "last_tp")
+                    row["full_cur_profit_rate_disc"] = _or_none(
+                        p_res["disc"], "cur_profit_rate")
+                    row["full_cur_xirr_disc"] = _or_none(p_res["disc"],
+                                                         "cur_xirr")
+                    row["full_last_tp_nom"] = _or_none(p_res["nom"], "last_tp")
+                    row["full_cur_profit_rate_nom"] = _or_none(
+                        p_res["nom"], "cur_profit_rate")
+                    row["full_cur_xirr_nom"] = _or_none(p_res["nom"],
+                                                        "cur_xirr")
             rows.append(row)
             # w10 三口径轮次明细全量入库（与旧表同一窗口口径）
             for fee_name in ("gross", "disc", "nom"):

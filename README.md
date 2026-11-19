@@ -49,7 +49,11 @@ backend/            Python 后端（FastAPI）
                       2026-11-17 表格合并后前端不再调用，端点保留 API 兼容）；
                       排行两端点行内附时机列 dd_current/days_since_peak/dip_band
                       （LEFT JOIN fund_dip_timing）并支持五维度区间筛选参数
-                      （age/gap/xirr/dd/pr 边界，语义同 timing 端点）
+                      （age/gap/xirr/dd/pr 边界，语义同 timing 端点）+
+                      「最近一次止盈后」当前轮十字段 full_last_tp(+_disc/_nom)/
+                      full_cur_invested/full_cur_profit_rate(+_disc/_nom)/
+                      full_cur_xirr(+_disc/_nom)（全史窗口，2026-11-19；
+                      summary 端点行内同附，弹窗按 tp/fee 切换取值）
   tests/              离线 pytest 用例（API 骨架 + 爬虫 + 任务调度）
 frontend/           Vue3 + Vite 前端
   src/App.vue         服务仪表盘（Carbon 风格）：四状态（加载骨架/空态插画/
@@ -72,6 +76,9 @@ frontend/           Vue3 + Vite 前端
                       2026-11-18 追加波动指标五列（年化/下行波动率、最大
                       回撤、夏普·近1年 + 波动率分位，LEFT JOIN
                       fund_risk_metrics 可排序，与数据页基金净值表同源）；
+                      2026-11-19 追加「止盈后收益率/止盈后年化」两列
+                      （最近一次止盈日重新定投的当前轮·全史窗口，可排序，
+                      未止盈显示 —，与近10年列不可直接对比）；
                       列显示过滤 MultiSelect 自选显隐列（代码/名称/操作
                       恒显）；五维度区间筛选面板（运作年限/止盈间隔/年化/
                       当前回撤/总收益率，回撤输入正数幅度，服务端过滤，
@@ -96,7 +103,10 @@ frontend/           Vue3 + Vite 前端
                       全页开关联动；弹窗内可切换止盈点（局部状态不波及排行），
                       净值曲线叠加全部档位止盈三角、按档位着色、当前档高亮；弹窗内可切
                       费率口径（局部状态），统计卡含总收益率/年化 XIRR（近 10 年、
-                      随止盈点与费率口径，数据源 /api/funds/dca/tp/{code}/summary））；
+                      随止盈点与费率口径，数据源 /api/funds/dca/tp/{code}/summary）
+                      + 「止盈后当前轮」四卡（2026-11-19：上次止盈日/本轮已投入/
+                      止盈后收益率/止盈后年化，全史窗口，随弹窗止盈点与费率
+                      口径联动，未止盈显示 —））；
                       下方「年限 × 规模 × 年化」
                       可旋转三维散点，年化口径三档切换（默认含费·申购
                       名义；不含费/含费·申购一折可选——申赎费用建模见

@@ -77,6 +77,18 @@ ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS full_profit_rate_disc DOUBL
 ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS full_profit_rate_nom DOUBLE PRECISION;
 ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS gap_avg_days_disc DOUBLE PRECISION;
 ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS gap_avg_days_nom DOUBLE PRECISION;
+-- 「最近一次止盈后」当前轮（全史窗口，2026-11-19）：止盈日随费用口径位移
+-- 三列，invested 与费用无关一列，收益率/年化三口径各一列
+ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS full_last_tp DATE;
+ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS full_last_tp_disc DATE;
+ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS full_last_tp_nom DATE;
+ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS full_cur_invested DOUBLE PRECISION;
+ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS full_cur_profit_rate DOUBLE PRECISION;
+ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS full_cur_profit_rate_disc DOUBLE PRECISION;
+ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS full_cur_profit_rate_nom DOUBLE PRECISION;
+ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS full_cur_xirr DOUBLE PRECISION;
+ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS full_cur_xirr_disc DOUBLE PRECISION;
+ALTER TABLE fund_dca_result ADD COLUMN IF NOT EXISTS full_cur_xirr_nom DOUBLE PRECISION;
 
 CREATE TABLE IF NOT EXISTS fund_dca_meta (
   id           BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
@@ -109,9 +121,16 @@ _COLS = ["code", "name", "fund_type", "alive", "scale_yi", "scale_date",
          "w10_xirr_disc", "w10_xirr_nom", "full_xirr_disc", "full_xirr_nom",
          "w10_rounds_disc", "w10_rounds_nom", "full_rounds_disc",
          "full_rounds_nom", "w10_profit_rate_disc", "w10_profit_rate_nom",
-         "full_profit_rate_disc", "full_profit_rate_nom"]
+         "full_profit_rate_disc", "full_profit_rate_nom",
+         # 「最近一次止盈后」当前轮（全史窗口，2026-11-19）
+         "full_last_tp", "full_last_tp_disc", "full_last_tp_nom",
+         "full_cur_invested",
+         "full_cur_profit_rate", "full_cur_profit_rate_disc",
+         "full_cur_profit_rate_nom",
+         "full_cur_xirr", "full_cur_xirr_disc", "full_cur_xirr_nom"]
 
-_DATE_COLS = {"scale_date", "w10_start", "w10_end", "full_start", "full_end"}
+_DATE_COLS = {"scale_date", "w10_start", "w10_end", "full_start", "full_end",
+              "full_last_tp", "full_last_tp_disc", "full_last_tp_nom"}
 _INT_COLS = {"w10_months", "w10_rounds", "full_months", "full_rounds",
              "w10_rounds_disc", "w10_rounds_nom",
              "full_rounds_disc", "full_rounds_nom"}
@@ -120,7 +139,11 @@ _FLOAT_COLS = {"scale_yi", "w10_invested", "w10_final_value", "w10_profit_rate",
                "full_profit_rate", "full_xirr",
                "w10_xirr_disc", "w10_xirr_nom", "full_xirr_disc", "full_xirr_nom",
                "w10_profit_rate_disc", "w10_profit_rate_nom",
-               "full_profit_rate_disc", "full_profit_rate_nom"}
+               "full_profit_rate_disc", "full_profit_rate_nom",
+               "full_cur_invested",
+               "full_cur_profit_rate", "full_cur_profit_rate_disc",
+               "full_cur_profit_rate_nom",
+               "full_cur_xirr", "full_cur_xirr_disc", "full_cur_xirr_nom"}
 
 _ALIVE_WINDOW_DAYS = 45   # 最后净值日距数据集最新净值日的在市窗口
 
@@ -267,6 +290,14 @@ CREATE TABLE IF NOT EXISTS fund_dca_tp_result (
   full_profit_rate_disc DOUBLE PRECISION, full_profit_rate_nom DOUBLE PRECISION,
   gap_avg_days DOUBLE PRECISION, gap_min_days INTEGER, gap_max_days INTEGER,
   gap_avg_days_disc DOUBLE PRECISION, gap_avg_days_nom DOUBLE PRECISION,
+  -- 「最近一次止盈后」当前轮（全史窗口，2026-11-19，与旧表同组十列）
+  full_last_tp DATE, full_last_tp_disc DATE, full_last_tp_nom DATE,
+  full_cur_invested DOUBLE PRECISION,
+  full_cur_profit_rate DOUBLE PRECISION,
+  full_cur_profit_rate_disc DOUBLE PRECISION,
+  full_cur_profit_rate_nom DOUBLE PRECISION,
+  full_cur_xirr DOUBLE PRECISION,
+  full_cur_xirr_disc DOUBLE PRECISION, full_cur_xirr_nom DOUBLE PRECISION,
   PRIMARY KEY (code, tp)
 );
 CREATE INDEX IF NOT EXISTS idx_fund_dca_tp_alive ON fund_dca_tp_result (alive);
@@ -323,6 +354,19 @@ CREATE TABLE IF NOT EXISTS fund_dip_validation (
   xirr_p75        DOUBLE PRECISION,
   PRIMARY KEY (grp, bucket, tp)
 );
+
+-- 已有部署的 tp 结果表补「最近一次止盈后」当前轮十列
+-- （CREATE TABLE IF NOT EXISTS 对已存在表不生效，同 fund_dca_result 迁移）
+ALTER TABLE fund_dca_tp_result ADD COLUMN IF NOT EXISTS full_last_tp DATE;
+ALTER TABLE fund_dca_tp_result ADD COLUMN IF NOT EXISTS full_last_tp_disc DATE;
+ALTER TABLE fund_dca_tp_result ADD COLUMN IF NOT EXISTS full_last_tp_nom DATE;
+ALTER TABLE fund_dca_tp_result ADD COLUMN IF NOT EXISTS full_cur_invested DOUBLE PRECISION;
+ALTER TABLE fund_dca_tp_result ADD COLUMN IF NOT EXISTS full_cur_profit_rate DOUBLE PRECISION;
+ALTER TABLE fund_dca_tp_result ADD COLUMN IF NOT EXISTS full_cur_profit_rate_disc DOUBLE PRECISION;
+ALTER TABLE fund_dca_tp_result ADD COLUMN IF NOT EXISTS full_cur_profit_rate_nom DOUBLE PRECISION;
+ALTER TABLE fund_dca_tp_result ADD COLUMN IF NOT EXISTS full_cur_xirr DOUBLE PRECISION;
+ALTER TABLE fund_dca_tp_result ADD COLUMN IF NOT EXISTS full_cur_xirr_disc DOUBLE PRECISION;
+ALTER TABLE fund_dca_tp_result ADD COLUMN IF NOT EXISTS full_cur_xirr_nom DOUBLE PRECISION;
 """
 
 _TP_COLS = ["tp"] + _COLS
