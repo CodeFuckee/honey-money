@@ -1299,38 +1299,109 @@ async function loadMarketCompare() {
 
 const _marketN = v => v === 0 ? 'T' : (v > 0 ? 'T+' + v : 'T' + v)
 
+// 双 y 轴量纲（研报原图同款：左轴=5·19、右轴=9·24，各自量纲满幅铺展）。
+// 两轴取相同格数 K 且共用同一个「零刻度以下格数 m」→ 网格线逐条对齐、
+// 0% 刻度同高（虚线基准线对两线同时成立），读数必须各看各的轴。
+const _MARKET_LADDER = []
+for (const base of [1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 7.5, 8, 10])
+  for (let k = -2; k <= 2; k++) _MARKET_LADDER.push(base * 10 ** k)
+_MARKET_LADDER.sort((a, b) => a - b)
+
+function _marketAxisRange(lo, hi, m, K) {
+  const step = _MARKET_LADDER.find(c => m * c >= -lo && (K - m) * c >= hi)
+    || 10 ** Math.ceil(Math.log10(Math.max(-lo, hi, 1e-6)))
+  return { min: -m * step, max: (K - m) * step, interval: step }
+}
+
+function _marketDualAxes(pts, eps) {
+  const ext = key => {
+    const vals = pts.filter(p => p[key] != null).map(p => p[key])
+    return vals.length ? { lo: Math.min(...vals), hi: Math.max(...vals) } : null
+  }
+  const e1 = ext('r1'), e2 = ext('r2')
+  if (!e1 || !e2) return null
+  // 右轴量纲需覆盖 924 线与全部叠加脉冲线（同轴读数）
+  for (const ep of eps || []) {
+    for (const [, r] of ep.points || []) {
+      if (r == null) continue
+      e2.lo = Math.min(e2.lo, r)
+      e2.hi = Math.max(e2.hi, r)
+    }
+  }
+  const K = 10
+  let best = null
+  for (let m = 1; m < K; m++) {
+    const a1 = _marketAxisRange(e1.lo, e1.hi, m, K)
+    const a2 = _marketAxisRange(e2.lo, e2.hi, m, K)
+    const waste = Math.max(K * a1.interval / (e1.hi - e1.lo),
+                           K * a2.interval / (e2.hi - e2.lo))
+    if (!best || waste < best.waste) best = { waste, a1, a2 }
+  }
+  return best
+}
+
+const _MAIN1 = '5·19 行情（T=1999-05-19）'
+const _MAIN2 = '9·24 行情（T=2024-09-24）'
+
 function renderMarketChart() {
   if (marketChartInstance) { marketChartInstance.dispose(); marketChartInstance = null }
   const body = marketCompare.value.body
   if (!marketChartEl.value || !body || body.status !== 'up' || !body.points.length) return
   marketChartInstance = echarts.init(marketChartEl.value)
   const pts = body.points
+  const eps = body.episodes || []
   const line = key => pts.filter(p => p[key] != null).map(p => [p.n, p[key]])
+  const axes = _marketDualAxes(pts, eps) || { a1: {}, a2: {} }
   marketChartInstance.setOption({
     animation: false,
     tooltip: { trigger: 'axis', confine: true, formatter: ps => {
       const n = ps.length ? ps[0].value[0] : null
       const hit = pts.find(p => p.n === n) || {}
-      const row = (label, dk, rk) => hit[rk] == null
-        ? `${label}：—`
-        : `${label}（${hit[dk]}）：<b>${pct1(hit[rk])}</b>`
-      return `T 基准 ${_marketN(n)}<br>${row('5·19', 'd1', 'r1')}<br>${row('9·24', 'd2', 'r2')}`
+      const lines = [`T 基准 ${_marketN(n)}`]
+      if (hit.r1 != null) lines.push(`5·19（${hit.d1}）：<b>${pct1(hit.r1)}</b>`)
+      if (hit.r2 != null) lines.push(`9·24（${hit.d2}）：<b>${pct1(hit.r2)}</b>`)
+      for (const s of ps) {
+        if (s.seriesName === _MAIN1 || s.seriesName === _MAIN2) continue
+        lines.push(`${s.seriesName}：<b>${pct1(s.value[1])}</b>`)
+      }
+      return lines.join('<br>')
     } },
-    legend: { data: ['5·19 行情（T=1999-05-19）', '9·24 行情（T=2024-09-24）'], top: 0 },
-    grid: { left: 64, right: 24, top: 40, bottom: 48 },
+    legend: {
+      data: [_MAIN1, _MAIN2, ...eps.map(e => `${e.t} ${e.label}`)],
+      top: 0, itemWidth: 14, itemHeight: 8, textStyle: { fontSize: 10 },
+    },
+    grid: { left: 64, right: 56, top: 64, bottom: 48 },
     xAxis: { type: 'value', min: -body.back, max: body.fwd, interval: 40,
       axisLabel: { fontSize: 10, formatter: _marketN } },
-    yAxis: { type: 'value',
-      axisLabel: { fontSize: 10, formatter: v => (v * 100).toFixed(0) + '%' },
-      splitLine: { lineStyle: { color: '#eee' } } },
+    yAxis: [
+      { type: 'value', min: axes.a1.min, max: axes.a1.max, interval: axes.a1.interval,
+        axisLabel: { fontSize: 10, color: '#c9313d',
+          formatter: v => (v * 100).toFixed(0) + '%' },
+        axisLine: { show: true, lineStyle: { color: 'rgba(201,49,61,0.45)' } },
+        splitLine: { lineStyle: { color: '#eee' } } },
+      { type: 'value', position: 'right', min: axes.a2.min, max: axes.a2.max,
+        interval: axes.a2.interval,
+        axisLabel: { fontSize: 10, color: '#4e79a7',
+          formatter: v => (v * 100).toFixed(0) + '%' },
+        axisLine: { show: true, lineStyle: { color: 'rgba(78,121,167,0.45)' } },
+        splitLine: { show: false } },
+    ],
     series: [
-      { name: '5·19 行情（T=1999-05-19）', type: 'line', showSymbol: false,
+      ...eps.map(ep => ({
+        name: `${ep.t} ${ep.label}`, type: 'line', showSymbol: false,
+        yAxisIndex: 1, z: 2, data: ep.points,
+        lineStyle: { width: 1.1, color: ep.color, opacity: 0.9 },
+        itemStyle: { color: ep.color },
+      })),
+      { name: _MAIN1, type: 'line', showSymbol: false,
+        yAxisIndex: 0, z: 3,
         data: line('r1'), lineStyle: { width: 1.4, color: '#c9313d' },
         itemStyle: { color: '#c9313d' },
         markLine: { silent: true, symbol: 'none', label: { show: false },
           lineStyle: { type: 'dashed', color: '#666' },
           data: [{ xAxis: 0 }, { yAxis: 0 }] } },
-      { name: '9·24 行情（T=2024-09-24）', type: 'line', showSymbol: false,
+      { name: _MAIN2, type: 'line', showSymbol: false,
+        yAxisIndex: 1, z: 3,
         data: line('r2'), lineStyle: { width: 1.4, color: '#4e79a7' },
         itemStyle: { color: '#4e79a7' } },
     ],
@@ -3765,7 +3836,7 @@ watch(
               <div class="card" style="padding: 12px 16px 8px">
                 <div ref="marketChartEl" data-market-chart style="width: 100%; height: 560px"></div>
               </div>
-              <p class="note" style="margin: 8px 0 0">口径：累计涨幅 = 各 T 日后第 n 个交易日收盘 ÷ T 日收盘 − 1（T 日 = 0%）；横轴为交易日序偏移，两线各自交易日历独立（1999 与 2024 日历不同）；虚线为 T 日与 0% 基准 · 924 线止于最近已入库交易日，随「指数日更」自动延长 · 历史复盘仅供参考，不构成投资建议</p>
+              <p class="note" style="margin: 8px 0 0">口径：累计涨幅 = 各 T 日后第 n 个交易日收盘 ÷ T 日收盘 − 1（T 日 = 0%）；横轴为交易日序偏移，两线各自交易日历独立（1999 与 2024 日历不同）；<b>双 y 轴读数：左轴（红）= 5·19、右轴（蓝）= 9·24，各自量纲贴近满幅、0% 刻度对齐同高（研报原图同款）</b>，两线的纵向形态比例不可跨轴直接比较，读数以各自轴为准；细线为历史上其他 10 次 5 日爆发 ≥12% 的脉冲行情（T 后 120 个交易日，右轴读数，事件标注为人工知识；点图例可显隐）· 虚线为 T 日与 0% 基准 · 924 线止于最近已入库交易日，随「指数日更」自动延长 · 历史复盘仅供参考，不构成投资建议</p>
             </template>
             <div class="card" v-else style="padding: 28px 16px">
               <div class="browse-empty">暂无数据</div>

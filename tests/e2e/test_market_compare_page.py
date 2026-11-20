@@ -26,6 +26,12 @@ MOCK_BODY = {
     "back": 280, "fwd": 1040,
     "points": MOCK_POINTS,
     "t2_progress": {"n": 28, "date": "2025-11-20", "ret": 0.2333},
+    "episodes": [
+        {"t": "2008-09-18", "label": "9·19 三大利好", "color": "#f28e2b",
+         "points": [[n, round(n / 200, 4)] for n in range(0, 41, 4)]},
+        {"t": "2008-11-07", "label": "四万亿", "color": "#b6992d",
+         "points": [[n, round(n / 300, 4)] for n in range(0, 41, 4)]},
+    ],
 }
 
 

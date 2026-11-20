@@ -342,6 +342,70 @@ class _StoreConn:
         return self.fetchall_rows
 
 
+# ---------- 脉冲行情叠加（episodes：历史其他 5 日爆发 ≥12% 的行情） ----------
+
+class TestEpisodePoints:
+    def test_normal_zero_base_and_horizon_cap(self):
+        """正常：n=0 归零、horizon 截断 120、r 为相对 T 收盘的累计涨幅。"""
+        bars = _series("2008-09-18", 0, 130)
+        pts = mc.episode_points(bars, "2008-09-18", horizon=120)
+        assert pts[0] == [0, 0.0]
+        assert len(pts) == 121 and pts[-1][0] == 120
+        assert pts[10][1] == pytest.approx(_r4(10), abs=1e-9)
+
+    def test_clipped_at_series_end(self):
+        """数据尾部不足 horizon：按可用根数截断。"""
+        bars = _series("2008-09-18", 0, 7)
+        pts = mc.episode_points(bars, "2008-09-18", horizon=120)
+        assert pts[-1][0] == 7 and len(pts) == 8
+
+    def test_t_missing_raises(self):
+        with pytest.raises(ValueError, match="2008-09-18"):
+            mc.episode_points([("2001-01-02", 100.0)], "2008-09-18", horizon=5)
+
+    def test_episodes_config_shape(self):
+        """契约：10 次现代脉冲、日期升序唯一、均有标签与颜色、不撞主线色。"""
+        assert mc.EPISODE_HORIZON == 120
+        dates = [e["t"] for e in mc.EPISODES]
+        assert len(mc.EPISODES) == 10
+        assert dates == sorted(dates) and len(set(dates)) == len(dates)
+        assert all(e.get("label") and e.get("color") for e in mc.EPISODES)
+        assert all(e["color"] not in ("#c9313d", "#4e79a7") for e in mc.EPISODES)
+        assert "2008-09-18" in dates and "2008-11-07" in dates
+
+
+class TestMarketEndpointEpisodes:
+    def test_up_includes_episodes(self, client, monkeypatch):
+        """正常路径：episodes 随响应返回，逐条带 t/label/color/points。"""
+        bars = (_series(T1, 280, 1040) + _series("2008-09-18", 0, 130)
+                + _series(T2, 280, 500))
+        monkeypatch.setattr(mc, "_connect", lambda: _NullConn())
+        monkeypatch.setattr(mc, "load_bars", lambda conn, sym: bars)
+        # 受控清单：合成序列的自然日范围可能恰好覆盖真实脉冲日，故替换之
+        monkeypatch.setattr(mc, "EPISODES",
+                            [{"t": "2008-09-18", "label": "9·19 三大利好",
+                              "color": "#f28e2b"}])
+        body = client.get("/api/market/519-924").json()
+        assert body["status"] == "up"
+        eps = body["episodes"]
+        assert len(eps) == 1
+        assert eps[0]["t"] == "2008-09-18"
+        assert eps[0]["label"] and eps[0]["color"]
+        assert eps[0]["points"][0] == [0, 0.0]
+        assert eps[0]["points"][-1][0] == 120
+
+    def test_episodes_skipped_when_date_missing(self, client, monkeypatch):
+        """脉冲日不在库（防御）：跳过该行情，端点整体仍 up。"""
+        bars = _series(T1, 280, 1040) + _series(T2, 280, 500)
+        monkeypatch.setattr(mc, "_connect", lambda: _NullConn())
+        monkeypatch.setattr(mc, "load_bars", lambda conn, sym: bars)
+        monkeypatch.setattr(mc, "EPISODES",
+                            [{"t": "2008-09-18", "label": "9·19 三大利好",
+                              "color": "#f28e2b"}])
+        body = client.get("/api/market/519-924").json()
+        assert body["status"] == "up" and body["episodes"] == []
+
+
 class TestIndexStore:
     def test_ensure_schema_idempotent(self):
         conn = _StoreConn()

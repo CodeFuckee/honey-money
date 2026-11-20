@@ -18,6 +18,23 @@ T2_DATE = "2024-09-24"
 BACK_N = 280                              # T 前（政策酝酿期）窗口
 FWD_N = 1040                              # T 后（行情演绎期）窗口
 
+# 2000 年后 5 日爆发 ≥12% 的脉冲行情（2026-11-20 全史扫描，见知识库
+# 00-inbox/sse-924-like-policy-pulse-scan.md；事件标注为人工知识）。
+# 叠加在 924 同一右轴上读数，细线不同色；5·19/9·24 两主线另用粗线。
+EPISODES = [
+    {"t": "2000-01-26", "label": "2000 科技行情", "color": "#499894"},
+    {"t": "2002-06-17", "label": "6·24 减持暂停", "color": "#59a14f"},
+    {"t": "2004-09-13", "label": "04 国九条脉冲", "color": "#b07aa1"},
+    {"t": "2006-12-22", "label": "06 牛市加速", "color": "#9d7660"},
+    {"t": "2008-04-18", "label": "4·24 印花税", "color": "#d37295"},
+    {"t": "2008-09-18", "label": "9·19 三大利好", "color": "#f28e2b"},
+    {"t": "2008-11-07", "label": "四万亿", "color": "#b6992d"},
+    {"t": "2014-12-01", "label": "14 杠杆牛加速", "color": "#86bcb6"},
+    {"t": "2015-05-18", "label": "15 杠杆牛末段", "color": "#79706e"},
+    {"t": "2020-06-29", "label": "20 快牛", "color": "#ffbe7d"},
+]
+EPISODE_HORIZON = 120                     # 脉冲线只画 T 后 120 个交易日
+
 
 def _validate(bars: list[tuple[str, float]]) -> None:
     """序列形状校验：非空、升序无重复、收盘全为正——脏数据明确报错。"""
@@ -67,6 +84,16 @@ def align_lines(bars1: list[tuple[str, float]], bars2: list[tuple[str, float]],
             for n in sorted(set(w1) | set(w2))]
 
 
+def episode_points(bars: list[tuple[str, float]], t: str,
+                   horizon: int = EPISODE_HORIZON) -> list[list]:
+    """脉冲行情 T 后 horizon 内的 [[n, r]]（n=0 归零；数据尾部截断）。"""
+    p = _locate([b[0] for b in bars], t)
+    base = float(bars[p][1])
+    end = min(p + horizon, len(bars) - 1)
+    return [[n, round(float(bars[p + n][1]) / base - 1, 4)]
+            for n in range(0, end - p + 1)]
+
+
 def _connect():
     return psycopg.connect(config.DATABASE_URL)
 
@@ -108,10 +135,18 @@ def register_market_routes(app) -> None:
         progress = next(({"n": p["n"], "date": p["d2"], "ret": p["r2"]}
                          for p in reversed(points) if p["r2"] is not None),
                         None)
+        episodes = []
+        for ep in EPISODES:
+            try:
+                episodes.append({**ep,
+                                 "points": episode_points(bars, ep["t"])})
+            except ValueError:                   # 脉冲日不在库：跳过不降级
+                continue
         return {"status": "up",
                 "symbol": {"code": SYMBOL, "name": "上证指数",
                            "source": "eastmoney"},
                 "t1": {"date": T1_DATE, "label": "5·19 行情"},
                 "t2": {"date": T2_DATE, "label": "9·24 行情"},
                 "back": BACK_N, "fwd": FWD_N,
-                "points": points, "t2_progress": progress}
+                "points": points, "t2_progress": progress,
+                "episodes": episodes}
