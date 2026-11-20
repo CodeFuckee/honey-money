@@ -53,7 +53,7 @@ function toggleSidebar() {
 const ROUTE_BY_NAV = {
   dash: '/', data: '/data', 'src-sina': '/data/sina',
   'src-ef': '/data/eastmoney', funds: '/data/funds', tasks: '/tasks',
-  fundDca: '/data/fund-dca',
+  fundDca: '/data/fund-dca', market: '/data/market-compare',
   backtest: '/backtest', learn: '/learn', stock: '/stock', fund: '/fund',
 }
 const NAV_BY_PATH = Object.fromEntries(
@@ -1275,17 +1275,102 @@ function onFundDetailPage(e) {
 function disposeFundChart() {
   if (fundChartInstance) { fundChartInstance.dispose(); fundChartInstance = null }
 }
+
+// ===== 519 vs 924 行情对比（数据子页：/api/market/519-924，指数日更任务供数；
+// 上证指数同源复刻中信研报图：T 日收盘基线、交易日序偏移对齐 T-280~T+1040，
+// 924 线随日更自动延长；研报原图为 wind全A、免费渠道不可得，页面注明口径） =====
+const marketCompare = ref({ status: 'idle', detail: '', body: null })
+const marketChartEl = ref(null)
+let marketChartInstance = null
+
+async function loadMarketCompare() {
+  marketCompare.value = { status: 'loading', detail: '', body: null }
+  try {
+    const r = await fetch('/api/market/519-924')
+    const body = await r.json()
+    marketCompare.value = { status: body.status === 'up' ? 'up' : 'down',
+                            detail: body.detail || '', body }
+    await nextTick()
+    renderMarketChart()
+  } catch (e) {
+    marketCompare.value = { status: 'down', detail: String(e), body: null }
+  }
+}
+
+const _marketN = v => v === 0 ? 'T' : (v > 0 ? 'T+' + v : 'T' + v)
+
+function renderMarketChart() {
+  if (marketChartInstance) { marketChartInstance.dispose(); marketChartInstance = null }
+  const body = marketCompare.value.body
+  if (!marketChartEl.value || !body || body.status !== 'up' || !body.points.length) return
+  marketChartInstance = echarts.init(marketChartEl.value)
+  const pts = body.points
+  const line = key => pts.filter(p => p[key] != null).map(p => [p.n, p[key]])
+  marketChartInstance.setOption({
+    animation: false,
+    tooltip: { trigger: 'axis', confine: true, formatter: ps => {
+      const n = ps.length ? ps[0].value[0] : null
+      const hit = pts.find(p => p.n === n) || {}
+      const row = (label, dk, rk) => hit[rk] == null
+        ? `${label}：—`
+        : `${label}（${hit[dk]}）：<b>${pct1(hit[rk])}</b>`
+      return `T 基准 ${_marketN(n)}<br>${row('5·19', 'd1', 'r1')}<br>${row('9·24', 'd2', 'r2')}`
+    } },
+    legend: { data: ['5·19 行情（T=1999-05-19）', '9·24 行情（T=2024-09-24）'], top: 0 },
+    grid: { left: 64, right: 24, top: 40, bottom: 48 },
+    xAxis: { type: 'value', min: -body.back, max: body.fwd, interval: 40,
+      axisLabel: { fontSize: 10, formatter: _marketN } },
+    yAxis: { type: 'value',
+      axisLabel: { fontSize: 10, formatter: v => (v * 100).toFixed(0) + '%' },
+      splitLine: { lineStyle: { color: '#eee' } } },
+    series: [
+      { name: '5·19 行情（T=1999-05-19）', type: 'line', showSymbol: false,
+        data: line('r1'), lineStyle: { width: 1.4, color: '#c9313d' },
+        itemStyle: { color: '#c9313d' },
+        markLine: { silent: true, symbol: 'none', label: { show: false },
+          lineStyle: { type: 'dashed', color: '#666' },
+          data: [{ xAxis: 0 }, { yAxis: 0 }] } },
+      { name: '9·24 行情（T=2024-09-24）', type: 'line', showSymbol: false,
+        data: line('r2'), lineStyle: { width: 1.4, color: '#4e79a7' },
+        itemStyle: { color: '#4e79a7' } },
+    ],
+  })
+}
+
+function disposeMarketChart() {
+  if (marketChartInstance) { marketChartInstance.dispose(); marketChartInstance = null }
+}
+const _onMarketResize = () => marketChartInstance && marketChartInstance.resize()
+
+// KPI 摘要：924 进度/当前累计、519 同期、两线区间峰值（down 态无 body 为 null）
+const marketKpis = computed(() => {
+  const body = marketCompare.value.body
+  if (!body || body.status !== 'up' || !body.t2_progress) return null
+  const pts = body.points, prog = body.t2_progress
+  const same = pts.find(p => p.n === prog.n)
+  const peak = key => {
+    let best = null
+    for (const p of pts) {
+      if (p[key] != null && (best == null || p[key] > best.r)) best = { n: p.n, r: p[key] }
+    }
+    return best
+  }
+  return { prog, same, peak1: peak('r1'), peak2: peak('r2') }
+})
+onMounted(() => window.addEventListener('resize', _onMarketResize))
 const _onFundResize = () => fundChartInstance && fundChartInstance.resize()
 
 watch(activeNav, (nav, prev) => {
   if (nav === 'funds') loadFunds()
   if (nav === 'fundDca') { loadDca(); loadDcaScatter(); loadDcaTpCompare(); loadDcaDipReport(); loadDcaPauseExperiment() }
+  if (nav === 'market') loadMarketCompare()
   if (nav === 'fund' && fund.value) {
     loadFundChart()
     loadFundDetail()
   }
   if (prev === 'fund' && nav !== 'fund') disposeFundChart()
   if (prev === 'fundDca' && nav !== 'fundDca') disposeDcaScatterChart()
+  if (prev === 'market' && nav !== 'market') disposeMarketChart()
 })
 
 // ===== 东财 Cookie：状态 / 粘贴保存 / 验证 =====
@@ -2462,7 +2547,7 @@ watch(
               { id: 'tasks', label: '任务' },
               { id: 'backtest', label: '回测' }, { id: 'learn', label: '教学' }])"
             :key="n.id" class="nav-item"
-            :class="{ active: activeNav === n.id, 'sub-active': (activeNav.startsWith('src-') || activeNav === 'stock' || activeNav === 'funds' || activeNav === 'fund' || activeNav === 'fundDca') && n.id === 'data' }"
+            :class="{ active: activeNav === n.id, 'sub-active': (activeNav.startsWith('src-') || activeNav === 'stock' || activeNav === 'funds' || activeNav === 'fund' || activeNav === 'fundDca' || activeNav === 'market') && n.id === 'data' }"
             :title="sidebarCollapsed ? n.label : null"
             @click="setNav(n.id)">
             <svg v-if="n.id === 'dash'" class="nav-icon" viewBox="0 0 20 20" fill="none">
@@ -2519,6 +2604,12 @@ watch(
                 <path d="M16.8 2.8v3.4h-3.4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
               </svg>
               定投止盈回测</button>
+            <button class="src-item" :class="{ active: activeNav === 'market' }"
+              :title="sidebarCollapsed ? '519 vs 924 行情' : null" @click="setNav('market')">
+              <svg class="src-icon" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                <path d="M3 16.5V9.5m4.7 7V4.5m4.6 12V8m4.7 8.5v-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+              </svg>
+              519 vs 924 行情</button>
           </template>
           <div class="sidebar-foot">v0.1.0 · 工程骨架</div>
         </aside>
@@ -3638,6 +3729,47 @@ watch(
                 </table>
               </div>
             </Dialog>
+          </template>
+
+          <!-- ===== 519 vs 924 行情对比（数据子页：/api/market/519-924；
+               T 日收盘基线、交易日序偏移对齐 T-280~T+1040 复刻中信研报图；
+               上证指数同源（原图 wind全A 免费渠道不可得），指数日更任务
+               每日 17:30 供数，924 线自动延长） ===== -->
+          <template v-else-if="activeNav === 'market'">
+            <div class="toolbar">
+              <div>
+                <h2 class="h1">519 vs 924：两次政策行情对齐复盘</h2>
+                <p class="sub">T 日收盘为基线、按交易日序偏移对齐（T-280 ~ T+1040）· 上证指数同源（研报原图为 wind全A，免费渠道不可得，口径以本页为准）· 东财日线 ·「指数日更」任务每日 17:30 更新，924 线自动延长</p>
+              </div>
+              <div class="toolbar-right">
+                <button class="btn" data-market-refresh
+                  :disabled="marketCompare.status === 'loading'" @click="loadMarketCompare">
+                  {{ marketCompare.status === 'loading' ? '加载中…' : '刷新' }}
+                </button>
+              </div>
+            </div>
+            <div class="card" v-if="marketCompare.status === 'loading'"
+              style="padding: 28px 16px; text-align: center">
+              <p class="note" style="margin: 0">正在加载行情对比数据…</p>
+            </div>
+            <div class="card" v-else-if="marketCompare.status === 'down'" style="padding: 28px 16px">
+              <div class="browse-empty">行情对比数据不可用：{{ marketCompare.detail || '指数表暂无数据' }}</div>
+            </div>
+            <template v-else-if="marketCompare.body && marketKpis">
+              <div class="learn-metrics" data-market-kpis style="margin: 12px 0">
+                <div class="card lm"><div class="lm-k">924 已走<br><span class="dc-hint">截至 {{ marketKpis.prog.date }}</span></div><div class="lm-v">T+{{ marketKpis.prog.n }} <span style="font-size: 13px">交易日</span></div></div>
+                <div class="card lm"><div class="lm-k">924 当前累计<br><span class="dc-hint">T 日收盘 = 基线</span></div><div class="lm-v"><span :class="marketKpis.prog.ret >= 0 ? 'chg-up' : 'chg-down'">{{ pct1(marketKpis.prog.ret) }}</span></div></div>
+                <div class="card lm"><div class="lm-k">519 同期（T+{{ marketKpis.prog.n }}）<br><span class="dc-hint">{{ marketKpis.same?.d1 || '—' }}</span></div><div class="lm-v"><span :class="(marketKpis.same?.r1 ?? 0) >= 0 ? 'chg-up' : 'chg-down'">{{ pct1(marketKpis.same?.r1) }}</span></div></div>
+                <div class="card lm"><div class="lm-k">区间峰值<br><span class="dc-hint">5·19 T+{{ marketKpis.peak1?.n }} ｜ 9·24 T+{{ marketKpis.peak2?.n }}</span></div><div class="lm-v"><span class="chg-up">{{ pct1(marketKpis.peak1?.r) }}</span> <span style="font-size: 13px">vs</span> <span class="chg-up">{{ pct1(marketKpis.peak2?.r) }}</span></div></div>
+              </div>
+              <div class="card" style="padding: 12px 16px 8px">
+                <div ref="marketChartEl" data-market-chart style="width: 100%; height: 560px"></div>
+              </div>
+              <p class="note" style="margin: 8px 0 0">口径：累计涨幅 = 各 T 日后第 n 个交易日收盘 ÷ T 日收盘 − 1（T 日 = 0%）；横轴为交易日序偏移，两线各自交易日历独立（1999 与 2024 日历不同）；虚线为 T 日与 0% 基准 · 924 线止于最近已入库交易日，随「指数日更」自动延长 · 历史复盘仅供参考，不构成投资建议</p>
+            </template>
+            <div class="card" v-else style="padding: 28px 16px">
+              <div class="browse-empty">暂无数据</div>
+            </div>
           </template>
 
           <!-- ===== 个股历史行情详情（数据页行点击进入） ===== -->

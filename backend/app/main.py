@@ -21,6 +21,8 @@ from . import config
 from . import backtest_full
 from . import dca_store
 from . import em_cookie
+from . import index_store
+from . import market_compare
 from .backtest_api import register_backtest_routes
 from .backtest_full_api import register_full_backtest_routes
 from .browse import fetch_fund_list, fetch_fund_navs, fetch_stock_bars, fetch_stock_basic, fetch_stock_list
@@ -29,6 +31,7 @@ from .crawler.store import Store
 from .crawl_stats import fetch_crawl_stats
 from .dca_api import register_fund_dca_routes
 from .infra import check_postgres, check_proxy_pool
+from .market_compare import register_market_routes
 from .scheduler import PgAdvisoryLock, TaskScheduler, build_crawl_executor
 from .task_store import TaskStore
 from .tasks_api import register_task_routes
@@ -60,7 +63,8 @@ def create_app(*, scheduler: TaskScheduler | None = None,
                            ("定投回测表", dca_store.ensure_schema),
                            ("多阈值回测表", dca_store.ensure_tp_schema),
                            ("基金波动表", dca_store.ensure_risk_schema),
-                           ("熊市断缴表", dca_store.ensure_bear_pause_schema)):
+                           ("熊市断缴表", dca_store.ensure_bear_pause_schema),
+                           ("指数表", index_store.ensure_schema)):
             try:
                 with connect(config.DATABASE_URL) as conn:
                     init(conn)
@@ -208,6 +212,7 @@ def create_app(*, scheduler: TaskScheduler | None = None,
     register_backtest_routes(app)
     register_full_backtest_routes(app)
     register_fund_dca_routes(app)
+    register_market_routes(app)
 
     return app
 

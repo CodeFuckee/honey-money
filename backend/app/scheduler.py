@@ -213,6 +213,73 @@ async def _run_backtest_job(dsn: str, task: dict, progress,
             "aborted": False, "stopped": False, "error": False}
 
 
+async def _run_index_job(dsn: str, proxy_pool_url: str, task: dict, *,
+                         progress, stop_event: asyncio.Event,
+                         client=None, store=None, connect=None) -> dict:
+    """指数日更：东财 K 线接口拉指数日线 → index_daily 幂等 upsert。
+
+    指数接口免 Cookie（公开 ut 即可，与个股清单接口不同子系统）、
+    家宽直连即可（proxy_mode="direct"，与东财个股同站低 QPS 无封禁史）；
+    增量 beg=最近日期-10 自然日（重叠容错），空表全史。client/store/
+    connect 注入参数供离线测试；失败任务内消化（failures 记录），
+    run 正常收尾不抛出，次日计划照常。
+    """
+    from . import index_store
+
+    store = store or Store()
+    connect = connect or psycopg.connect
+    with connect(dsn) as conn:
+        run_id = store.start_run(conn, mode=task["mode"], source="index",
+                                 task_id=task["id"],
+                                 trigger=task.get("_trigger", "manual"))
+        conn.commit()
+    summary = {"total": 1, "ok": 0, "failed": 0, "bars": 0, "failures": [],
+               "aborted": True, "stopped": False, "error": False}
+
+    def finish(conn, *, bars_n, failures):
+        ok = 0 if failures else 1
+        store.finish_run(conn, run_id, total_stocks=1, ok_stocks=ok,
+                         failed_stocks=len(failures), bars_upserted=bars_n,
+                         failures=failures[:50], aborted=bool(failures))
+        conn.commit()
+
+    if stop_event.is_set():
+        with connect(dsn) as conn:
+            finish(conn, bars_n=0, failures=[])
+        return summary
+    progress(0, 1)
+    if client is None:
+        rate = RateLimiter(initial_qps=0.5, min_qps=0.1, max_qps=1.0, jitter=0.3)
+        direct = httpx_async_client(timeout=30.0)
+        pool = httpx_async_client(base_url=proxy_pool_url, timeout=5.0)
+        client = EastmoneyClient(rate=rate, proxy_broker=ProxyBroker(http=pool),
+                                 http=direct, proxy_mode="direct")
+    spec = index_store.INDEX_SYMBOLS[index_store.SYMBOL]
+    failures, bars_n = [], 0
+    try:
+        with connect(dsn) as conn:
+            last = index_store.last_date(conn, index_store.SYMBOL)
+            beg = ((last - dt.timedelta(days=10)).strftime("%Y%m%d")
+                   if last else "0")
+            data = await client.fetch_daily_bars(spec["market"], spec["code"],
+                                                 beg=beg)
+            index_store.upsert_bars(conn, index_store.SYMBOL, data.rows)
+            conn.commit()
+            bars_n = len(data.rows)
+    except Exception as exc:                    # noqa: BLE001 任务内消化
+        failures.append(f"{type(exc).__name__}: {str(exc)[:180]}")
+    with connect(dsn) as conn:
+        finish(conn, bars_n=bars_n, failures=failures)
+        conn.commit()
+    await client.aclose()
+    progress(1, 1)
+    summary.update(ok=0 if failures else 1, failed=len(failures),
+                   bars=bars_n, failures=failures, aborted=bool(failures))
+    print(f"[index] 指数日更：{index_store.SYMBOL} +{bars_n} 根"
+          + (f" / 失败 {failures[0]}" if failures else ""))
+    return summary
+
+
 def build_crawl_executor(dsn: str, proxy_pool_url: str):
     """生产执行体：拉清单 → CrawlRunner 增量/全量爬取，返回结果摘要。
 
@@ -223,6 +290,9 @@ def build_crawl_executor(dsn: str, proxy_pool_url: str):
     async def execute(task: dict, *, progress, stop_event: asyncio.Event) -> dict:
         if task["source"] == "backtest":
             return await _run_backtest_job(dsn, task, progress, stop_event)
+        if task["source"] == "index":
+            return await _run_index_job(dsn, proxy_pool_url, task,
+                                        progress=progress, stop_event=stop_event)
         defaults = _SOURCE_DEFAULTS[task["source"]]
         rate = RateLimiter(initial_qps=defaults["initial_qps"],
                            min_qps=defaults["min_qps"], max_qps=defaults["max_qps"],

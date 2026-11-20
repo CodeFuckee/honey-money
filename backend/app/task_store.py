@@ -21,7 +21,7 @@ import datetime as dt
 import psycopg
 
 SOURCE_NAMES = {"sina": "新浪", "eastmoney": "东财", "fund": "基金",
-                "backtest": "回测"}
+                "backtest": "回测", "index": "指数"}
 MODE_NAMES = {"incremental": "增量", "full": "全量", "daily": "日更"}
 
 _DDL_TASK = """
@@ -102,6 +102,13 @@ class TaskStore:
                 " SELECT '定投回测日更', 'backtest', 'daily', '23:00'::time, TRUE"
                 " WHERE NOT EXISTS (SELECT 1 FROM crawl_task"
                 "                    WHERE name = '定投回测日更')")
+            # 指数日更：收盘后拉指数日线（上证指数，519 vs 924 对比页数据源），
+            # 17:30 预置且默认启用——对比页要求 924 线动态延长（2026-11-20）
+            cur.execute(
+                "INSERT INTO crawl_task (name, source, mode, schedule_time, enabled)"
+                " SELECT '指数日更', 'index', 'daily', '17:30'::time, TRUE"
+                " WHERE NOT EXISTS (SELECT 1 FROM crawl_task"
+                "                    WHERE name = '指数日更')")
     def list_tasks(self, conn) -> list[dict]:
         with conn.cursor() as cur:
             cur.execute(f"SELECT {_TASK_COLS} FROM crawl_task ORDER BY id")
