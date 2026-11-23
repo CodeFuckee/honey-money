@@ -450,6 +450,26 @@ const DCA_MODE_OPTIONS = [
   { key: 'share', label: '等份额定投' },
   { key: 'dd_ladder', label: '回撤加码' },
 ]
+// 定投方式说明（2026-11-23 五轮：? 图标点击弹出全部说明；悬停按钮 title
+// 显示对应方式详情）——brief 是面板里的一句话定位，detail 是完整口径
+const DCA_MODE_HELP = {
+  amount: {
+    title: '等额定投',
+    brief: '每期固定金额',
+    detail: '每月首个净值日投入固定 1000 元（申购费按外扣法折份额）。最朴素的纪律买入，与工资现金流最匹配——任何行情下每期投入都一样，无需盯盘判断。',
+  },
+  share: {
+    title: '等份额定投',
+    brief: '每期固定份额',
+    detail: '每期买入固定份额（以首期 1000 元折算为基准），现金支出随净值波动——涨时花得多、跌时花得少。成本摊平效果在三种方式中最差，通常作为对照基准。',
+  },
+  dd_ladder: {
+    title: '回撤加码',
+    brief: '跌得越深买得越多',
+    detail: '每月基础 1000 元，买入日较历史最高回撤 ≥10% 投 1.5 倍、≥20% 投 2 倍（余者 1 倍）——深跌时买入更多便宜份额、摊低持仓成本。口径源自熊市加倍实验（全市场 9,576 只：回撤 ≤-20% 加倍投 2×，68% 基金优于坚持等额定投）。代价是回撤期投入放大，需预留现金。',
+  },
+}
+const dcaModeHelpShow = ref(false)
 const dcaMode = ref('amount')
 const dcaModeLabel = computed(() =>
   (DCA_MODE_OPTIONS.find(o => o.key === dcaMode.value) || {}).label || '')
@@ -3067,25 +3087,40 @@ watch(
             <div class="toolbar">
               <div>
                 <h2 class="h1">定投止盈回测</h2>
-                <p class="sub">{{ dca.meta?.params?.scale_min_yi ? `资产规模 ≥${dca.meta.params.scale_min_yi} 亿公募基金` : '全市场公募基金（不限规模）' }} · 月定投{{ dcaMode === 'share' ? `固定份额（首期 ${dca.meta?.params?.amount ?? 1000} 元折算，现金随净值波动——涨时花得多、跌时花得少）` : dcaMode === 'dd_ladder' ? `基础 ${dca.meta?.params?.amount ?? 1000} 元 · 回撤梯度加码（较历史最高回撤 ≥10% 投 1.5 倍、≥20% 投 2 倍——跌得越深买得越多）` : ` ${dca.meta?.params?.amount ?? 1000} 元` }} · 收益 ≥{{ dcaTpLabel(dcaTp) }} 全仓止盈重来<template v-if="dca.meta?.params?.min_age_years"> · 运作 ≥{{ dca.meta.params.min_age_years }} 年</template> · 年化=XIRR 资金加权<template v-if="dca.meta?.params?.window_end"> · 数据截至 {{ dca.meta.params.window_end }}</template></p>
+                <!-- 口径副标题已删（2026-11-23 五轮用户要求）：口径说明收进
+                     顶部「定投方式」? 图标弹出面板与各按钮悬停提示 -->
               </div>
             </div>
 
             <!-- ===== 顶部总开关行（2026-11-23 三轮用户需求：四组口径切换全部置顶）：
                  定投方式/止盈点/基金类型/费用口径——切换后下方所有统计跟随
                  （统计卡/止盈点对比/排行表/散点分箱/详情弹窗；弹窗内另有局部
-                 止盈点/费率 tab 属明细级控件）。起点条件/熊市断缴两实验卡为
-                 等额固定快照不随切（标题已标注）；静态模式无多阈值/方式维度，
-                 对应组隐藏（类型/费用仍可用——客户端切换） ===== -->
+                 止盈点/费率 tab 属明细级控件）。定投方式组带 ? 图标：点击弹出
+                 三种方式完整说明，悬停各按钮 title 显示对应方式详情。
+                 起点条件/熊市断缴两实验卡为等额固定快照不随切（标题已标注）；
+                 静态模式无多阈值/方式维度，对应组隐藏（类型/费用仍可用——客户端切换） ===== -->
             <div class="dca-filter-row dca-filter-segs" style="margin: 0 0 14px">
-              <div class="seg-group" v-if="!STATIC_MODE">
+              <div class="seg-group mode-seg" v-if="!STATIC_MODE">
                 <span class="seg-label">定投方式</span>
-                <div class="src-seg" title="切换定投方式：等额=每期固定 1000 元；等份额=每期固定份额（首期 1000 元折算，涨时花得多、跌时花得少）；回撤加码=基础 1000 元按买入日回撤分档加倍（较历史最高回撤 ≥10% 投 1.5 倍、≥20% 投 2 倍——熊市加倍实验 68% 基金更优的口径推广）。下方统计卡/止盈点对比/排行/散点分箱/详情弹窗全部跟随（起点条件与熊市断缴实验卡为等额固定快照不随切）">
+                <div class="src-seg" title="切换定投方式（悬停各按钮看对应说明，点 ? 查看全部）">
                   <button v-for="o in DCA_MODE_OPTIONS" :key="o.key"
                           class="src-seg-btn"
                           :class="{ active: dcaMode === o.key }"
+                          :title="`${DCA_MODE_HELP[o.key].title}：${DCA_MODE_HELP[o.key].detail}`"
                           @click="onDcaModeChange(o.key)"
                           :data-mode="o.key">{{ o.label }}</button>
+                </div>
+                <button class="mode-help-btn" @click="dcaModeHelpShow = !dcaModeHelpShow"
+                        :class="{ active: dcaModeHelpShow }"
+                        data-mode-help aria-label="定投方式说明"
+                        title="查看三种定投方式的完整说明">?</button>
+                <div v-if="dcaModeHelpShow" class="mode-help-pop" data-mode-help-pop>
+                  <div v-for="o in DCA_MODE_OPTIONS" :key="o.key" class="mode-help-item">
+                    <b>{{ DCA_MODE_HELP[o.key].title }}</b>
+                    <span class="mode-help-brief">{{ DCA_MODE_HELP[o.key].brief }}</span>
+                    <p>{{ DCA_MODE_HELP[o.key].detail }}</p>
+                  </div>
+                  <p class="mode-help-note">切换后下方统计卡/止盈点对比/排行表/散点分箱/详情弹窗全部跟随；起点条件回测与熊市断缴两实验卡为等额口径固定快照，不随切换。历史统计不构成任何操作建议。</p>
                 </div>
               </div>
               <div class="seg-group" v-if="!STATIC_MODE">
@@ -5241,6 +5276,35 @@ body {
 .dca-filter-segs { gap: 8px 18px; }
 .seg-group { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
 .seg-label { font-size: 12px; color: #525252; white-space: nowrap; }
+/* 定投方式 ? 说明按钮 + 弹出面板（2026-11-23 五轮）：? 与按钮组同行，
+   面板绝对定位在组下方、点击 ? 开关；宽屏限宽防超长行 */
+.mode-seg { position: relative; }
+.mode-help-btn {
+  width: 18px; height: 18px; line-height: 1; padding: 0;
+  border: 1px solid #8d8d8d; border-radius: 50%;
+  background: #f4f4f4; color: #525252;
+  font-size: 12px; font-weight: 600; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  flex: 0 0 auto;
+}
+.mode-help-btn:hover, .mode-help-btn.active {
+  border-color: #0f62fe; color: #0f62fe; background: #eaf1fb;
+}
+.mode-help-pop {
+  position: absolute; z-index: 30; top: calc(100% + 8px); left: 0;
+  width: min(520px, calc(100vw - 48px));
+  background: #ffffff; border: 1px solid #8d8d8d;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .14);
+  padding: 12px 14px; text-align: left;
+}
+.mode-help-item { margin: 0 0 10px; font-size: 12px; color: #161616; }
+.mode-help-item b { margin-right: 6px; }
+.mode-help-brief { color: #0f62fe; }
+.mode-help-item p { margin: 3px 0 0; color: #525252; line-height: 1.55; }
+.mode-help-note {
+  margin: 8px 0 0; padding-top: 8px; border-top: 1px solid #e0e0e0;
+  font-size: 11px; color: #8d8d8d; line-height: 1.5;
+}
 /* 列显示过滤（MultiSelect）：与搜索行 small 控件同高，窄屏可收缩 */
 .funds-search .dca-col-select { min-width: 118px; max-width: 160px; }
 .funds-search .dca-col-select .p-multiselect-label { font-size: 12px; padding: 5px 8px; }

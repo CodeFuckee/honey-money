@@ -219,7 +219,6 @@ class TestDcaTp:
         expect(page.locator(".tp-compare tr.tp-row-active")
               ).to_contain_text("15%", timeout=10_000)
         assert "tp=0.15" in mock_tp[-1], mock_tp[-1]
-        expect(page.locator(".toolbar .sub").first).to_contain_text("收益 ≥15%")
         row = page.locator(".browse-pv tbody tr", has_text="019387")
         expect(row).to_contain_text("+92.0%")     # tp 行自己的年化
         expect(row).to_contain_text("11")          # 15% 阈值止盈次数

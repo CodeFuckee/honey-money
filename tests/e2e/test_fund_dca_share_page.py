@@ -193,7 +193,7 @@ class TestDcaShareMode:
     def test_mode_switch_and_request(self, servers, page, mock_dca,
                                      mock_share, mock_navs):
         """E2E-444 P0：点「等份额定投」→ tp 端点 method=share（20% 也是），
-        副标题换固定份额口径文案，表格渲染等份额行。"""
+        表格渲染等份额行（口径副标题已删，五轮起口径看 ? 面板与悬停 title）。"""
         _, frontend_port = servers
         open_dca(page, frontend_port)
         _switch_share(page)
@@ -202,8 +202,6 @@ class TestDcaShareMode:
                       and "/summary" not in u]
         assert list_calls and "method=share" in list_calls[-1], mock_share
         assert "tp=0.2" in list_calls[-1], list_calls[-1]
-        expect(page.locator(".toolbar .sub").first
-              ).to_contain_text("固定份额")
         row = page.locator(".browse-pv tbody tr", has_text="019387")
         expect(row).to_contain_text("+75.0%")   # 等份额行自己的年化
         expect(row).to_contain_text("9")        # 等份额止盈次数
@@ -396,8 +394,9 @@ class TestDcaShareMode:
                       if "/rounds" not in u and "/compare" not in u
                       and "/summary" not in u]
         assert list_calls and "method=dd_ladder" in list_calls[-1], mock_share
-        expect(page.locator(".toolbar .sub").first
-              ).to_contain_text("回撤梯度加码")
+        # 悬停 title 携带回撤加码详细口径（副标题已删，五轮起悬停即说明）
+        expect(page.locator('button[data-mode="dd_ladder"]')
+              ).to_have_attribute("title", re.compile("1\\.5 倍"))
         expect(page.locator(".browse-pv tbody tr", has_text="019387")
               ).to_contain_text("+75.0%")     # mock 回显行
         assert any("method=dd_ladder" in u for u in mock_share_scatter), \
@@ -415,6 +414,31 @@ class TestDcaShareMode:
                       if "/rounds" not in u and "/compare" not in u
                       and "/summary" not in u]
         assert list_calls and "method=dd_ladder" in list_calls[0], mock_share
+
+    def test_mode_help_popover_and_titles(self, servers, page, mock_dca,
+                                          mock_share, mock_navs):
+        """E2E-459：点「?」→ 弹出三种方式完整说明（含各自 detail 关键词），
+        再点收起；悬停各按钮 title 携带对应方式详情；口径副标题已删。"""
+        _, frontend_port = servers
+        open_dca(page, frontend_port)
+        # 副标题删除锚（头部工具条不再有 .sub）
+        expect(page.locator(".toolbar").first.locator(".sub")).to_have_count(0)
+        # 悬停 title：每按钮携带对应方式完整说明
+        expect(page.locator('button[data-mode="share"]')
+              ).to_have_attribute("title", re.compile("现金支出随净值波动"))
+        expect(page.locator('button[data-mode="amount"]')
+              ).to_have_attribute("title", re.compile("外扣法"))
+        # 点 ? 开：面板含三种方式与关键口径词
+        page.locator('[data-mode-help]').click()
+        pop = page.locator('[data-mode-help-pop]')
+        expect(pop).to_be_visible()
+        expect(pop).to_contain_text("等额定投")
+        expect(pop).to_contain_text("成本摊平效果在三种方式中最差")
+        expect(pop).to_contain_text("1.5 倍")
+        expect(pop).to_contain_text("68% 基金优于坚持等额定投")
+        # 再点 ? 关
+        page.locator('[data-mode-help]').click()
+        expect(pop).to_have_count(0, timeout=10_000)
 
     def test_modal_switchers_keep_method(self, servers, page, mock_dca,
                                          mock_share, mock_navs):

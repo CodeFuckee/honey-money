@@ -252,8 +252,8 @@ class TestFundDcaPage:
         expect(row).to_contain_text("≈2.9 月/次")
         expect(row2).to_contain_text("10.4 年")
         expect(row2).to_contain_text("—")
-        # 口径副标题含运作年限门槛（meta.params.min_age_years 驱动，无则不显示）
-        expect(page.locator(".toolbar .sub").first).to_contain_text("运作 ≥3 年")
+        # 口径副标题已删（2026-11-23 五轮用户要求）：头部工具条不再有 .sub
+        expect(page.locator(".toolbar").first.locator(".sub")).to_have_count(0)
 
     def test_search_sends_q_and_kept_on_paging(self, servers, page, mock_dca):
         """E2E-402：搜索带 q，翻页请求保留 q。"""
