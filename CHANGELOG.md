@@ -1206,6 +1206,17 @@
   - 测试：限速器/代理经纪/东财客户端/存储/编排/CLI 共 57 个离线用例
     （backend/tests/test_crawler_*.py，MockTransport/假时钟全离线）。
 
+### Fixed
+- **样本回填脚本全量参数崩溃（2026-11-23 手动全量回放踩出）**：
+  `run_backtest_tp` 进度日志（每 1000 只触发）以 `log(msg, flush=True)`
+  调用回调，而 `scripts/dca_share_sample.py` 传入单参数
+  `lambda m: print(m, flush=True)`——样本 400 只时永不触发（`n_funds
+  % 1000`），样本放大到全市场 26,548 只后第 1000 只必然
+  `TypeError: got an unexpected keyword argument 'flush'`（share 与
+  dd_ladder 两个全量后台任务双双退出）。修复：log 回调改
+  `lambda m, **k: print(m, **k)` 兼容任意 kwargs（log 契约 = print
+  兼容 callable，日更路径默认 `log=print` 不受影响）。
+
 ### 决策记录（实测驱动）
 - 东财 WAF 实测断连免费代理的机房 IP 段（19 个免费代理 0 成功），家宽直连
   低频可靠但单 IP 频控严格（短时密集请求触发分钟级封禁）→ 生产建议

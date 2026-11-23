@@ -46,7 +46,10 @@ print(f"净值行：{len(nav):,}", flush=True)
 
 rows, rounds_rows = dca_backtest.run_backtest_tp(
     nav, basic, scale_map, method=args.method,
-    log=lambda m: print(m, flush=True))
+    # 进度日志带 flush=True 关键字（dca_backtest 452/553），log 契约是
+    # print 兼容 callable——单参数 lambda 在样本 ≥1000 只时 TypeError
+    # （n_funds % 1000 触发点，2026-11-23 全量回放踩出）
+    log=lambda m, **k: print(m, **k))
 print(f"{args.method} 结果行：{len(rows):,} / 轮次行：{len(rounds_rows):,}", flush=True)
 
 # alive 45 天口径（与 run_full_backtest_tp 同源逻辑，样本范围内）
