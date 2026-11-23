@@ -268,6 +268,7 @@ def import_rounds(conn, rows: list[tuple]) -> int:
 TP_DDL = """
 CREATE TABLE IF NOT EXISTS fund_dca_tp_result (
   tp              DOUBLE PRECISION NOT NULL,
+  method          VARCHAR(8)  NOT NULL DEFAULT 'amount',
   code            VARCHAR(10) NOT NULL,
   name            VARCHAR(128) NOT NULL,
   fund_type       VARCHAR(64),
@@ -298,13 +299,15 @@ CREATE TABLE IF NOT EXISTS fund_dca_tp_result (
   full_cur_profit_rate_nom DOUBLE PRECISION,
   full_cur_xirr DOUBLE PRECISION,
   full_cur_xirr_disc DOUBLE PRECISION, full_cur_xirr_nom DOUBLE PRECISION,
-  PRIMARY KEY (code, tp)
+  PRIMARY KEY (code, tp, method)
 );
 CREATE INDEX IF NOT EXISTS idx_fund_dca_tp_alive ON fund_dca_tp_result (alive);
 CREATE INDEX IF NOT EXISTS idx_fund_dca_tp_tp ON fund_dca_tp_result (tp, w10_xirr);
+--（method 维度索引只在文末迁移块建——存量表 ALTER 加列之前建会 UndefinedColumn）
 
 CREATE TABLE IF NOT EXISTS fund_dca_tp_rounds (
   tp         DOUBLE PRECISION NOT NULL,
+  method     VARCHAR(8)  NOT NULL DEFAULT 'amount',
   code       VARCHAR(10) NOT NULL,
   fee        VARCHAR(8)  NOT NULL DEFAULT 'gross',
   seq        INTEGER NOT NULL,
@@ -317,7 +320,7 @@ CREATE TABLE IF NOT EXISTS fund_dca_tp_rounds (
   sub_fee    DOUBLE PRECISION,
   redeem_fee DOUBLE PRECISION,
   net_profit DOUBLE PRECISION,
-  PRIMARY KEY (code, tp, fee, seq)
+  PRIMARY KEY (code, tp, method, fee, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_fund_dca_tp_rounds_code
   ON fund_dca_tp_rounds (code, tp);
@@ -367,17 +370,48 @@ ALTER TABLE fund_dca_tp_result ADD COLUMN IF NOT EXISTS full_cur_profit_rate_nom
 ALTER TABLE fund_dca_tp_result ADD COLUMN IF NOT EXISTS full_cur_xirr DOUBLE PRECISION;
 ALTER TABLE fund_dca_tp_result ADD COLUMN IF NOT EXISTS full_cur_xirr_disc DOUBLE PRECISION;
 ALTER TABLE fund_dca_tp_result ADD COLUMN IF NOT EXISTS full_cur_xirr_nom DOUBLE PRECISION;
+
+-- 定投方式维度（2026-11-23）：存量表就地加 method 列（默认 amount，行数据
+-- 不丢、无空窗——2026-10-26/11-20 两次漏迁移教训），PK 守护式纳入 method
+-- （唯一性要求同 (code, tp, method)；新装表 CREATE 已含，此处只动旧表）
+ALTER TABLE fund_dca_tp_result ADD COLUMN IF NOT EXISTS method VARCHAR(8) NOT NULL DEFAULT 'amount';
+ALTER TABLE fund_dca_tp_rounds ADD COLUMN IF NOT EXISTS method VARCHAR(8) NOT NULL DEFAULT 'amount';
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint c
+    WHERE c.conrelid = 'fund_dca_tp_result'::regclass AND c.contype = 'p'
+      AND 'method' = ANY (SELECT a.attname FROM pg_attribute a
+                          WHERE a.attrelid = c.conrelid
+                            AND a.attnum = ANY (c.conkey))
+  ) THEN
+    ALTER TABLE fund_dca_tp_result DROP CONSTRAINT fund_dca_tp_result_pkey;
+    ALTER TABLE fund_dca_tp_result ADD PRIMARY KEY (code, tp, method);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint c
+    WHERE c.conrelid = 'fund_dca_tp_rounds'::regclass AND c.contype = 'p'
+      AND 'method' = ANY (SELECT a.attname FROM pg_attribute a
+                          WHERE a.attrelid = c.conrelid
+                            AND a.attnum = ANY (c.conkey))
+  ) THEN
+    ALTER TABLE fund_dca_tp_rounds DROP CONSTRAINT fund_dca_tp_rounds_pkey;
+    ALTER TABLE fund_dca_tp_rounds ADD PRIMARY KEY (code, tp, method, fee, seq);
+  END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_fund_dca_tp_method
+  ON fund_dca_tp_result (method, tp, w10_xirr);
 """
 
-_TP_COLS = ["tp"] + _COLS
+_TP_COLS = ["tp", "method"] + _COLS
 _TP_INSERT = f"""
 INSERT INTO fund_dca_tp_result ({", ".join(_TP_COLS)})
 VALUES ({", ".join(["%s"] * len(_TP_COLS))})
 """
 
-# 列序必须与引擎元组 (code, tp, fee, seq, *ev) 逐位对齐——PG 隐式类型
-# 转换会把错位写入"成功"（'000001'→tp 列 1.0），只能靠列清单对齐防错
-_TP_ROUNDS_COLS = _ROUNDS_COLS[:1] + ["tp"] + _ROUNDS_COLS[1:]
+# 列序必须与引擎元组 (code, method, tp, fee, seq, *ev) 逐位对齐——PG 隐式
+# 类型转换会把错位写入"成功"（'000001'→tp 列 1.0），只能靠列清单对齐防错
+_TP_ROUNDS_COLS = (_ROUNDS_COLS[:1] + ["method", "tp"] + _ROUNDS_COLS[1:])
 _TP_UPSERT_ROUND = f"""
 INSERT INTO fund_dca_tp_rounds ({", ".join(_TP_ROUNDS_COLS)})
 VALUES ({", ".join(["%s"] * len(_TP_ROUNDS_COLS))})
@@ -400,14 +434,14 @@ _APPLY_GAP_TP = """
 UPDATE fund_dca_tp_result r SET
   gap_avg_days = t.g_avg, gap_min_days = t.g_min, gap_max_days = t.g_max,
   gap_avg_days_disc = t.d_avg, gap_avg_days_nom = t.n_avg
-FROM (SELECT code, tp,
+FROM (SELECT code, tp, method,
              avg(gap_days) FILTER (WHERE fee = 'gross') AS g_avg,
              min(gap_days) FILTER (WHERE fee = 'gross') AS g_min,
              max(gap_days) FILTER (WHERE fee = 'gross') AS g_max,
              avg(gap_days) FILTER (WHERE fee = 'disc')  AS d_avg,
              avg(gap_days) FILTER (WHERE fee = 'nom')   AS n_avg
-      FROM fund_dca_tp_rounds GROUP BY code, tp) t
-WHERE r.code = t.code AND r.tp = t.tp
+      FROM fund_dca_tp_rounds GROUP BY code, tp, method) t
+WHERE r.code = t.code AND r.tp = t.tp AND r.method = t.method
 """
 
 

@@ -11,7 +11,8 @@ import psycopg
 
 from . import config
 from . import bear_pause                              # 断缴实验常量（案例码）
-from .dca_backtest import TAKE_PROFIT, TP_THRESHOLDS   # 阈值事实源单一
+from .dca_backtest import (DCA_METHODS, TAKE_PROFIT,   # 阈值/定投方式事实源单一
+                           TP_THRESHOLDS)
 
 _DCA_LIST_SQL = """
 SELECT r.code, r.name, r.fund_type, r.alive, r.scale_yi, r.scale_date,
@@ -450,7 +451,7 @@ def register_fund_dca_routes(app):
                      sort: str = "w10_xirr", order: str = "desc",
                      min_age: float = 0.0, min_scale: float = 0.0,
                      limit: int = 50, offset: int = 0, fee: str = "gross",
-                     equity: str = "true",
+                     equity: str = "true", method: str = "amount",
                      age_min: float = None, age_max: float = None,
                      gap_min: float = None, gap_max: float = None,
                      xirr_min: float = None, xirr_max: float = None,
@@ -458,10 +459,11 @@ def register_fund_dca_routes(app):
                      pr_min: float = None, pr_max: float = None):
         """定投止盈回测排行（多阈值版，fund_dca_tp_result 快照）。
 
-        tp 选止盈点（0.05/0.1/0.15/0.2/0.25/0.3，白名单外回落 0.2）；
-        其余参数与降级约定同 /api/funds/dca（含五维度区间筛选，权益开关
-        沿用 EQUITY_TYPES 8 类口径，与旧排行一致）。统计卡跟随 tp 与各
-        筛选、费用口径。
+        tp 选止盈点（0.05~0.40，白名单外回落 0.2）；method 选定投方式
+        （amount 等额 / share 等份额，白名单外回落 amount）；其余参数与
+        降级约定同 /api/funds/dca（含五维度区间筛选，权益开关沿用
+        EQUITY_TYPES 8 类口径，与旧排行一致）。统计卡跟随 tp/method 与
+        各筛选、费用口径。
         """
         return fetch_dca_tp_list(config.DATABASE_URL,
                                  tp=_parse_tp(tp.strip().lower()),
@@ -472,6 +474,7 @@ def register_fund_dca_routes(app):
                                  limit=limit, offset=offset,
                                  fee=fee.strip().lower(),
                                  equity=_parse_equity(equity),
+                                 method=_parse_method(method),
                                  age_min=age_min, age_max=age_max,
                                  gap_min=gap_min, gap_max=gap_max,
                                  xirr_min=xirr_min, xirr_max=xirr_max,
@@ -479,30 +482,37 @@ def register_fund_dca_routes(app):
                                  pr_min=pr_min, pr_max=pr_max)
 
     @app.get("/api/funds/dca/tp/compare")
-    def funds_dca_tp_compare(fee: str = "nom", equity: str = "true"):
-        """六档止盈点市场级对比聚合（5%~30%）：每阈值样本数 / w10 年化
+    def funds_dca_tp_compare(fee: str = "nom", equity: str = "true",
+                             method: str = "amount"):
+        """八档止盈点市场级对比聚合（5%~40%）：每阈值样本数 / w10 年化
         P25~P90/均值 / 正收益占比 / 止盈成功率 / 平均轮次 / 全史中位均值 /
         平均止盈间隔。默认权益类+商品池（TP_COMPARE_EQUITY_TYPES，
-        2026-11-15 用户确认口径），equity=false 全市场对照；fee 切换口径。
-        降级约定同 /api/funds/dca。
+        2026-11-15 用户确认口径），equity=false 全市场对照；fee 切换口径、
+        method 切定投方式（跟随页面级 tab）。降级约定同 /api/funds/dca。
         """
         return fetch_dca_tp_compare(config.DATABASE_URL,
                                     fee=fee.strip().lower(),
-                                    equity=_parse_equity(equity))
+                                    equity=_parse_equity(equity),
+                                    method=_parse_method(method))
 
     @app.get("/api/funds/dca/tp/{code}/rounds")
-    def funds_dca_tp_rounds(code: str, fee: str = "nom", tp: str = "0.2"):
+    def funds_dca_tp_rounds(code: str, fee: str = "nom", tp: str = "0.2",
+                            method: str = "amount"):
         """单基金单阈值每轮止盈明细（契约同 /api/funds/dca/{code}/rounds
-        + tp 维度；tp 白名单外回落 0.2）。降级约定同 /api/funds/dca。"""
+        + tp/method 维度；白名单外各回落 0.2 / amount）。降级约定同
+        /api/funds/dca。"""
         return fetch_dca_tp_rounds(config.DATABASE_URL, code,
                                    fee=fee.strip().lower(),
-                                   tp=_parse_tp(tp.strip().lower()))
+                                   tp=_parse_tp(tp.strip().lower()),
+                                   method=_parse_method(method))
 
     @app.get("/api/funds/dca/tp/{code}/summary")
-    def funds_dca_tp_summary(code: str):
+    def funds_dca_tp_summary(code: str, method: str = "amount"):
         """单基金全阈值总收益率/年化汇总（近 10 年窗口，每阈值一行恒带
-        三口径字段——前端弹窗按当前费率口径取值）。降级约定同 /api/funds/dca。"""
-        return fetch_dca_tp_summary(config.DATABASE_URL, code.strip())
+        三口径字段——前端弹窗按当前费率口径取值；method 跟随页面级定投
+        方式 tab）。降级约定同 /api/funds/dca。"""
+        return fetch_dca_tp_summary(config.DATABASE_URL, code.strip(),
+                                    method=_parse_method(method))
 
     @app.get("/api/funds/dca/timing")
     def funds_dca_timing(tp: str = "0.2", band: str = "25-30", q: str = "",
@@ -702,6 +712,7 @@ FROM fund_dca_tp_result r
 LEFT JOIN fund_dip_timing t ON t.code = r.code
 LEFT JOIN fund_risk_metrics rm ON rm.code = r.code
 WHERE r.tp = %s
+  AND r.method = %s
   AND (%s = '' OR r.code ILIKE %s OR r.name ILIKE %s)
   AND {alive_clause}
   AND {age_clause}
@@ -716,6 +727,7 @@ _TP_COUNT_SQL = """
 SELECT count(*) FROM fund_dca_tp_result r
 LEFT JOIN fund_dip_timing t ON t.code = r.code
 WHERE r.tp = %s
+  AND r.method = %s
   AND (%s = '' OR r.code ILIKE %s OR r.name ILIKE %s)
   AND {alive_clause}
   AND {age_clause}
@@ -735,7 +747,7 @@ SELECT count(*),
        avg(({xirr_col} > 0)::int)::float,
        avg(({rounds_col} > 0)::int)::float
 FROM fund_dca_tp_result r
-WHERE r.alive AND r.tp = %s AND {xirr_col} IS NOT NULL
+WHERE r.alive AND r.tp = %s AND r.method = %s AND {xirr_col} IS NOT NULL
   AND {age_clause}
   AND {scale_clause}
   AND {equity_clause}
@@ -756,7 +768,7 @@ SELECT tp, count(*),
        avg(({fr} > 0)::int)::float,
        avg({gap})
 FROM fund_dca_tp_result
-WHERE alive AND {wx} IS NOT NULL{equity_clause}
+WHERE alive AND method = %s AND {wx} IS NOT NULL{equity_clause}
 GROUP BY tp ORDER BY tp
 """
 
@@ -774,21 +786,29 @@ def _parse_tp(raw) -> float:
     return next((t for t in TP_THRESHOLDS if abs(v - t) < 1e-9), TAKE_PROFIT)
 
 
+def _parse_method(raw) -> str:
+    """method 查询参数 → 定投方式白名单（DCA_METHODS）；乱值回落 amount。"""
+    v = str(raw or "").strip().lower()
+    return v if v in DCA_METHODS else "amount"
+
+
 def fetch_dca_tp_list(dsn: str, *, tp: float = TAKE_PROFIT, q: str = "",
                       alive: str = "true", sort: str = "w10_xirr",
                       order: str = "desc", min_age: float = 0.0,
                       min_scale: float = 0.0, limit: int = 50, offset: int = 0,
                       fee: str = "gross", equity: bool = True,
+                      method: str = "amount",
                       age_min: float = None, age_max: float = None,
                       gap_min: float = None, gap_max: float = None,
                       xirr_min: float = None, xirr_max: float = None,
                       dd_min: float = None, dd_max: float = None,
                       pr_min: float = None, pr_max: float = None) -> dict:
-    """多阈值排行：fetch_dca_list 同款契约 + tp 维度（fund_dca_tp_result）。
+    """多阈值排行：fetch_dca_list 同款契约 + tp/method 维度（fund_dca_tp_result）。
 
-    tp 为白名单阈值（0.05~0.30）；排序/统计/筛选口径与旧端点逐项一致
+    tp 为白名单阈值（0.05~0.40）、method 为定投方式白名单（DCA_METHODS，
+    amount 等额 / share 等份额）；排序/统计/筛选口径与旧端点逐项一致
     （含五维度区间筛选与时机列 dd_current/days_since_peak/dip_band），
-    行结构多 tp 一列。响应回显 tp / fee / equity。
+    行结构多 tp 一列。响应回显 tp / method / fee / equity。
     """
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
@@ -840,7 +860,7 @@ def fetch_dca_tp_list(dsn: str, *, tp: float = TAKE_PROFIT, q: str = "",
                              .replace("{age_clause}", age_clause)
                              .replace("{scale_clause}", scale_clause)
                              .replace("{equity_clause}", equity_clause))
-                base = ([tp, q, like, like]
+                base = ([tp, method, q, like, like]
                         + ([cutoff] if cutoff else [])
                         + ([scale_param] if scale_param else [])
                         + ([equity_param] if equity_param else [])
@@ -849,9 +869,10 @@ def fetch_dca_tp_list(dsn: str, *, tp: float = TAKE_PROFIT, q: str = "",
                 rows = [dict(zip(_TP_LIST_COLS, r)) for r in cur.fetchall()]
                 cur.execute(count_sql, base)
                 total = cur.fetchone()[0]
-                cur.execute(stats_sql, ([tp] + ([cutoff] if cutoff else [])
-                                        + ([scale_param] if scale_param else [])
-                                        + ([equity_param] if equity_param else [])))
+                cur.execute(stats_sql,
+                            ([tp, method] + ([cutoff] if cutoff else [])
+                             + ([scale_param] if scale_param else [])
+                             + ([equity_param] if equity_param else [])))
                 s = cur.fetchone()
                 cur.execute(_DCA_META_SQL)
                 m = cur.fetchone()
@@ -875,24 +896,28 @@ def fetch_dca_tp_list(dsn: str, *, tp: float = TAKE_PROFIT, q: str = "",
         if m:
             meta = {"generated_at": m[0].isoformat() if m[0] else None,
                     "fund_count": m[1], "params": m[2]}
-        return {"status": "up", "tp": tp, "total": total, "limit": limit,
-                "offset": offset, "fee": fee_val, "equity": bool(equity),
+        return {"status": "up", "tp": tp, "method": method, "total": total,
+                "limit": limit, "offset": offset, "fee": fee_val,
+                "equity": bool(equity),
                 "rows": rows, "stats": stats, "meta": meta}
     return _safe(run, {"status": "down", "detail": "pg unreachable",
-                       "tp": tp, "total": 0, "limit": limit, "offset": offset,
+                       "tp": tp, "method": method,
+                       "total": 0, "limit": limit, "offset": offset,
                        "equity": bool(equity),
                        "rows": [], "stats": None, "meta": None})
 
 
-def fetch_dca_tp_compare(dsn: str, *, fee: str = "nom",
-                         equity: bool = True) -> dict:
-    """六档阈值市场级对比聚合（权益类+商品池，alive 且 w10 年化非空宇宙）。
+def fetch_dca_tp_compare(dsn: str, *, fee: str = "nom", equity: bool = True,
+                         method: str = "amount") -> dict:
+    """八档阈值市场级对比聚合（权益类+商品池，alive 且 w10 年化非空宇宙）。
 
     每阈值一行：样本数 / w10 年化 P25~P90 与均值 / 正收益占比 / 止盈成功率
     （轮次>0 占比）/ 平均轮次 / 全史中位与均值 / 平均止盈间隔。
-    fee 切换口径（gross/discard/nom），equity=False 切全市场对照。
+    fee 切换口径（gross/disc/nom），equity=False 切全市场对照，
+    method 切定投方式（DCA_METHODS）。
     """
     fee_val = fee if fee in _FEE_XIRR_COL else "nom"
+    method_val = method if method in DCA_METHODS else "amount"
     suffix = _LIST_FEE_SUFFIX[fee_val]
     cols = {"wx": f"w10_xirr{suffix}", "fx": f"full_xirr{suffix}",
             "wr": f"w10_rounds{suffix}", "fr": f"full_rounds{suffix}",
@@ -901,11 +926,11 @@ def fetch_dca_tp_compare(dsn: str, *, fee: str = "nom",
     def run():
         with psycopg.connect(dsn, connect_timeout=3) as conn:
             with conn.cursor() as cur:
-                params = None
+                params = [method_val]
                 eq_clause = ""
                 if equity:
                     eq_clause = " AND fund_type = ANY(%s)"
-                    params = (list(TP_COMPARE_EQUITY_TYPES),)
+                    params.append(list(TP_COMPARE_EQUITY_TYPES))
                 cur.execute(_TP_COMPARE_SQL.replace("{wx}", cols["wx"])
                             .replace("{fx}", cols["fx"])
                             .replace("{wr}", cols["wr"])
@@ -931,30 +956,34 @@ def fetch_dca_tp_compare(dsn: str, *, fee: str = "nom",
                 "full_success_share": round(r[13], 4) if r[13] is not None else None,
                 "avg_gap_days": round(r[14], 1) if r[14] is not None else None,
             })
-        return {"status": "up", "fee": fee_val, "equity": bool(equity),
+        return {"status": "up", "fee": fee_val, "method": method_val,
+                "equity": bool(equity),
                 "thresholds": [float(t) for t in TP_THRESHOLDS], "rows": out}
     return _safe(run, {"status": "down", "detail": "pg unreachable",
-                       "equity": bool(equity), "thresholds": [],
-                       "rows": []})
+                       "method": method, "equity": bool(equity),
+                       "thresholds": [], "rows": []})
 
 
 _TP_ROUNDS_SQL = """
 SELECT seq, tp_date, round_days, gap_days, profit,
        tp_nav, invested, sub_fee, redeem_fee, net_profit
-FROM fund_dca_tp_rounds WHERE code = %s AND tp = %s AND fee = %s ORDER BY seq
+FROM fund_dca_tp_rounds
+WHERE code = %s AND tp = %s AND fee = %s AND method = %s ORDER BY seq
 """
 
 
 def fetch_dca_tp_rounds(dsn: str, code: str, fee: str = "nom",
-                        tp: float = TAKE_PROFIT) -> dict:
+                        tp: float = TAKE_PROFIT,
+                        method: str = "amount") -> dict:
     """单基金单阈值每轮止盈明细（fund_dca_tp_rounds）。契约同 fetch_dca_rounds
-    + tp 维度回显。"""
+    + tp/method 维度回显。"""
     fee_val = fee if fee in _FEE_XIRR_COL else "nom"
+    method_val = method if method in DCA_METHODS else "amount"
 
     def run():
         with psycopg.connect(dsn, connect_timeout=3) as conn:
             with conn.cursor() as cur:
-                cur.execute(_TP_ROUNDS_SQL, (code, tp, fee_val))
+                cur.execute(_TP_ROUNDS_SQL, (code, tp, fee_val, method_val))
                 rows = cur.fetchall()
         out = [{"seq": r[0], "tp_date": r[1].isoformat() if r[1] else None,
                 "round_days": r[2], "gap_days": r[3],
@@ -970,9 +999,10 @@ def fetch_dca_tp_rounds(dsn: str, code: str, fee: str = "nom",
             "redeem_fee": round(sum(r["redeem_fee"] or 0 for r in out), 2),
         }
         return {"status": "up", "code": code, "fee": fee_val, "tp": tp,
-                "rounds": out, "totals": totals}
+                "method": method_val, "rounds": out, "totals": totals}
     return _safe(run, {"status": "down", "detail": "pg unreachable",
-                       "code": code, "tp": tp, "rounds": [], "totals": {}})
+                       "code": code, "tp": tp, "method": method_val,
+                       "rounds": [], "totals": {}})
 
 
 _TP_SUMMARY_SQL = """
@@ -984,24 +1014,27 @@ SELECT tp, w10_profit_rate, w10_xirr,
        full_cur_profit_rate, full_cur_profit_rate_disc,
        full_cur_profit_rate_nom,
        full_cur_xirr, full_cur_xirr_disc, full_cur_xirr_nom
-FROM fund_dca_tp_result WHERE code = %s ORDER BY tp
+FROM fund_dca_tp_result WHERE code = %s AND method = %s ORDER BY tp
 """
 
 
-def fetch_dca_tp_summary(dsn: str, code: str) -> dict:
+def fetch_dca_tp_summary(dsn: str, code: str,
+                         method: str = "amount") -> dict:
     """单基金全阈值总收益率/年化汇总（fund_dca_tp_result，w10 窗口）。
 
     每阈值一行，恒带三口径字段（gross 原列 / _disc / _nom 后缀）——前端
     弹窗按当前费率口径取值，切口径无需重拉；另附「最近一次止盈后」当前轮
-    十字段（全史窗口，2026-11-19；未止盈基金全 NULL）。降级约定同旧端点。
+    十字段（全史窗口，2026-11-19；未止盈基金全 NULL）。method 切定投方式
+    （DCA_METHODS，前端弹窗跟随页面级 tab）。降级约定同旧端点。
     """
+    method_val = method if method in DCA_METHODS else "amount"
 
     def run():
         with psycopg.connect(dsn, connect_timeout=3) as conn:
             with conn.cursor() as cur:
                 cur.execute(_DCA_REF_SQL)
                 ref = cur.fetchone()[0]
-                cur.execute(_TP_SUMMARY_SQL, (code,))
+                cur.execute(_TP_SUMMARY_SQL, (code, method_val))
                 rows = cur.fetchall()
         out = [{"tp": r[0],
                 "w10_profit_rate": round(r[1], 4) if r[1] is not None else None,
@@ -1029,9 +1062,9 @@ def fetch_dca_tp_summary(dsn: str, code: str) -> dict:
                 "full_cur_xirr_nom": (round(r[17], 4)
                                       if r[17] is not None else None)}
                for r in rows]
-        return {"status": "up", "code": code, "rows": out}
+        return {"status": "up", "code": code, "method": method_val, "rows": out}
     return _safe(run, {"status": "down", "detail": "pg unreachable",
-                       "code": code, "rows": []})
+                       "code": code, "method": method_val, "rows": []})
 
 
 _TIMING_SQL = """

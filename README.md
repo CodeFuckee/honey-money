@@ -19,7 +19,9 @@ backend/            Python 后端（FastAPI）
   app/task_store.py   爬虫任务持久化（crawl_task 表 CRUD + 预置任务播种）
   app/scheduler.py    进程内任务调度器（每日到点/启动补跑/全局串行/advisory lock 互斥）
   app/tasks_api.py    任务管理 API（CRUD/触发/取消/停止/历史）
-  app/dca_backtest.py 定投回测核心（脚本与调度器日更共用）
+  app/dca_backtest.py 定投回测核心（脚本与调度器日更共用；定投方式两档
+                      DCA_METHODS：amount 等额 / share 等份额——止盈状态机
+                      共用，日更双 method 计算）
   app/risk_metrics.py 基金风险/波动指标纯函数（年化/下行波动率、最大回撤、
                       夏普、60 日滚动波动率及历史分位；复权口径 √252 年化；
                       定投日更顺带全量重算落 fund_risk_metrics）
@@ -30,7 +32,9 @@ backend/            Python 后端（FastAPI）
   app/backtest_api.py 回测 API（策略/区间/撮合模式/成本，降级 200 约定）
   app/dca_store.py    定投止盈回测快照存储（fund_dca_result / fund_dca_meta 两表 +
                       fund_dca_tp_result / fund_dca_tp_rounds / fund_dca_tp_meta
-                      多阈值三表（5%~40% 八档，与旧表同构 + tp 维度，完全隔离）+
+                      多阈值三表（5%~40% 八档 × 定投方式 method 维度
+                      （amount 等额/share 等份额，2026-11-23，与旧表同构 +
+                      tp/method 维度，存量表 ALTER 就地迁移））+
                       fund_dip_timing 时机表（当前回撤/距前高/回撤桶，日更顺带刷新）+
                       fund_risk_metrics 波动指标表（近1/3/5年与全史四窗口，日更顺带刷新）+
                       fund_dip_validation 起点条件验证表 / fund_bear_pause_fund
@@ -42,7 +46,7 @@ backend/            Python 后端（FastAPI）
                       vol_1y/vol_down_1y/mdd_1y/sharpe_1y/roll_vol/vol_pctile
                       （LEFT JOIN fund_risk_metrics，可按其排序））+
                       /api/funds/dca/tp（多阈值排行，tp 白名单回落 0.2，
-                      同附波动指标列与排序）+
+                      method 定投方式白名单回落 amount，同附波动指标列与排序）+
                       /api/funds/dca/tp/compare（八档止盈点市场级对比聚合，
                       权益类+商品池）+ /api/funds/dca/tp/{code}/rounds
                       （单基金单阈值轮次明细）+ /api/funds/dca/tp/{code}/summary
@@ -86,7 +90,10 @@ frontend/           Vue3 + Vite 前端
                       对照表，无快照显示待生成占位）+ 分页明细）+
                       定投止盈回测子页（全市场公募基金「月定投+止盈」
                       离线回测排行：止盈点 5%~40% 八档切换（默认 20%，排行/
-                      统计/明细跟随，散点/分箱固定 20%）+「止盈点对比」
+                      统计/明细跟随，散点/分箱固定 20%）+ 定投方式切换
+                      （2026-11-23：等额定投/等份额定投 tab，排行/统计/
+                      对比卡/明细跟随；等份额=每期固定到手份额、现金随净值
+                      波动，?mode= 深链接）+「止盈点对比」
                       市场级区块（八档中位/均值年化、正收益占比、止盈成功率、
                       平均轮次与间隔 + SVG 折线，权益类+商品池，点击行/圆点
                       切换排行阈值）+ 统一基金表格（2026-11-17 表格合并：

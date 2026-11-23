@@ -1,7 +1,9 @@
 """全市场基金「定投 + 20% 止盈」回测核心（离线脚本与调度器日更共用）。
 
 口径约定：
-- 定投：每只基金每月首个净值日投入固定 1000 元（金额不影响收益率）；
+- 定投：每只基金每月首个净值日买入；定投方式两档（DCA_METHODS）——
+  amount 等额定投（每期固定 1000 元，金额不影响收益率）/ share 等份额
+  定投（每期固定到手份额 = 1000/窗口首日复权净值，现金随净值波动）；
 - 复权：东财日增长率 pct_chg 已是分红再投资口径（已验证），链乘合成复权净值；
   pct_chg 缺失行用 (unit_nav+每份分红)/前日单位净值 兜底（分红由累计净值差推出）；
 - 止盈：任一净值日持仓收益率 = 持仓市值/已投入 - 1 ≥ 20% 即全仓赎回并开启新一轮
@@ -43,6 +45,12 @@ MIN_SPAN_DAYS = 90  # 窗口短于此天数的年化记 nan
 # 市场级阈值对比（2026-11-15 grilling 定案；同日追加 35%/40% → 八档）：
 # 止盈点清单，API/排行切换与 fund_dca_tp_* 新表共用这一事实源
 TP_THRESHOLDS = (0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40)
+# 定投方式清单（2026-11-23 定案，与 tp 同为 fund_dca_tp_* 的维度）：
+# amount=等额定投（每期固定 1000 元）；share=等份额定投（每期固定到手
+# 份额 = AMOUNT/窗口首日复权净值，首期恰好 1000 元——涨时现金花得多、
+# 跌时花得少，成本摊平效果最差的反面基准；含费为外扣法对偶：现金 =
+# 份额×净值×(1+申购费率)）。API method 白名单与前端 tab 共用此事实源。
+DCA_METHODS = ("amount", "share")
 
 
 # ===== 费用模型（典型档位近似，见模块 docstring） =====
@@ -219,7 +227,8 @@ def _finalize_tp_state(st: dict, dates: pd.DatetimeIndex, adj: np.ndarray,
 
 def simulate_multi(dates: pd.DatetimeIndex, adj: np.ndarray,
                    fee: FeeSchedule | None = None,
-                   take_profits=TP_THRESHOLDS) -> dict:
+                   take_profits=TP_THRESHOLDS,
+                   method: str = "amount") -> dict:
     """单基金单窗口单遍多阈值：同一净值序列上同时跑多档止盈。
 
     每档阈值一个独立状态机（月度买入/日频触发线/轮次事件与 simulate
@@ -227,7 +236,17 @@ def simulate_multi(dates: pd.DatetimeIndex, adj: np.ndarray,
     与 simulate(take_profit=tp) 逐字段一致。相对跑 N 遍全量模拟，省掉的
     只是窗口 prep/月检等共享开销；状态机本体仍是 N 倍工作量（日更多阈值
     总计算量 ≈ 单阈值日更 ×N，见 run_backtest_tp docstring）。
+
+    method 选定投方式（DCA_METHODS，止盈/清算逻辑两种方式共用）：
+    - amount（等额，缺省）：每期现金固定 AMOUNT，外扣法折份额；
+    - share（等份额）：每期到手份额固定 = AMOUNT/窗口首日复权净值，
+      现金 = 份额×净值×(1+申购费率)（无费时 ×1），invested 每期可变。
     """
+    if method not in DCA_METHODS:
+        raise ValueError(f"unknown dca method: {method!r}")
+    # 等份额标定：窗口首日净值折基准金额（首期恰好 1000 元；跨基金可比，
+    # 无前视——adj[0] 即首个月度买入价）
+    unit_shares = AMOUNT / adj[0]
     states = [_new_tp_state(tp) for tp in take_profits]
     months = dates.to_numpy().astype("datetime64[M]")
     for i in range(len(dates)):
@@ -238,12 +257,22 @@ def simulate_multi(dates: pd.DatetimeIndex, adj: np.ndarray,
                 st["months"].add(m)
                 if st["basis_units"] == 0.0:
                     st["round_start"] = dates[i]   # 新一轮从本轮首次买入起算
-                net_amount = AMOUNT if fee is None else AMOUNT / (1.0 + fee.sub_rate)
-                st["lots"].append((i, net_amount / a))
-                st["basis_units"] += net_amount / a
-                st["invested"] += AMOUNT
-                st["round_sub_fee"] += AMOUNT - net_amount
-                st["flows"].append((dates[i], -AMOUNT))
+                if method == "share":
+                    cash = unit_shares * a * (1.0 if fee is None
+                                              else 1.0 + fee.sub_rate)
+                    sh = unit_shares
+                    sub_fee = 0.0 if fee is None else cash - sh * a
+                else:
+                    cash = AMOUNT
+                    net_amount = (cash if fee is None
+                                  else cash / (1.0 + fee.sub_rate))
+                    sh = net_amount / a
+                    sub_fee = cash - net_amount
+                st["lots"].append((i, sh))
+                st["basis_units"] += sh
+                st["invested"] += cash
+                st["round_sub_fee"] += sub_fee
+                st["flows"].append((dates[i], -cash))
             if (st["basis_units"] > 0
                     and st["basis_units"] * a
                     >= st["invested"] * (1.0 + st["tp"])):
@@ -279,14 +308,17 @@ def simulate_multi(dates: pd.DatetimeIndex, adj: np.ndarray,
 
 def simulate(dates: pd.DatetimeIndex, adj: np.ndarray,
              fee: FeeSchedule | None = None,
-             take_profit: float = TAKE_PROFIT) -> dict:
+             take_profit: float = TAKE_PROFIT,
+             method: str = "amount") -> dict:
     """单基金单窗口单阈值：每月首个净值日买入，日频检查止盈。
 
     fee=None 为无费口径（原行为）；给定调度时申购按外扣法折份额
     （净申购 = 金额/(1+费率)，投入现金流仍记全额），止盈/期末清算的
     回款现金流为扣赎回费后净额。止盈触发线按市值口径（持仓市值/已投入
     -1 ≥ take_profit 即全仓赎回并开启新一轮），与用户在 APP 里看到的
-    一致。实现为 simulate_multi 单档委托，行为逐字段一致。
+    一致。method 选定投方式（amount 等额/ share 等份额，口径见
+    simulate_multi 与 DCA_METHODS 注释）。实现为 simulate_multi 单档
+    委托，行为逐字段一致。
 
     res["flows"]：XIRR 现金流 [(日期, 金额)]。
     res["round_events"]：每轮止盈事件 (tp_date, round_days, gap_days,
@@ -299,7 +331,8 @@ def simulate(dates: pd.DatetimeIndex, adj: np.ndarray,
     本轮市值口径收益率/本轮 XIRR（<90 天置 None）；rounds=0 全 None
     （cur_profit_rate 用净赎回口径期末市值，与窗口 profit_rate 一致）。
     """
-    return simulate_multi(dates, adj, fee, [take_profit])[take_profit]
+    return simulate_multi(dates, adj, fee, [take_profit],
+                          method=method)[take_profit]
 
 
 def prep_window(df: pd.DataFrame, start: pd.Timestamp | None):
@@ -409,15 +442,18 @@ def _or_none(res: dict | None, key: str):
 
 def run_backtest_tp(nav: pd.DataFrame, basic: pd.DataFrame,
                     scale_map: dict, thresholds=TP_THRESHOLDS, *,
-                    end_ts=None, log=print) -> tuple[list[dict], list[tuple]]:
+                    end_ts=None, method: str = "amount",
+                    log=print) -> tuple[list[dict], list[tuple]]:
     """多阈值纯计算编排：每基金每窗口每口径一次 simulate_multi 扫描。
 
     nav/basic/scale_map 同 run_backtest；end_ts：10y 窗口右端（缺省=数据集
-    最新净值日）。返回 (result_rows, rounds_rows)：
-    - 结果行 = run_backtest 行结构 + "tp" 字段（每基金 × 每阈值一行）；
-    - 轮次行 = (code, tp, fee, seq, *ev)，w10 窗口口径与旧表同一约定；
-    - tp=TAKE_PROFIT 的行/轮次与 run_backtest 输出逐字段一致（测试锚定），
-      旧表写入即由该档派生。
+    最新净值日）；method 选定投方式（DCA_METHODS，缺省等额）。返回
+    (result_rows, rounds_rows)：
+    - 结果行 = run_backtest 行结构 + "tp"/"method" 字段
+      （每基金 × 每阈值一行）；
+    - 轮次行 = (code, method, tp, fee, seq, *ev)，w10 窗口口径与旧表同一约定；
+    - method=amount 且 tp=TAKE_PROFIT 的行/轮次与 run_backtest 输出逐字段
+      一致（测试锚定），旧表写入即由该档派生。
     """
     if end_ts is None:
         end_ts = pd.Timestamp(nav["nav_date"].max())
@@ -444,7 +480,8 @@ def run_backtest_tp(nav: pd.DataFrame, basic: pd.DataFrame,
         per_tp_fee = {tp: {"full": {}, "w10": {}} for tp in thresholds}
         for prefix, prep in (("full", full_p), ("w10", w10_p)):
             for fee_name in ("gross", "disc", "nom"):
-                multi = (simulate_multi(*prep, fee[fee_name], thresholds)
+                multi = (simulate_multi(*prep, fee[fee_name], thresholds,
+                                        method=method)
                          if prep else None)
                 for tp in thresholds:
                     per_tp_fee[tp][prefix][fee_name] = (
@@ -453,6 +490,7 @@ def run_backtest_tp(nav: pd.DataFrame, basic: pd.DataFrame,
             res = per_tp_fee[tp]
             row = dict(base)
             row["tp"] = tp
+            row["method"] = method
             for prefix in ("full", "w10"):
                 p_res = res[prefix]
                 for k in COLS_FULL:
@@ -491,10 +529,12 @@ def run_backtest_tp(nav: pd.DataFrame, basic: pd.DataFrame,
                 res_w = res["w10"].get(fee_name)
                 if res_w:
                     for seq, ev in enumerate(res_w["round_events"], 1):
-                        rounds_rows.append((code, tp, fee_name, seq, *ev))
+                        rounds_rows.append((code, method, tp, fee_name, seq,
+                                            *ev))
         n_funds += 1
         if n_funds % 1000 == 0:
-            log(f"  已回测 {n_funds:,} 只 × {len(thresholds)} 档阈值", flush=True)
+            log(f"  已回测 {n_funds:,} 只 × {len(thresholds)} 档阈值"
+                f"（{method}）", flush=True)
     return rows, rounds_rows
 
 
@@ -606,16 +646,17 @@ def run_full_backtest_tp(dsn: str, *, thresholds=TP_THRESHOLDS,
                          log=print) -> tuple[list[dict], list[tuple],
                                              list[dict], list[tuple],
                                              list[tuple], list[tuple], dict]:
-    """日更全量回测（多阈值版）：PG 拉数一次 → run_backtest_tp → 派生旧口径行。
+    """日更全量回测（多阈值版）：PG 拉数一次 → 双 method × run_backtest_tp。
 
     返回 (old_rows, old_rounds, tp_rows, tp_rounds, timing_rows, risk_rows,
     stats)：
-    - old_rows/old_rounds：tp=TAKE_PROFIT 派生的旧口径行（写
+    - old_rows/old_rounds：amount 且 tp=TAKE_PROFIT 派生的旧口径行（写
       fund_dca_result / fund_dca_rounds，与旧引擎 run_backtest 输出一致）；
-    - tp_rows/tp_rounds：全阈值行（写 fund_dca_tp_* 新表）；
+    - tp_rows/tp_rounds：全阈值 × 全定投方式行（写 fund_dca_tp_* 新表，
+      method 维度见 DCA_METHODS；计算量 ≈ 单方法 ×N）；
     - timing_rows：当前回撤时机行（写 fund_dip_timing，定投时机视图）；
     - risk_rows：风险/波动指标行（写 fund_risk_metrics，risk_row 产码）；
-    - alive 45 天新鲜度规则对时机行与各套行同一份（基金级，与阈值无关）。
+    - alive 45 天新鲜度规则对时机行与各套行同一份（基金级，与阈值/方式无关）。
     纯 CPU，调用方放子进程跑；直写由调用方事务完成。
     """
     with psycopg.connect(dsn, connect_timeout=10) as conn:
@@ -627,12 +668,19 @@ def run_full_backtest_tp(dsn: str, *, thresholds=TP_THRESHOLDS,
         scale_map = _load_scale(conn)
         nav = _load_nav(conn, codes)
     log(f"净值行：{len(nav):,}")
-    tp_rows, tp_rounds = run_backtest_tp(nav, basic, scale_map, thresholds,
-                                         log=log)
-    # 旧口径行 = tp=TAKE_PROFIT 派生（去掉 tp 维度），与 run_backtest 输出一致
-    old_rows = [{k: v for k, v in r.items() if k != "tp"}
-                for r in tp_rows if r["tp"] == TAKE_PROFIT]
-    old_rounds = [t[:1] + t[2:] for t in tp_rounds if t[1] == TAKE_PROFIT]
+    tp_rows, tp_rounds = [], []
+    for method in DCA_METHODS:
+        m_rows, m_rounds = run_backtest_tp(nav, basic, scale_map, thresholds,
+                                           method=method, log=log)
+        tp_rows.extend(m_rows)
+        tp_rounds.extend(m_rounds)
+    # 旧口径行 = amount 且 tp=TAKE_PROFIT 派生（去掉 tp/method 维度），
+    # 与 run_backtest 输出一致
+    old_rows = [{k: v for k, v in r.items() if k not in ("tp", "method")}
+                for r in tp_rows
+                if r["tp"] == TAKE_PROFIT and r["method"] == "amount"]
+    old_rounds = [t[:1] + t[3:] for t in tp_rounds
+                  if t[1] == "amount" and t[2] == TAKE_PROFIT]
     # alive：full_end 距数据集最新净值日 45 天内（场内 ETF 的 delisted 标记
     # 不可直接用，见 dca_store 同款口径）——必须先于时机/风险行计算（此前
     # 时机块误置于 alive/all_end 定义之前，引用未定义变量 NameError 使日更
@@ -670,6 +718,7 @@ def run_full_backtest_tp(dsn: str, *, thresholds=TP_THRESHOLDS,
              "timing_count": len(timing_rows),
              "risk_count": len(risk_rows),
              "thresholds": [float(t) for t in thresholds],
+             "methods": list(DCA_METHODS),
              "window_end": str(all_end) if all_end else None}
     log(f"回测完成：{stats['fund_count']:,} 只 / 旧口径轮次 "
         f"{stats['round_count']:,} 行 / 多阈值轮次 {stats['tp_round_count']:,} 行"

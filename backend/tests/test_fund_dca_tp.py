@@ -159,24 +159,26 @@ class TestRunBacktestTp:
         assert codes == {"000001"}          # B 从未止盈 → 无轮次行
 
     def test_tp20_matches_legacy_run_backtest(self):
-        """关键一致性：tp=0.20 结果行/轮次行 ≡ 旧 run_backtest 输出。"""
+        """关键一致性：amount 且 tp=0.20 结果行/轮次行 ≡ 旧 run_backtest
+        输出（method 维度加入后旧口径派生不变）。"""
         from app import dca_backtest as mod
         nav, basic, scale_map = _synthetic_inputs()
         old_rows, old_rounds = mod.run_backtest(nav, basic, scale_map)
         tp_rows, tp_rounds = mod.run_backtest_tp(nav, basic, scale_map)
         old_by_code = {r["code"]: r for r in old_rows}
-        new_by_code = {r["code"]: r for r in tp_rows if r["tp"] == 0.20}
+        new_by_code = {r["code"]: r for r in tp_rows
+                       if r["tp"] == 0.20 and r["method"] == "amount"}
         for code, orow in old_by_code.items():
             nrow = new_by_code[code]
-            assert set(orow) == (set(nrow) - {"tp"})
+            assert set(orow) == (set(nrow) - {"tp", "method"})
             for k, v in orow.items():
                 if v is None and nrow[k] is None:
                     continue
                 assert nrow[k] == v, (code, k)
-        # 轮次行：旧 (code, fee, seq, *ev) ≡ 新 tp=0.20 去掉 tp 位
+        # 轮次行：旧 (code, fee, seq, *ev) ≡ 新 amount+tp=0.20 去掉两位
         old_r = [t for t in old_rounds if t[0] == "000001"]
-        new_r = [t[:1] + t[2:] for t in tp_rounds
-                 if t[0] == "000001" and t[1] == 0.20]
+        new_r = [t[:1] + t[3:] for t in tp_rounds
+                 if t[0] == "000001" and t[1] == "amount" and t[2] == 0.20]
         assert old_r == new_r
 
     def test_rounds_profit_respects_threshold(self):
@@ -185,7 +187,7 @@ class TestRunBacktestTp:
         nav, basic, scale_map = _synthetic_inputs()
         _, rounds = mod.run_backtest_tp(nav, basic, scale_map)
         by_tp = {}
-        for _code, tp, _fee, _seq, *_ev in rounds:
+        for _code, _method, tp, _fee, _seq, *_ev in rounds:
             by_tp.setdefault(tp, []).append(_ev)
         # (tp_date, round_days, gap_days, profit, ...) → profit 在 ev[3]
         for tp, evs in by_tp.items():
@@ -323,7 +325,7 @@ def _tp_row(code="000001", tp=0.15):
          "full_cur_profit_rate_nom": None,
          "full_cur_xirr": None, "full_cur_xirr_disc": None,
          "full_cur_xirr_nom": None,
-         "tp": tp}
+         "tp": tp, "method": "amount"}
     return r
 
 
@@ -339,9 +341,10 @@ class TestTpStore:
                    for s in sqls)
         assert any("CREATE TABLE IF NOT EXISTS fund_dca_tp_meta" in s
                    for s in sqls)
-        # 三新表主键：结果 (code, tp)、轮次 (code, tp, fee, seq)
-        assert any("PRIMARY KEY (code, tp)" in s for s in sqls)
-        assert any("PRIMARY KEY (code, tp, fee, seq)" in s for s in sqls)
+        # 三新表主键：结果 (code, tp, method)、轮次 (code, tp, method, fee, seq)
+        #（method 定投方式维度 2026-11-23 加入；等份额口径见 test_fund_dca_share）
+        assert any("PRIMARY KEY (code, tp, method)" in s for s in sqls)
+        assert any("PRIMARY KEY (code, tp, method, fee, seq)" in s for s in sqls)
 
     def test_import_tp_rows_sequence(self):
         from app.dca_store import import_tp_rows
@@ -393,14 +396,14 @@ class TestTpStore:
         assert "INSERT INTO fund_dca_tp_rounds" in sql and len(seq_rows) == 1
 
     def test_tp_rounds_insert_columns_align_with_engine_tuple(self):
-        """列序守护：INSERT 列清单必须与引擎元组 (code, tp, fee, seq, *ev)
-        逐位对齐——错位会被 PG 隐式类型转换'成功'吞掉（'000001'→1.0），
-        只能靠列清单与元组序一致防错（2026-11-15 生产实跑事故）。"""
+        """列序守护：INSERT 列清单必须与引擎元组 (code, method, tp, fee,
+        seq, *ev) 逐位对齐——错位会被 PG 隐式类型转换'成功'吞掉（'000001'
+        →1.0），只能靠列清单与元组序一致防错（2026-11-15 生产实跑事故）。"""
         from app.dca_store import _TP_ROUNDS_COLS, _ROUNDS_COLS
-        assert _TP_ROUNDS_COLS[:2] == ["code", "tp"]
-        assert _TP_ROUNDS_COLS[2:] == _ROUNDS_COLS[1:]
-        assert len(_TP_ROUNDS_COLS) == 13
-        # 引擎轮次元组同长度（元素序 (code, tp, fee, seq, *ev) 由
+        assert _TP_ROUNDS_COLS[:3] == ["code", "method", "tp"]
+        assert _TP_ROUNDS_COLS[3:] == _ROUNDS_COLS[1:]
+        assert len(_TP_ROUNDS_COLS) == 14
+        # 引擎轮次元组同长度（元素序 (code, method, tp, fee, seq, *ev) 由
         # run_backtest_tp 的 append 处锚定，另有 tp=0.20≡旧引擎测试守护）
 
 

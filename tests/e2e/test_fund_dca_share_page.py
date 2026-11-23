@@ -1,0 +1,279 @@
+"""定投止盈回测页·定投方式切换 E2E（等额定投 amount / 等份额定投 share）。
+
+用例表（确认门 1：自主开发模式并入最终前端过目，同 test_fund_dca_tp_page 约定）：
+- E2E-444 P0 方式切换主流程：点搜索栏「等份额定投」→ 列表请求
+  /api/funds/dca/tp?tp=0.2&method=share（等份额即便 20% 也走 tp 端点），
+  副标题出现「固定份额」口径文案，表格渲染等份额行；
+- E2E-445 对比卡跟随：切换后 compare 请求带 method=share，对比卡标题
+  显示当前口径「等份额定投」；
+- E2E-446 弹窗跟随：等份额下点「详情」→ summary/rounds 请求带
+  method=share，弹窗标题含口径、轮次表有数据；
+- E2E-447 回默认走旧端点：share → amount 后，最后列表请求为
+  /api/funds/dca?（旧端点，无 method/tp 参数）；
+- E2E-448 深链接：/data/fund-dca?mode=share → 首个列表请求即带 method=share；
+- E2E-449 非法 mode 深链接忽略：?mode=dca → 回落等额走旧端点；
+- E2E-450 方式×止盈点组合：share + 15% → 请求同时带 tp=0.15 与 method=share；
+- E2E-451 弹窗内档位/费率切换保留方式：弹窗切 15%/gross 后 rounds 请求
+  仍带 method=share（弹窗跟随页面级方式）。
+运行：python -m pytest tests/e2e/test_fund_dca_share_page.py
+"""
+
+import json
+import re
+from urllib.parse import parse_qs, urlparse
+
+import pytest
+from playwright.sync_api import expect
+
+from test_fund_dca_page import LIST_BODY, mock_dca, open_dca
+
+# 等份额排行行（数值与等额 mock 不同，证明表格确实切换了数据源）
+SHARE_LIST_BODY = {
+    "status": "up", "tp": 0.2, "method": "share", "total": 101,
+    "limit": 50, "offset": 0,
+    "rows": [
+        {"tp": 0.2, "code": "019387", "name": "中欧时代共赢混合发起A1",
+         "fund_type": "混合型-偏股", "alive": True, "scale_yi": 1.2,
+         "scale_date": "2026-09-30", "age_years": 2.9,
+         "w10_start": "2023-11-28", "w10_end": "2026-10-28", "w10_months": 36,
+         "w10_rounds": 9, "w10_invested": 39800, "w10_final_value": 52138,
+         "w10_profit_rate": 0.31, "w10_xirr": 0.75, "gap_avg_days": 96.3,
+         "full_xirr": 0.74, "full_rounds": 9, "full_profit_rate": 0.30,
+         "full_months": 36},
+        {"tp": 0.2, "code": "161725", "name": "招商中证白酒指数(LOF)A",
+         "fund_type": "指数型-股票", "alive": True, "scale_yi": 209.0,
+         "scale_date": "2026-09-30", "age_years": 10.4,
+         "w10_start": "2016-10-31", "w10_end": "2026-10-28", "w10_months": 121,
+         "w10_rounds": 12, "w10_invested": 128430, "w10_final_value": 119430,
+         "w10_profit_rate": -0.07, "w10_xirr": -0.062, "gap_avg_days": None,
+         "full_xirr": -0.052, "full_rounds": 12, "full_profit_rate": -0.06,
+         "full_months": 138},
+    ],
+    "stats": {"count": 13557, "p25": 0.018, "median": 0.035, "p75": 0.092,
+              "p90": 0.164, "positive_share": 0.78, "take_profit_share": 0.62},
+    "meta": {"generated_at": "2026-11-23T02:00:00+00:00", "fund_count": 13557,
+             "params": {"amount": 1000, "methods": ["amount", "share"],
+                        "window_end": "2026-11-21"}},
+}
+
+
+def _share_cmp_row(tp: float, med: float) -> dict:
+    return {"tp": tp, "count": 7900,
+            "w10_p25": round(med * 0.5, 4), "w10_median": med,
+            "w10_p75": round(med * 1.5, 4), "w10_p90": round(med * 2.0, 4),
+            "w10_mean": round(med * 0.95, 4), "w10_positive_share": 0.72,
+            "w10_success_share": round(0.93 - tp, 4), "w10_avg_rounds": 11.2,
+            "full_median": round(med * 0.9, 4), "full_mean": round(med * 0.88, 4),
+            "full_positive_share": 0.70, "full_success_share": 0.47,
+            "avg_gap_days": round(58 + tp * 290, 1)}
+
+
+# 等份额八档中位年化（整体低于等额——成本摊平劣势面的市场级形态）
+SHARE_COMPARE_BODY = {
+    "status": "up", "fee": "nom", "method": "share", "equity": True,
+    "thresholds": [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4],
+    "rows": [_share_cmp_row(0.05, 0.031), _share_cmp_row(0.10, 0.043),
+             _share_cmp_row(0.15, 0.051), _share_cmp_row(0.20, 0.054),
+             _share_cmp_row(0.25, 0.052), _share_cmp_row(0.30, 0.047),
+             _share_cmp_row(0.35, 0.044), _share_cmp_row(0.40, 0.038)],
+}
+
+SHARE_ROUNDS_BODY = {
+    "status": "up", "code": "019387", "fee": "nom", "tp": 0.2,
+    "method": "share",
+    "rounds": [
+        {"seq": 1, "tp_date": "2024-04-15", "round_days": 109,
+         "gap_days": 109, "profit": 0.207, "tp_nav": 1.207,
+         "invested": 5150.0, "sub_fee": 7.61, "redeem_fee": 12.4,
+         "net_profit": 1049.6},
+    ],
+    "totals": {"rounds": 1, "invested": 5150.0, "net_profit": 1049.6,
+               "sub_fee": 7.61, "redeem_fee": 12.4},
+}
+
+SHARE_SUMMARY_BODY = {
+    "status": "up", "code": "019387", "method": "share",
+    "rows": [
+        {"tp": t, "w10_profit_rate": 0.28, "w10_xirr": 0.61,
+         "w10_profit_rate_disc": 0.27, "w10_xirr_disc": 0.59,
+         "w10_profit_rate_nom": 0.26, "w10_xirr_nom": 0.57}
+        for t in (0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40)
+    ],
+}
+
+
+@pytest.fixture
+def mock_share(page):
+    """mock /api/funds/dca/tp*（method 维度版：排行/对比/轮次/汇总四端点，
+    回显请求里的 method/tp；记录 URL 供参数断言）。需在 mock_dca 之后注册。"""
+    calls = []
+
+    def handler(route):
+        url = route.request.url
+        calls.append(url)
+        qs = parse_qs(urlparse(url).query)
+        method = (qs.get("method") or ["amount"])[0]
+        tp = float((qs.get("tp") or ["0.2"])[0])
+        if re.search(r"/api/funds/dca/tp/[^/?]+/summary", url):
+            body = {**SHARE_SUMMARY_BODY, "method": method,
+                    "rows": [{**r, "age_years": 10.4}
+                             for r in SHARE_SUMMARY_BODY["rows"]]}
+        elif "/api/funds/dca/tp/compare" in url:
+            body = {**SHARE_COMPARE_BODY, "method": method,
+                    "fee": (qs.get("fee") or ["nom"])[0]}
+        elif re.search(r"/api/funds/dca/tp/[^/?]+/rounds", url):
+            body = {**SHARE_ROUNDS_BODY, "method": method, "tp": tp}
+        else:
+            body = {**SHARE_LIST_BODY, "method": method, "tp": tp}
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps(body))
+
+    page.route("**/api/funds/dca/tp**", handler)
+    return calls
+
+
+@pytest.fixture
+def mock_navs(page):
+    """弹窗净值曲线桩（等份额轮次日期对齐 mock 数据）。"""
+    page.route("**/api/funds/019387/navs*", lambda route: route.fulfill(
+        status=200, content_type="application/json", body=json.dumps({
+            "status": "up", "code": "019387", "navs": [
+                {"date": "2023-11-28", "unit_nav": 1.0, "accum_nav": 1.0,
+                 "pct_chg": 0, "unit_money": None, "source": "fund_em"},
+                {"date": "2024-04-15", "unit_nav": 1.207, "accum_nav": 1.207,
+                 "pct_chg": 1.0, "unit_money": None, "source": "fund_em"},
+                {"date": "2026-10-28", "unit_nav": 1.12, "accum_nav": 1.12,
+                 "pct_chg": 0.2, "unit_money": None, "source": "fund_em"}]})))
+
+
+def _switch_share(page):
+    page.locator('button[data-mode="share"]').click()
+    expect(page.locator('button[data-mode="share"]')
+          ).to_have_class(re.compile("active"), timeout=10_000)
+
+
+class TestDcaShareMode:
+    def test_mode_switch_and_request(self, servers, page, mock_dca,
+                                     mock_share, mock_navs):
+        """E2E-444 P0：点「等份额定投」→ tp 端点 method=share（20% 也是），
+        副标题换固定份额口径文案，表格渲染等份额行。"""
+        _, frontend_port = servers
+        open_dca(page, frontend_port)
+        _switch_share(page)
+        list_calls = [u for u in mock_share
+                      if "/rounds" not in u and "/compare" not in u
+                      and "/summary" not in u]
+        assert list_calls and "method=share" in list_calls[-1], mock_share
+        assert "tp=0.2" in list_calls[-1], list_calls[-1]
+        expect(page.locator(".toolbar .sub").first
+              ).to_contain_text("固定份额")
+        row = page.locator(".browse-pv tbody tr", has_text="019387")
+        expect(row).to_contain_text("+75.0%")   # 等份额行自己的年化
+        expect(row).to_contain_text("9")        # 等份额止盈次数
+
+    def test_compare_follows_method(self, servers, page, mock_dca,
+                                    mock_share, mock_navs):
+        """E2E-445：切换方式后对比请求带 method=share，标题显示当前口径。"""
+        _, frontend_port = servers
+        open_dca(page, frontend_port)
+        _switch_share(page)
+        compare_calls = [u for u in mock_share if "/compare" in u]
+        assert compare_calls and "method=share" in compare_calls[-1], mock_share
+        expect(page.locator(".tp-compare, .card", has_text="止盈点对比")
+              ).to_contain_text("等份额定投")
+
+    def test_modal_follows_method(self, servers, page, mock_dca, mock_share,
+                                  mock_navs):
+        """E2E-446：等份额下点「详情」→ summary/rounds 带 method=share，
+        弹窗标题含口径、轮次表有数据。"""
+        _, frontend_port = servers
+        open_dca(page, frontend_port)
+        _switch_share(page)
+        page.locator(".browse-pv tbody tr", has_text="019387") \
+            .locator(".detail-btn").click()
+        dlg = page.locator(".p-dialog", has_text="每次止盈明细")
+        expect(dlg).to_be_visible()
+        expect(dlg.locator(".p-dialog-title")).to_contain_text("等份额定投")
+        expect(dlg).to_contain_text("第 1 次")
+        summary_calls = [u for u in mock_share if "/summary" in u]
+        assert summary_calls and "method=share" in summary_calls[-1], mock_share
+        rounds_calls = [u for u in mock_share
+                        if re.search(r"/api/funds/dca/tp/[^/?]+/rounds", u)]
+        assert rounds_calls and "method=share" in rounds_calls[0], mock_share
+
+    def test_switch_back_amount_uses_legacy_endpoint(self, servers, page,
+                                                     mock_dca, mock_share,
+                                                     mock_navs):
+        """E2E-447：share → 等额定投后，最后列表请求为旧端点（无 method/tp）。"""
+        _, frontend_port = servers
+        open_dca(page, frontend_port)
+        _switch_share(page)
+        page.locator('button[data-mode="amount"]').click()
+        expect(page.locator('button[data-mode="amount"]')
+              ).to_have_class(re.compile("active"), timeout=10_000)
+        list_calls = [u for u in mock_dca if re.search(r"/api/funds/dca\?", u)]
+        assert list_calls, "应回落旧端点"
+        assert "method=" not in list_calls[-1] and "tp=" not in list_calls[-1], \
+            list_calls[-1]
+
+    def test_mode_deeplink(self, servers, page, mock_dca, mock_share,
+                           mock_navs):
+        """E2E-448：?mode=share 深链接 → 首个列表请求即带 method=share。"""
+        _, frontend_port = servers
+        page.goto(f"http://127.0.0.1:{frontend_port}/data/fund-dca?mode=share")
+        expect(page.get_by_role("heading", name="定投止盈回测")).to_be_visible()
+        expect(page.locator('button[data-mode="share"]')
+              ).to_have_class(re.compile("active"), timeout=10_000)
+        list_calls = [u for u in mock_share
+                      if "/rounds" not in u and "/compare" not in u
+                      and "/summary" not in u]
+        assert list_calls and "method=share" in list_calls[0], mock_share
+
+    def test_mode_deeplink_invalid_ignored(self, servers, page, mock_dca,
+                                           mock_share, mock_navs):
+        """E2E-449：?mode=dca 非白名单 → 回落等额走旧端点（无 method）。"""
+        _, frontend_port = servers
+        page.goto(f"http://127.0.0.1:{frontend_port}/data/fund-dca?mode=dca")
+        expect(page.get_by_role("heading", name="定投止盈回测")).to_be_visible()
+        expect(page.locator('button[data-mode="amount"]')
+              ).to_have_class(re.compile("active"), timeout=10_000)
+        list_calls = [u for u in mock_dca if re.search(r"/api/funds/dca\?", u)]
+        assert list_calls and "method=" not in list_calls[0], mock_dca
+
+    def test_share_with_tp_combined(self, servers, page, mock_dca, mock_share,
+                                    mock_navs):
+        """E2E-450：等份额 + 15% 止盈点 → 请求同时带 tp=0.15 与 method=share。"""
+        _, frontend_port = servers
+        open_dca(page, frontend_port)
+        _switch_share(page)
+        page.locator('button[data-tp="0.15"]').click()
+        expect(page.locator(".tp-compare tr.tp-row-active")
+              ).to_contain_text("15%", timeout=10_000)
+        list_calls = [u for u in mock_share
+                      if "/rounds" not in u and "/compare" not in u
+                      and "/summary" not in u]
+        assert list_calls and "tp=0.15" in list_calls[-1] \
+            and "method=share" in list_calls[-1], mock_share
+
+    def test_modal_switchers_keep_method(self, servers, page, mock_dca,
+                                         mock_share, mock_navs):
+        """E2E-451：弹窗内切档位/费率 → rounds 请求仍带 method=share
+        （弹窗跟随页面级定投方式，不回退等额）。"""
+        _, frontend_port = servers
+        open_dca(page, frontend_port)
+        _switch_share(page)
+        page.locator(".browse-pv tbody tr", has_text="019387") \
+            .locator(".detail-btn").click()
+        dlg = page.locator(".p-dialog", has_text="每次止盈明细")
+        expect(dlg).to_be_visible()
+        dlg.locator('button[data-modal-tp="0.15"]').click()
+        expect(dlg.locator('button[data-modal-tp="0.15"]')
+              ).to_have_class(re.compile("active"), timeout=10_000)
+        dlg.locator('button[data-modal-fee="gross"]').click()
+        expect(dlg.locator('button[data-modal-fee="gross"]')
+              ).to_have_class(re.compile("active"), timeout=10_000)
+        rounds_calls = [u for u in mock_share
+                        if re.search(r"/api/funds/dca/tp/[^/?]+/rounds", u)
+                        and "fee=gross" in u and "tp=0.15" in u]
+        assert rounds_calls and all("method=share" in u for u in rounds_calls), \
+            mock_share

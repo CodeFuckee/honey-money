@@ -104,6 +104,7 @@ function buildQuery() {
     if (dcaScale.value) q.set('scale', dcaScale.value)
     if (dcaEquity.value) q.set('equity', '1')
     if (dcaTp.value !== 0.20) q.set('tp', dcaTp.value)
+    if (dcaMode.value !== 'amount') q.set('mode', dcaMode.value)
     if (dcaSort.value !== 'w10_xirr') q.set('sort', dcaSort.value)
     if (dcaOrder.value !== 'desc') q.set('order', dcaOrder.value)
   }
@@ -207,7 +208,7 @@ function applyUrl() {
   if (NAV_BY_PATH[u.pathname] === 'fundDca' &&
       (q.get('q') != null || q.get('page') || q.get('alive') != null
        || q.get('age') || q.get('scale') || q.get('equity') != null
-       || q.get('tp') != null
+       || q.get('tp') != null || q.get('mode') != null
        || q.get('sort') || q.get('order'))) {
     dcaQuery.value = q.get('q') ?? ''
     dcaPage.value = +q.get('page') || 0
@@ -219,6 +220,9 @@ function applyUrl() {
       const v = parseFloat(q.get('tp'))
       if (DCA_TP_OPTIONS.includes(v)) dcaTp.value = v
     }
+    if (q.get('mode') != null
+        && DCA_MODE_OPTIONS.some(o => o.key === q.get('mode')))
+      dcaMode.value = q.get('mode')
     if (DCA_SORTABLE.includes(q.get('sort'))) dcaSort.value = q.get('sort')
     if (['asc', 'desc'].includes(q.get('order'))) dcaOrder.value = q.get('order')
     loadDca()
@@ -436,6 +440,18 @@ const dcaEquity = ref(true)
 // 静态模式（冻结站点）无多阈值数据，切换器与对比区块整体隐藏
 const DCA_TP_OPTIONS = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40]
 const dcaTp = ref(0.20)
+// ===== 定投方式切换（2026-11-23：等额定投 / 等份额定投） =====
+// 等份额口径：每期固定到手份额 = 首期 1000 元折算，现金随净值波动（涨时
+// 花得多、跌时花得少，成本摊平效果最差的反面基准）；排行/统计/对比卡/
+// 弹窗明细跟随页面级选择；散点/分箱/定投时机仍固定等额 20% 口径；
+// 静态模式（冻结站点）无此维度数据，切换器隐藏
+const DCA_MODE_OPTIONS = [
+  { key: 'amount', label: '等额定投' },
+  { key: 'share', label: '等份额定投' },
+]
+const dcaMode = ref('amount')
+const dcaModeLabel = computed(() =>
+  (DCA_MODE_OPTIONS.find(o => o.key === dcaMode.value) || {}).label || '')
 const dcaTpCompare = ref(null)
 const dcaTpLoading = ref(false)
 const dcaTpLabel = tp => (tp * 100).toFixed(0) + '%'
@@ -520,10 +536,11 @@ async function loadDca() {
     const off = dcaPage.value * DCA_PAGE_SIZE
     const age = dcaAge.value ? `&min_age=${dcaAge.value}` : ''
     const sc = dcaScale.value ? `&min_scale=${dcaScale.value}` : ''
-    // 阈值切换：20%（默认）走旧端点（fund_dca_result），其余走多阈值端点
-    // （fund_dca_tp_result，行结构多 tp 一列，数值同源一致）
-    const base = dcaTp.value === 0.20
-      ? '/api/funds/dca?' : `/api/funds/dca/tp?tp=${dcaTp.value}&`
+    // 阈值/方式切换：等额 + 20%（默认）走旧端点（fund_dca_result），其余
+    // 走多阈值端点（fund_dca_tp_result，行结构多 tp/method 维度，数值同源）
+    const base = (dcaTp.value === 0.20 && dcaMode.value === 'amount')
+      ? '/api/funds/dca?'
+      : `/api/funds/dca/tp?tp=${dcaTp.value}&method=${dcaMode.value}&`
     const r = await fetch(`${base}q=${q}&alive=${dcaAlive.value}${age}${sc}`
       + `&equity=${dcaEquity.value}`
       + `&sort=${dcaSort.value}&order=${dcaOrder.value}`
@@ -545,12 +562,20 @@ function onDcaTpChange(tp) {
   dcaPage.value = 0
   loadDca()
 }
-// 六档对比聚合（权益类+商品池；跟随费用口径，不随权益开关——池口径独立）
+// 定投方式切换：排行/统计/对比卡/弹窗明细跟随（散点/分箱固定等额 20% 口径）
+function onDcaModeChange(mode) {
+  if (dcaMode.value === mode) return
+  dcaMode.value = mode
+  dcaPage.value = 0
+  loadDca()
+  loadDcaTpCompare()
+}
+// 八档对比聚合（权益类+商品池；跟随费用口径与定投方式，不随权益开关——池口径独立）
 async function loadDcaTpCompare() {
   if (STATIC_MODE) return
   dcaTpLoading.value = true
   try {
-    const r = await fetch(`/api/funds/dca/tp/compare?fee=${dcaFeeMode.value}`)
+    const r = await fetch(`/api/funds/dca/tp/compare?fee=${dcaFeeMode.value}&method=${dcaMode.value}`)
     dcaTpCompare.value = await r.json()
   } catch (e) {
     dcaTpCompare.value = { status: 'down', detail: String(e), rows: [] }
@@ -904,7 +929,8 @@ function openDcaRounds(e) {
   dcaRoundsPause.value = null
   disposeDcaRoundsChart()
   dcaRoundsVisible.value = true
-  fetch(`/api/funds/dca/tp/${data.code}/summary`)
+  // 弹窗跟随页面级定投方式（无弹窗局部方式 tab；summary/轮次同 method）
+  fetch(`/api/funds/dca/tp/${data.code}/summary?method=${dcaMode.value}`)
     .then(r => r.json())
     .then(body => {
       dcaRoundsSummary.value = (body && body.status === 'up'
@@ -948,10 +974,10 @@ function openDcaRounds(e) {
     return
   }
   // live：风险指标随 navs 响应附带（静态快照无 risk，保持 null 显示占位）
-  // 弹窗明细跟随阈值：20% 走旧端点，其余阈值走 fund_dca_tp_rounds
-  const roundsUrl = dcaTp.value === 0.20
+  // 弹窗明细跟随阈值与定投方式：等额 + 20% 走旧端点，其余走 fund_dca_tp_rounds
+  const roundsUrl = (dcaTp.value === 0.20 && dcaMode.value === 'amount')
     ? `/api/funds/dca/${data.code}/rounds?fee=${dcaFeeMode.value}`
-    : `/api/funds/dca/tp/${data.code}/rounds?fee=${dcaFeeMode.value}&tp=${dcaTp.value}`
+    : `/api/funds/dca/tp/${data.code}/rounds?fee=${dcaFeeMode.value}&tp=${dcaTp.value}&method=${dcaMode.value}`
   fetch(roundsUrl)
     .then(r => r.json())
     .then(body => {
@@ -975,7 +1001,7 @@ function openDcaRounds(e) {
 // 只写 dcaRoundsAll 不动 dcaRounds——弹窗统计/轮次表始终跟随 dcaRoundsTp。
 function loadDcaRoundsAll(code) {
   Promise.all(DCA_TP_OPTIONS.map(tp =>
-    fetch(`/api/funds/dca/tp/${code}/rounds?fee=${dcaRoundsFee.value}&tp=${tp}`)
+    fetch(`/api/funds/dca/tp/${code}/rounds?fee=${dcaRoundsFee.value}&tp=${tp}&method=${dcaMode.value}`)
       .then(r => r.json()).then(b => [tp, (b && b.rounds) || []])
       .catch(() => [tp, []])
   )).then(entries => {
@@ -990,7 +1016,7 @@ function onDcaRoundsTpChange(tp) {
   dcaRoundsTp.value = tp
   const code = dcaRoundsFund.value.code
   dcaRounds.value = { status: 'loading', rounds: [] }
-  fetch(`/api/funds/dca/tp/${code}/rounds?fee=${dcaRoundsFee.value}&tp=${tp}`)
+  fetch(`/api/funds/dca/tp/${code}/rounds?fee=${dcaRoundsFee.value}&tp=${tp}&method=${dcaMode.value}`)
     .then(r => r.json())
     .then(body => {
       dcaRounds.value = body
@@ -1006,7 +1032,7 @@ function onDcaRoundsFeeChange(fee) {
   dcaRoundsFee.value = fee
   const code = dcaRoundsFund.value.code
   dcaRounds.value = { status: 'loading', rounds: [] }
-  fetch(`/api/funds/dca/tp/${code}/rounds?fee=${fee}&tp=${dcaRoundsTp.value}`)
+  fetch(`/api/funds/dca/tp/${code}/rounds?fee=${fee}&tp=${dcaRoundsTp.value}&method=${dcaMode.value}`)
     .then(r => r.json())
     .then(body => {
       dcaRounds.value = body
@@ -3036,7 +3062,7 @@ watch(
             <div class="toolbar">
               <div>
                 <h2 class="h1">定投止盈回测</h2>
-                <p class="sub">{{ dca.meta?.params?.scale_min_yi ? `资产规模 ≥${dca.meta.params.scale_min_yi} 亿公募基金` : '全市场公募基金（不限规模）' }} · 月定投 {{ dca.meta?.params?.amount ?? 1000 }} 元 · 收益 ≥{{ dcaTpLabel(dcaTp) }} 全仓止盈重来<template v-if="dca.meta?.params?.min_age_years"> · 运作 ≥{{ dca.meta.params.min_age_years }} 年</template> · 年化=XIRR 资金加权<template v-if="dca.meta?.params?.window_end"> · 数据截至 {{ dca.meta.params.window_end }}</template></p>
+                <p class="sub">{{ dca.meta?.params?.scale_min_yi ? `资产规模 ≥${dca.meta.params.scale_min_yi} 亿公募基金` : '全市场公募基金（不限规模）' }} · 月定投{{ dcaMode === 'share' ? `固定份额（首期 ${dca.meta?.params?.amount ?? 1000} 元折算，现金随净值波动——涨时花得多、跌时花得少）` : ` ${dca.meta?.params?.amount ?? 1000} 元` }} · 收益 ≥{{ dcaTpLabel(dcaTp) }} 全仓止盈重来<template v-if="dca.meta?.params?.min_age_years"> · 运作 ≥{{ dca.meta.params.min_age_years }} 年</template> · 年化=XIRR 资金加权<template v-if="dca.meta?.params?.window_end"> · 数据截至 {{ dca.meta.params.window_end }}</template></p>
               </div>
             </div>
 
@@ -3053,8 +3079,8 @@ watch(
             <div class="card" v-if="!STATIC_MODE && dcaTpCompare" style="margin-top: 16px; padding: 14px 16px 18px">
               <div class="toolbar" style="margin: 0 0 6px">
                 <div>
-                  <h2 class="h1" style="font-size: 18px">止盈点对比：止盈线设多少更划算？</h2>
-                  <p class="sub">同一「月定投 + 止盈重来」策略只换止盈线（5%~30% 六档）在权益类+商品在市基金上的整体表现 · 年化=XIRR 资金加权（钱在场的效率，跨阈值可比；总收益率天然偏向高阈值不作对比依据）· 每档采样 {{ dcaTpCompare.rows?.[0]?.count ?? 0 }} 只（在市且年化非空）· {{ dcaFeeLabel }}</p>
+                  <h2 class="h1" style="font-size: 18px">止盈点对比：止盈线设多少更划算？<span class="dc-hint" style="margin-left: 6px">当前口径：{{ dcaModeLabel }}</span></h2>
+                  <p class="sub">同一「月定投（{{ dcaModeLabel }}）+ 止盈重来」策略只换止盈线（5%~40% 八档）在权益类+商品在市基金上的整体表现 · 年化=XIRR 资金加权（钱在场的效率，跨阈值可比；总收益率天然偏向高阈值不作对比依据）· 每档采样 {{ dcaTpCompare.rows?.[0]?.count ?? 0 }} 只（在市且年化非空）· {{ dcaFeeLabel }}</p>
                 </div>
                 <div class="toolbar-right">
                   <span v-if="dcaTpLoading" class="sub">重算中…</span>
@@ -3263,6 +3289,18 @@ watch(
                   title="勾选表格要显示的列" aria-label="选择表格显示列" />
               </div>
               <div class="dca-filter-row dca-filter-segs">
+                <!-- 定投方式切换：等额（每期固定金额）/等份额（每期固定份额，
+                     现金随净值波动）；排行/统计/对比卡/明细跟随 -->
+                <div class="seg-group" v-if="!STATIC_MODE">
+                  <span class="seg-label">定投方式</span>
+                  <div class="src-seg" title="切换定投方式：等额=每期固定 1000 元；等份额=每期固定份额（首期 1000 元折算，涨时花得多、跌时花得少）。排行/统计/对比卡/明细跟随（散点/分箱固定等额 20% 口径）">
+                    <button v-for="o in DCA_MODE_OPTIONS" :key="o.key"
+                            class="src-seg-btn"
+                            :class="{ active: dcaMode === o.key }"
+                            @click="onDcaModeChange(o.key)"
+                            :data-mode="o.key">{{ o.label }}</button>
+                  </div>
+                </div>
                 <!-- 止盈点切换：排行/统计/明细跟随（对比区块行/圆点同款状态）；默认 20% -->
                 <div class="seg-group" v-if="!STATIC_MODE">
                   <span class="seg-label">止盈点</span>
@@ -3480,7 +3518,7 @@ watch(
                 </Column>
               </DataTable>
             </div>
-            <p class="note">口径：每月首个净值日投入固定金额，任一净值日持仓收益达止盈线即全仓赎回并重开新一轮（分红再投）；排行/统计/散点/详情共用同一费用口径，搜索栏或散点区可切换（不含费 / 含费·申购一折 / 含费·申购名义，赎回费各口径一致按持有天数阶梯收取）；排行/统计/散点共用同一基金类型口径，搜索栏或散点区可切换（默认仅权益类：股票型/偏股·灵活·平衡混合/股票指数/海外权益共 8 类，全市场可切回，债基·FOF·货币·偏债不在权益类内） · 统计卡为当前类型与在市口径全集分位，不随搜索与区间筛选变化 · 新基金（回测窗口 &lt;90 天）年化留空 · 「当前回撤」= 复权净值距历史最高的跌幅（日更顺带刷新），非在市基金无此数据；「甜蜜点」结论来自 2015~2026 权益基金 98 万起点历史模拟（-25~-30% 回撤起定投首轮止盈中位 582 天、成功率 63.2%、年化 32.0%，20% 止盈线含费口径） · 波动指标列（年化/下行波动率、最大回撤、夏普 + 波动率分位）为基金净值快照，全史口径（全部历史复权净值，2026-11-18 起由近1年改全史；复权日增长率、√252 年化、无风险利率 0，fund_risk_metrics 日更顺带刷新，样本不足 20 个收益为 —），与回测口径独立、不随费用/止盈点切换 · 「综合波动分位」= 全史年化波动率/下行波动率/最大回撤三项在全市场同类基金中的百分位排名等权平均（percent_rank，0~100%，越低越稳），日更顺带重算（三指标缺任一按可得项平均，全缺为 —） · 「震荡分位」= 全史净值 zigzag（±10% 确认反转）年均规则摆动轮数（频率 × 间隔均匀度）的横截面百分位，越高 = 净值越规律地上上下下 · 「止盈后收益率/止盈后年化」= 最近一次止盈日全仓赎回后重新开始定投的当前轮（进行中）总收益率与 XIRR（全史窗口口径，与「总收益率/年化·近10年」列不可直接对比；随费用口径与止盈点切换，轮次不足 90 天年化留空，全史从未止盈显示 —，日更回测顺带刷新）· 数据为离线回测快照，重跑 scripts/fund_dca_backtest.py 并经 app.dca_store 导入后刷新 · 点行或「详情」查看每轮止盈明细 · 止盈点切换（搜索栏按钮组或对比区块行/圆点）仅改排行/统计/明细数据源，散点/分箱固定 20% 口径 · 历史统计不构成任何操作建议</p>
+            <p class="note">口径：每月首个净值日买入（定投方式可切：等额=每期固定金额；等份额=每期固定份额、首期 1000 元折算、现金随净值波动），任一净值日持仓收益达止盈线即全仓赎回并重开新一轮（分红再投）；排行/统计/散点/详情共用同一费用口径，搜索栏或散点区可切换（不含费 / 含费·申购一折 / 含费·申购名义，赎回费各口径一致按持有天数阶梯收取）；排行/统计/散点共用同一基金类型口径，搜索栏或散点区可切换（默认仅权益类：股票型/偏股·灵活·平衡混合/股票指数/海外权益共 8 类，全市场可切回，债基·FOF·货币·偏债不在权益类内） · 统计卡为当前类型与在市口径全集分位，不随搜索与区间筛选变化 · 新基金（回测窗口 &lt;90 天）年化留空 · 「当前回撤」= 复权净值距历史最高的跌幅（日更顺带刷新），非在市基金无此数据；「甜蜜点」结论来自 2015~2026 权益基金 98 万起点历史模拟（-25~-30% 回撤起定投首轮止盈中位 582 天、成功率 63.2%、年化 32.0%，20% 止盈线含费口径） · 波动指标列（年化/下行波动率、最大回撤、夏普 + 波动率分位）为基金净值快照，全史口径（全部历史复权净值，2026-11-18 起由近1年改全史；复权日增长率、√252 年化、无风险利率 0，fund_risk_metrics 日更顺带刷新，样本不足 20 个收益为 —），与回测口径独立、不随费用/止盈点切换 · 「综合波动分位」= 全史年化波动率/下行波动率/最大回撤三项在全市场同类基金中的百分位排名等权平均（percent_rank，0~100%，越低越稳），日更顺带重算（三指标缺任一按可得项平均，全缺为 —） · 「震荡分位」= 全史净值 zigzag（±10% 确认反转）年均规则摆动轮数（频率 × 间隔均匀度）的横截面百分位，越高 = 净值越规律地上上下下 · 「止盈后收益率/止盈后年化」= 最近一次止盈日全仓赎回后重新开始定投的当前轮（进行中）总收益率与 XIRR（全史窗口口径，与「总收益率/年化·近10年」列不可直接对比；随费用口径与止盈点切换，轮次不足 90 天年化留空，全史从未止盈显示 —，日更回测顺带刷新）· 数据为离线回测快照，重跑 scripts/fund_dca_backtest.py 并经 app.dca_store 导入后刷新 · 点行或「详情」查看每轮止盈明细 · 止盈点切换（搜索栏按钮组或对比区块行/圆点）与定投方式切换（搜索栏「定投方式」按钮组：等额/等份额）仅改排行/统计/明细数据源，散点/分箱固定等额 20% 口径 · 历史统计不构成任何操作建议</p>
 
 
             <!-- ===== 年限 × 规模 三维散点（每基金一点） + 分箱统计 ===== -->
@@ -3604,10 +3642,11 @@ watch(
                  高度钉死 90vh 后内容不足部分由净值曲线区弹性吸收（.dca-rounds-body），
                  1920×1080 下由固定 1000×902（左右各空 460px）变为 1812×972 铺满 -->
             <Dialog v-model:visible="dcaRoundsVisible" modal
-              :header="dcaRoundsFund ? `${dcaRoundsFund.code} ${dcaRoundsFund.name} · 每次止盈明细${dcaRoundsFund.age_years != null ? '（运作 ' + dcaRoundsFund.age_years + ' 年）' : ''}` : '每次止盈明细'"
+              :header="dcaRoundsFund ? `${dcaRoundsFund.code} ${dcaRoundsFund.name} · 每次止盈明细（${dcaModeLabel}${dcaRoundsFund.age_years != null ? ' · 运作 ' + dcaRoundsFund.age_years + ' 年' : ''}）` : '每次止盈明细'"
               :style="{ width: 'calc(100vw - 10vh)', height: '90vh' }" @hide="disposeDcaRoundsChart">
               <div class="dca-rounds-body">
-              <!-- 两段按钮组同行排布（body 为 flex column 会块化子元素，内包一层恢复行内流） -->
+              <!-- 两段按钮组同行排布（body 为 flex column 会块化子元素，内包一层恢复行内流）；
+                   定投方式跟随页面级 tab（无弹窗局部方式切换），标题展示当前口径 -->
               <div class="dca-rounds-segrow">
               <div class="src-seg" v-if="!STATIC_MODE" style="margin: 0 0 10px"
                    title="切换止盈线：下方统计与轮次表跟随；曲线同时叠加全部档位止盈点（颜色=档位，实心大三角=当前查看档位）；不影响页面排行阈值">
