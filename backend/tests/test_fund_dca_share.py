@@ -500,3 +500,41 @@ class TestShareRoutes:
         import app.dca_api as dca_mod
         from app.dca_backtest import DCA_METHODS
         assert dca_mod.DCA_METHODS == DCA_METHODS == ("amount", "share")
+
+
+class TestShareScatter:
+    """散点/分箱跟随定投方式（2026-11-23 用户需求：切换后所有统计跟着变）：
+    share 走 fund_dca_tp_result（tp=0.2 固定档）；amount/乱值保持旧表零回归。"""
+
+    def test_scatter_share_targets_tp_table(self, client, monkeypatch):
+        import app.dca_api as dca_mod
+        conn = FakeConnOne((None,), rows=[])
+        _patch_connect(monkeypatch, dca_mod, conn)
+        resp = client.get("/api/funds/dca/scatter", params={"method": "share"})
+        assert resp.status_code == 200
+        assert resp.json()["method"] == "share"
+        assert "FROM fund_dca_tp_result" in " ".join(conn.executed)
+        assert "tp = %s" in " ".join(conn.executed)
+        assert "method = %s" in " ".join(conn.executed)
+        assert any("share" in (p or ()) for p in conn.params), conn.params
+
+    def test_scatter_amount_keeps_legacy_table(self, client, monkeypatch):
+        """缺省/amount/乱值三种都走旧表（fund_dca_result，零回归）。"""
+        import app.dca_api as dca_mod
+        conn = FakeConnOne((None,), rows=[])
+        _patch_connect(monkeypatch, dca_mod, conn)
+        client.get("/api/funds/dca/scatter")
+        client.get("/api/funds/dca/scatter", params={"method": "amount"})
+        client.get("/api/funds/dca/scatter", params={"method": "bogus"})
+        # 每次请求 = ref 查询 + 主查询共 2 条；主查询恒走旧表
+        main_sqls = [s for s in conn.executed if s.startswith("SELECT code,")]
+        assert len(main_sqls) == 3
+        assert all("fund_dca_tp_result" not in s for s in main_sqls)
+        assert all("FROM fund_dca_result" in s for s in main_sqls)
+
+    def test_scatter_degrades_with_method_echo(self, client, monkeypatch):
+        monkeypatch.setattr("app.config.DATABASE_URL", DEAD_DSN)
+        resp = client.get("/api/funds/dca/scatter", params={"method": "share"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "down" and body.get("method") == "share"

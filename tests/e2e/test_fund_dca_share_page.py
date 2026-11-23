@@ -146,6 +146,43 @@ def mock_navs(page):
                  "pct_chg": 0.2, "unit_money": None, "source": "fund_em"}]})))
 
 
+def _scatter_body_for(method: str, fee: str) -> dict:
+    """按定投方式返回可区分的散点/分箱形状：等份额整体年化更低
+    （≥10 年格均值 0.076 → 0.046），供切换断言。"""
+    factor = 0.55 if method == "share" else 0.9
+    from test_fund_dca_page import SCATTER_BODY
+    import copy
+    b = copy.deepcopy(SCATTER_BODY)
+    for row in b["matrix"]:
+        for i, cell in enumerate(row):
+            if cell["count"] and cell["mean_xirr"] is not None:
+                row[i] = {**cell,
+                          "mean_xirr": round(cell["mean_xirr"] * factor, 4),
+                          "median_xirr": round(cell["median_xirr"] * factor, 4)}
+    b["method"] = method
+    b["fee"] = fee
+    return b
+
+
+@pytest.fixture
+def mock_share_scatter(page):
+    """method 感知的散点桩（注册在 mock_dca 之后覆盖其放行路由）。"""
+    calls = []
+
+    def handler(route):
+        from urllib.parse import urlparse, parse_qs
+        url = route.request.url
+        calls.append(url)
+        qs = parse_qs(urlparse(url).query)
+        method = (qs.get("method") or ["amount"])[0]
+        fee = (qs.get("fee") or ["nom"])[0]
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps(_scatter_body_for(method, fee)))
+
+    page.route("**/api/funds/dca/scatter*", handler)
+    return calls
+
+
 def _switch_share(page):
     page.locator('button[data-mode="share"]').click()
     expect(page.locator('button[data-mode="share"]')
@@ -254,6 +291,49 @@ class TestDcaShareMode:
                       and "/summary" not in u]
         assert list_calls and "tp=0.15" in list_calls[-1] \
             and "method=share" in list_calls[-1], mock_share
+
+    def test_mode_tab_at_page_top(self, servers, page, mock_dca, mock_share,
+                                  mock_navs):
+        """E2E-452：定投方式 tab 置于页面最前——位于统计卡之前、紧跟标题，
+        筛选面板内不再有第二组（data-mode 唯一）。"""
+        _, frontend_port = servers
+        open_dca(page, frontend_port)
+        tab = page.locator('button[data-mode="share"]')
+        expect(tab).to_be_visible()
+        metrics = page.locator(".learn-metrics").first
+        tab_y = tab.bounding_box()["y"]
+        assert tab_y < metrics.bounding_box()["y"], \
+            "定投方式 tab 应在统计卡之前"
+        # 唯一性：筛选面板里没有第二组 data-mode（已从面板移除）
+        assert page.locator("button[data-mode]").count() == 2   # 等额+等份额
+        # 深链接形态同样置顶
+        page.goto(f"http://127.0.0.1:{frontend_port}/data/fund-dca?mode=share")
+        expect(page.locator('button[data-mode="share"]')
+              ).to_have_class(re.compile("active"), timeout=10_000)
+        assert page.locator('button[data-mode="share"]').bounding_box()["y"] \
+            < page.locator(".learn-metrics").first.bounding_box()["y"]
+
+    def test_scatter_follows_method(self, servers, page, mock_dca, mock_share,
+                                    mock_navs, mock_share_scatter):
+        """E2E-453：切换定投方式 → 散点请求带 method=share、结论徽标显示
+        口径、分箱年化结论随方式变化（等份额整体更低）。"""
+        _, frontend_port = servers
+        open_dca(page, frontend_port)
+        # 默认等额：结论卡 ≥10 年均值 = 0.076×0.9 ≈ +6.8%
+        concl = page.locator(".dca-conclusion")
+        expect(concl).to_contain_text("每基金只计一次")
+        expect(concl.locator(".dc-badge")).to_contain_text("等额定投")
+        _switch_share(page)
+        expect(concl.locator(".dc-badge")
+              ).to_contain_text("等份额定投", timeout=10_000)
+        # 等份额：最优格 ≥10 年 × <1 亿 平均年化 = 0.076×0.55 ≈ 4.2%
+        #（等额同格 ≈ 6.8%，两方式可区分）
+        expect(concl).to_contain_text("平均年化 4.2%", timeout=10_000)
+        scatter_calls = [u for u in mock_share_scatter if "method=share" in u]
+        assert scatter_calls, mock_share_scatter
+        # 散点卡标题带当前口径提示
+        expect(page.locator(".card", has_text="三维散点").first
+              ).to_contain_text("等份额定投")
 
     def test_modal_switchers_keep_method(self, servers, page, mock_dca,
                                          mock_share, mock_navs):
