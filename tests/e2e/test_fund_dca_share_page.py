@@ -313,6 +313,27 @@ class TestDcaShareMode:
         assert page.locator('button[data-mode="share"]').bounding_box()["y"] \
             < page.locator(".learn-metrics").first.bounding_box()["y"]
 
+    def test_scatter_follows_method(self, servers, page, mock_dca, mock_share,
+                                    mock_navs, mock_share_scatter):
+        """E2E-453：切换定投方式 → 散点请求带 method=share、结论徽标显示
+        口径、分箱年化结论随方式变化（等份额整体更低）。"""
+        _, frontend_port = servers
+        open_dca(page, frontend_port)
+        # 默认等额：结论卡最优格 ≥10 年 × <1 亿 平均年化 = 0.076×0.9 ≈ 6.8%
+        concl = page.locator(".dca-conclusion")
+        expect(concl).to_contain_text("每基金只计一次")
+        expect(concl.locator(".dc-badge")).to_contain_text("等额定投")
+        _switch_share(page)
+        expect(concl.locator(".dc-badge")
+              ).to_contain_text("等份额定投", timeout=10_000)
+        # 等份额：最优格平均年化 = 0.076×0.55 ≈ 4.2%（等额同格 ≈ 6.8%）
+        expect(concl).to_contain_text("平均年化 4.2%", timeout=10_000)
+        scatter_calls = [u for u in mock_share_scatter if "method=share" in u]
+        assert scatter_calls, mock_share_scatter
+        # 散点卡标题带当前口径提示
+        expect(page.locator(".card", has_text="三维散点").first
+              ).to_contain_text("等份额定投")
+
     def test_master_bar_all_groups_at_top(self, servers, page, mock_dca,
                                           mock_share, mock_navs):
         """E2E-454：四组总开关（定投方式/止盈点/基金类型/费用口径）都在
