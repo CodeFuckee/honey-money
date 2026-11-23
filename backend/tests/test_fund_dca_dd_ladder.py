@@ -45,14 +45,22 @@ def _ladder_nav():
 
 class TestSimulateDdLadder:
     def test_methods_pin_values(self):
-        """定投方式口径锚：三档（四轮追加 dd_ladder）。"""
+        """定投方式口径锚：四档（五轮追加 dd_ladder_deep）。"""
         from app.dca_backtest import DCA_METHODS
-        assert DCA_METHODS == ("amount", "share", "dd_ladder")
+        assert DCA_METHODS == ("amount", "share", "dd_ladder",
+                               "dd_ladder_deep")
 
     def test_ladder_constant_pinned(self):
         """档位契约：-10% → 1.5×、-20% → 2×（防悄悄改坏）。"""
         from app.dca_backtest import DD_LADDER
         assert DD_LADDER == ((-0.10, 1.5), (-0.20, 2.0))
+
+    def test_ladder_deep_constant_pinned(self):
+        """深梯度档位契约：-20% → 1.5×、-30% → 2×（2026-11-23 用户定案）。"""
+        from app.dca_backtest import DD_LADDER_DEEP, DD_LADDERS
+        assert DD_LADDER_DEEP == ((-0.20, 1.5), (-0.30, 2.0))
+        assert DD_LADDERS == {"dd_ladder": ((-0.10, 1.5), (-0.20, 2.0)),
+                              "dd_ladder_deep": ((-0.20, 1.5), (-0.30, 2.0))}
 
     def test_flat_nav_equals_amount(self):
         """恒定净值：无回撤恒 1× → dd_ladder ≡ amount 逐字段一致。"""
@@ -125,6 +133,82 @@ class TestSimulateDdLadder:
         assert r["round_events"][0][5] == pytest.approx(5000.0)  # 1000+1500+1500+1000
 
 
+class TestSimulateDdLadderDeep:
+    """深回撤加码（dd_ladder_deep）：档位 (-20% → 1.5×, -30% → 2×)，
+    分派/状态机与 dd_ladder 共用，仅档位表不同（2026-11-23 用户定案）。"""
+
+    def test_deep_flat_nav_equals_amount(self):
+        """恒定净值：无回撤恒 1× → dd_ladder_deep ≡ amount 逐字段一致。"""
+        from app import dca_backtest as mod
+        dates = pd.DatetimeIndex(pd.date_range("2024-01-01", periods=400,
+                                               freq="D"))
+        adj = np.ones(400)
+        for fee in (None, mod.FeeSchedule(0.015, mod.REDEEM_EQUITY)):
+            amt = mod.simulate(dates, adj, fee, take_profit=0.20)
+            deep = mod.simulate(dates, adj, fee, take_profit=0.20,
+                                method="dd_ladder_deep")
+            assert deep == amt
+
+    def test_deep_hand_computed(self):
+        """手算（同 _ladder_nav 4 期）：deep 梯度下 2 月 -12% 未达 -20% 归 1×、
+        3 月 -25% 命中 1.5× → 投入 1000+1000+1500+1000 = 4500（标准梯度同
+        序列为 5500——浅跌不追投的差异面）。"""
+        from app import dca_backtest as mod
+        dates, adj = _ladder_nav()
+        deep = mod.simulate(dates, adj, take_profit=99.0,
+                            method="dd_ladder_deep")
+        spend = [-a for _, a in deep["flows"] if a < 0]
+        assert spend == pytest.approx([1000.0, 1000.0, 1500.0, 1000.0])
+        assert deep["invested"] == pytest.approx(4500.0)
+        shares = 1000 + 1000 / 0.88 + 1500 / 0.75 + 1000
+        assert deep["final_value"] == pytest.approx(shares * 1.0)
+        # 同序列标准梯度 5500：两种梯度在同一数据上可分辨
+        std = mod.simulate(dates, adj, take_profit=99.0, method="dd_ladder")
+        assert std["invested"] == pytest.approx(5500.0)
+
+    def test_deep_threshold_boundaries(self):
+        """档位区间（dd ≤ 阈值 取最深匹配档）：-19% → 1×、-21% → 1.5×、
+        -29% → 1.5×、-31% → 2×。不取恰 -20%/-30% 净值——0.80/1-1 =
+        -0.1999…（浮点表示方向不定），恰阈值行为属浮点序判定，真实
+        净值恰等阈值概率为零，档位语义用区间值锚定。"""
+        from app import dca_backtest as mod
+        for drop, expected in ((0.81, 1000.0),   # -19% 未达深档
+                               (0.79, 1500.0),   # -21% → 1.5×
+                               (0.71, 1500.0),   # -29% 仍 1.5×
+                               (0.69, 2000.0)):  # -31% → 2×
+            dates = pd.DatetimeIndex(pd.date_range("2024-01-01", periods=60,
+                                                   freq="D"))
+            adj = np.ones(60)
+            adj[31:] = drop       # 2/1 起回撤
+            r = mod.simulate(dates, adj, take_profit=99.0,
+                             method="dd_ladder_deep")
+            spend = [-a for _, a in r["flows"] if a < 0]
+            assert spend == pytest.approx([1000.0, expected]), (drop, spend)
+
+    def test_deep_tp_round_invested_varies(self):
+        """止盈轮次记可变投入：1 月 1×、2/3 月回撤 -25% 各 1.5×、4 月新高
+        1× 后触发 → 本轮投入 5000（-15% 的浅跌在 deep 下归 1×，与标准
+        梯度区分）。"""
+        from app import dca_backtest as mod
+        dates = pd.DatetimeIndex(pd.date_range("2024-01-01", periods=120,
+                                               freq="D"))
+        adj = np.ones(120)
+        adj[31:91] = 0.75      # 2~3 月回撤 -25%（至 3/31）
+        adj[91:] = 2.0         # 4/1 新高：当日买入后触发止盈
+        r = mod.simulate(dates, adj, take_profit=0.20,
+                         method="dd_ladder_deep")
+        assert r["rounds"] == 1
+        assert r["round_events"][0][5] == pytest.approx(5000.0)  # 1000+1500+1500+1000
+
+    def test_deep_rows_carry_method(self):
+        from app import dca_backtest as mod
+        nav, basic, scale_map = _inputs()
+        rows, rounds = mod.run_backtest_tp(nav, basic, scale_map,
+                                           method="dd_ladder_deep")
+        assert rows and all(r["method"] == "dd_ladder_deep" for r in rows)
+        assert all(t[1] == "dd_ladder_deep" for t in rounds)
+
+
 class TestRunBacktestDdLadder:
     def test_rows_carry_method(self):
         from app import dca_backtest as mod
@@ -134,7 +218,7 @@ class TestRunBacktestDdLadder:
         assert rows and all(r["method"] == "dd_ladder" for r in rows)
         assert all(t[1] == "dd_ladder" for t in rounds)
 
-    def test_full_backtest_covers_three_methods(self, monkeypatch):
+    def test_full_backtest_covers_four_methods(self, monkeypatch):
         from app import dca_backtest as mod
         nav, basic, scale_map = _inputs()
 
@@ -184,22 +268,23 @@ def _inputs():
 
 
 class TestDdLadderRoutes:
-    def test_method_whitelist_accepts_dd_ladder(self, client, monkeypatch):
+    @pytest.mark.parametrize("method", ["dd_ladder", "dd_ladder_deep"])
+    def test_method_whitelist_accepts_dd_ladder(self, client, monkeypatch,
+                                                method):
         import app.dca_api as dca_mod
         conn = _FakeConnOne((None, None, None))
         _patch_connect(monkeypatch, dca_mod, conn)
-        resp = client.get("/api/funds/dca/tp",
-                          params={"method": "dd_ladder"})
-        assert resp.json()["method"] == "dd_ladder"
-        assert any("dd_ladder" in (p or ()) for p in conn.params)
+        resp = client.get("/api/funds/dca/tp", params={"method": method})
+        assert resp.json()["method"] == method
+        assert any(method in (p or ()) for p in conn.params)
 
-    def test_scatter_accepts_dd_ladder(self, client, monkeypatch):
+    @pytest.mark.parametrize("method", ["dd_ladder", "dd_ladder_deep"])
+    def test_scatter_accepts_dd_ladder(self, client, monkeypatch, method):
         import app.dca_api as dca_mod
         conn = _FakeConnOne((None,), rows=[])
         _patch_connect(monkeypatch, dca_mod, conn)
-        resp = client.get("/api/funds/dca/scatter",
-                          params={"method": "dd_ladder"})
-        assert resp.json()["method"] == "dd_ladder"
+        resp = client.get("/api/funds/dca/scatter", params={"method": method})
+        assert resp.json()["method"] == method
         main = [s for s in conn.executed if s.startswith("SELECT code,")][-1]
         assert "FROM fund_dca_tp_result" in main
 

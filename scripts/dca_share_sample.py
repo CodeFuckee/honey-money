@@ -27,8 +27,10 @@ DSN = "postgresql://honey_money:honey_money@10.0.0.169:5433/honey_money"
 ap = argparse.ArgumentParser(description="非等额定投方式样本回填（只写指定 method 行）")
 ap.add_argument("--dsn", default=DSN)
 ap.add_argument("--limit", type=int, default=400, help="样本基金数")
-ap.add_argument("--method", default="share", choices=["share", "dd_ladder"],
-                help="定投方式（share 等份额 / dd_ladder 回撤梯度加码）")
+ap.add_argument("--method", default="share",
+                choices=["share", "dd_ladder", "dd_ladder_deep"],
+                help="定投方式（share 等份额 / dd_ladder 回撤梯度加码 / "
+                     "dd_ladder_deep 深回撤加码）")
 args = ap.parse_args()
 
 with psycopg.connect(args.dsn, connect_timeout=10) as conn:

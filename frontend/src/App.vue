@@ -449,6 +449,7 @@ const DCA_MODE_OPTIONS = [
   { key: 'amount', label: '等额定投' },
   { key: 'share', label: '等份额定投' },
   { key: 'dd_ladder', label: '回撤加码' },
+  { key: 'dd_ladder_deep', label: '深回撤加码' },
 ]
 // 定投方式说明（2026-11-23 五轮：? 图标点击弹出全部说明；悬停按钮 title
 // 显示对应方式详情）——brief 是面板里的一句话定位，detail 是完整口径
@@ -461,12 +462,17 @@ const DCA_MODE_HELP = {
   share: {
     title: '等份额定投',
     brief: '每期固定份额',
-    detail: '每期买入固定份额（以首期 1000 元折算为基准），现金支出随净值波动——涨时花得多、跌时花得少。成本摊平效果在三种方式中最差，通常作为对照基准。',
+    detail: '每期买入固定份额（以首期 1000 元折算为基准），现金支出随净值波动——涨时花得多、跌时花得少。成本摊平效果在各方式中最差，通常作为对照基准。',
   },
   dd_ladder: {
     title: '回撤加码',
     brief: '跌得越深买得越多',
     detail: '每月基础 1000 元，买入日较历史最高回撤 ≥10% 投 1.5 倍、≥20% 投 2 倍（余者 1 倍）——深跌时买入更多便宜份额、摊低持仓成本。口径源自熊市加倍实验（全市场 9,576 只：回撤 ≤-20% 加倍投 2×，68% 基金优于坚持等额定投）。代价是回撤期投入放大，需预留现金。',
+  },
+  dd_ladder_deep: {
+    title: '深回撤加码',
+    brief: '跌得更深才加码',
+    detail: '每月基础 1000 元，买入日较历史最高回撤 ≥20% 投 1.5 倍、≥30% 投 2 倍（余者 1 倍）——比「回撤加码」更保守的梯度：浅跌（-10%~-20%）不追投，只在深熊出手，回撤期现金压力更小、加码次数更少。分档加倍状态机与「回撤加码」完全共用，仅档位阈值更深。',
   },
 }
 const dcaModeHelpShow = ref(false)
@@ -3096,7 +3102,7 @@ watch(
                  定投方式/止盈点/基金类型/费用口径——切换后下方所有统计跟随
                  （统计卡/止盈点对比/排行表/散点分箱/详情弹窗；弹窗内另有局部
                  止盈点/费率 tab 属明细级控件）。定投方式组带 ? 图标：点击弹出
-                 三种方式完整说明，悬停各按钮 title 显示对应方式详情。
+                 四种方式完整说明，悬停各按钮 title 显示对应方式详情。
                  起点条件/熊市断缴两实验卡为等额固定快照不随切（标题已标注）；
                  静态模式无多阈值/方式维度，对应组隐藏（类型/费用仍可用——客户端切换） ===== -->
             <div class="dca-filter-row dca-filter-segs" style="margin: 0 0 14px">
@@ -3113,7 +3119,7 @@ watch(
                 <button class="mode-help-btn" @click="dcaModeHelpShow = !dcaModeHelpShow"
                         :class="{ active: dcaModeHelpShow }"
                         data-mode-help aria-label="定投方式说明"
-                        title="查看三种定投方式的完整说明">?</button>
+                        title="查看四种定投方式的完整说明">?</button>
                 <div v-if="dcaModeHelpShow" class="mode-help-pop" data-mode-help-pop>
                   <div v-for="o in DCA_MODE_OPTIONS" :key="o.key" class="mode-help-item">
                     <b>{{ DCA_MODE_HELP[o.key].title }}</b>

@@ -51,7 +51,7 @@ TP_THRESHOLDS = (0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40)
 # 份额 = AMOUNT/窗口首日复权净值，首期恰好 1000 元——涨时现金花得多、
 # 跌时花得少，成本摊平效果最差的反面基准；含费为外扣法对偶：现金 =
 # 份额×净值×(1+申购费率)）。API method 白名单与前端 tab 共用此事实源。
-DCA_METHODS = ("amount", "share", "dd_ladder")
+DCA_METHODS = ("amount", "share", "dd_ladder", "dd_ladder_deep")
 # 回撤梯度加码（dd_ladder，2026-11-23 四轮）：月度买入日按当日回撤分档加倍
 # ——回撤 = adj/历史最高（含当日）- 1，因果无前视；取满足 回撤 ≤ 阈值 的
 # 最深一档的倍数（reversed 依序匹配，都不中为 1×——浅档在前直接 next 会
@@ -59,6 +59,14 @@ DCA_METHODS = ("amount", "share", "dd_ladder")
 # D 组口径（2026-11-19 全市场 9,576 只：68% 基金比坚持等额定投更优），
 # 中间档 -10% → 1.5× 为自然梯度；每期现金 = 1000 × 倍数，费用/止盈/XIRR 共用。
 DD_LADDER = ((-0.10, 1.5), (-0.20, 2.0))
+# 深梯度变体（dd_ladder_deep，2026-11-23 用户定案）：更深的回撤才加码
+# ——回撤 ≥20% 投 1.5×、≥30% 投 2×（余者 1×）。比标准梯度保守：浅跌
+# （-10%~-20%）不追投，回撤期现金压力更小、加码次数更少；分派/状态机/
+# 费用/止盈与 dd_ladder 完全共用，仅档位表不同。
+DD_LADDER_DEEP = ((-0.20, 1.5), (-0.30, 2.0))
+# method → 梯度表（simulate_multi 按此分派；新增梯度方式即扩此映射 +
+# DCA_METHODS + 白名单测试钉值）
+DD_LADDERS = {"dd_ladder": DD_LADDER, "dd_ladder_deep": DD_LADDER_DEEP}
 
 
 # ===== 费用模型（典型档位近似，见模块 docstring） =====
@@ -250,13 +258,16 @@ def simulate_multi(dates: pd.DatetimeIndex, adj: np.ndarray,
     - share（等份额）：每期到手份额固定 = AMOUNT/窗口首日复权净值，
       现金 = 份额×净值×(1+申购费率)（无费时 ×1），invested 每期可变；
     - dd_ladder（回撤梯度加码）：每期现金 = AMOUNT×档位倍数（DD_LADDER，
-      按买入日回撤 = adj/历史最高（含当日）-1 分档），invested 每期可变。
+      按买入日回撤 = adj/历史最高（含当日）-1 分档），invested 每期可变；
+    - dd_ladder_deep（深回撤加码）：同 dd_ladder 换深梯度表（DD_LADDER_DEEP，
+      ≥20% → 1.5×、≥30% → 2×），invested 每期可变。
     """
     if method not in DCA_METHODS:
         raise ValueError(f"unknown dca method: {method!r}")
     # 等份额标定：窗口首日净值折基准金额（首期恰好 1000 元；跨基金可比，
     # 无前视——adj[0] 即首个月度买入价）
     unit_shares = AMOUNT / adj[0]
+    ladder = DD_LADDERS.get(method)   # 梯度加码方式的档位表（amount/share 为 None）
     states = [_new_tp_state(tp) for tp in take_profits]
     months = dates.to_numpy().astype("datetime64[M]")
     peak = -np.inf          # dd_ladder 用：历史最高（含当日）的运行峰值
@@ -277,9 +288,8 @@ def simulate_multi(dates: pd.DatetimeIndex, adj: np.ndarray,
                     sh = unit_shares
                     sub_fee = 0.0 if fee is None else cash - sh * a
                 else:
-                    mult = (next((mv for th, mv in reversed(DD_LADDER)
-                                  if dd <= th), 1.0)
-                            if method == "dd_ladder" else 1.0)
+                    mult = (next((mv for th, mv in reversed(ladder)
+                                  if dd <= th), 1.0) if ladder else 1.0)
                     cash = AMOUNT * mult
                     net_amount = (cash if fee is None
                                   else cash / (1.0 + fee.sub_rate))
@@ -333,7 +343,7 @@ def simulate(dates: pd.DatetimeIndex, adj: np.ndarray,
     （净申购 = 金额/(1+费率)，投入现金流仍记全额），止盈/期末清算的
     回款现金流为扣赎回费后净额。止盈触发线按市值口径（持仓市值/已投入
     -1 ≥ take_profit 即全仓赎回并开启新一轮），与用户在 APP 里看到的
-    一致。method 选定投方式（amount 等额/ share 等份额，口径见
+    一致。method 选定投方式（amount/share/dd_ladder/dd_ladder_deep，口径见
     simulate_multi 与 DCA_METHODS 注释）。实现为 simulate_multi 单档
     委托，行为逐字段一致。
 
