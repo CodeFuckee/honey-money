@@ -47,9 +47,10 @@ def _three_month_nav(final_scale: float):
 
 class TestSimulateShare:
     def test_methods_pin_values(self):
-        """定投方式口径锚定：等额 amount / 等份额 share（2026-11-23 定案）。"""
+        """定投方式口径锚定：等额 amount / 等份额 share（2026-11-23 定案）；
+        四轮追加 dd_ladder 回撤梯度加码（见 test_fund_dca_dd_ladder.py）。"""
         from app.dca_backtest import DCA_METHODS
-        assert DCA_METHODS == ("amount", "share")
+        assert DCA_METHODS == ("amount", "share", "dd_ladder")
 
     def test_amount_method_equals_default(self):
         """method='amount' 与缺省调用逐字段一致（等额行为零回归锚）。"""
@@ -335,7 +336,9 @@ class TestShareStore:
         for table in ("fund_dca_tp_result", "fund_dca_tp_rounds"):
             assert (f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS method"
                     in ddl), table
-        assert "method VARCHAR(8) NOT NULL DEFAULT 'amount'" in ddl
+        assert "method VARCHAR(16) NOT NULL DEFAULT 'amount'" in ddl
+        # 加宽守护（四轮：dd_ladder 9 字符超初版 VARCHAR(8)，实跑踩过）
+        assert "ALTER COLUMN method TYPE VARCHAR(16)" in ddl
         assert "ADD PRIMARY KEY (code, tp, method)" in ddl
         assert "ADD PRIMARY KEY (code, tp, method, fee, seq)" in ddl
         assert "DROP CONSTRAINT fund_dca_tp_result_pkey" in ddl
@@ -499,7 +502,8 @@ class TestShareRoutes:
         """API 与引擎共用同一 DCA_METHODS 事实源（防两处漂移）。"""
         import app.dca_api as dca_mod
         from app.dca_backtest import DCA_METHODS
-        assert dca_mod.DCA_METHODS == DCA_METHODS == ("amount", "share")
+        assert dca_mod.DCA_METHODS == DCA_METHODS == \
+            ("amount", "share", "dd_ladder")
 
 
 class TestShareScatter:

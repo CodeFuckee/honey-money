@@ -24,9 +24,11 @@ from app.dca_store import (_TP_INSERT, _TP_UPSERT_ROUND, _TP_COLS,  # noqa: E402
 
 DSN = "postgresql://honey_money:honey_money@10.0.0.169:5433/honey_money"
 
-ap = argparse.ArgumentParser(description="等份额定投样本回填（只写 share 行）")
+ap = argparse.ArgumentParser(description="非等额定投方式样本回填（只写指定 method 行）")
 ap.add_argument("--dsn", default=DSN)
 ap.add_argument("--limit", type=int, default=400, help="样本基金数")
+ap.add_argument("--method", default="share", choices=["share", "dd_ladder"],
+                help="定投方式（share 等份额 / dd_ladder 回撤梯度加码）")
 args = ap.parse_args()
 
 with psycopg.connect(args.dsn, connect_timeout=10) as conn:
@@ -43,9 +45,9 @@ with psycopg.connect(args.dsn, connect_timeout=10) as conn:
 print(f"净值行：{len(nav):,}", flush=True)
 
 rows, rounds_rows = dca_backtest.run_backtest_tp(
-    nav, basic, scale_map, method="share",
+    nav, basic, scale_map, method=args.method,
     log=lambda m: print(m, flush=True))
-print(f"等份额结果行：{len(rows):,} / 轮次行：{len(rounds_rows):,}", flush=True)
+print(f"{args.method} 结果行：{len(rows):,} / 轮次行：{len(rounds_rows):,}", flush=True)
 
 # alive 45 天口径（与 run_full_backtest_tp 同源逻辑，样本范围内）
 all_end = max((r["full_end"] for r in rows if r["full_end"]), default=None)
@@ -60,9 +62,9 @@ with psycopg.connect(args.dsn) as conn:
     ensure_tp_schema(conn)          # 幂等迁移（含 method 列与 PK 重建）
     with conn.cursor() as cur:
         cur.execute("DELETE FROM fund_dca_tp_result "
-                    "WHERE method = 'share' AND code = ANY(%s)", (arr,))
+                    "WHERE method = %s AND code = ANY(%s)", (args.method, arr))
         cur.execute("DELETE FROM fund_dca_tp_rounds "
-                    "WHERE method = 'share' AND code = ANY(%s)", (arr,))
+                    "WHERE method = %s AND code = ANY(%s)", (args.method, arr))
         if rows:
             cur.executemany(_TP_INSERT,
                             [tuple(r[c] for c in _TP_COLS) for r in rows])
@@ -73,7 +75,7 @@ with psycopg.connect(args.dsn) as conn:
             "UPDATE fund_dca_tp_result SET gap_avg_days = NULL, "
             "gap_min_days = NULL, gap_max_days = NULL, "
             "gap_avg_days_disc = NULL, gap_avg_days_nom = NULL "
-            "WHERE method = 'share' AND code = ANY(%s)", (arr,))
+            "WHERE method = %s AND code = ANY(%s)", (args.method, arr))
         cur.execute(
             "UPDATE fund_dca_tp_result r SET "
             "gap_avg_days = t.g_avg, gap_min_days = t.g_min, "
@@ -86,10 +88,10 @@ with psycopg.connect(args.dsn) as conn:
             "      avg(gap_days) FILTER (WHERE fee = 'disc')  AS d_avg, "
             "      avg(gap_days) FILTER (WHERE fee = 'nom')   AS n_avg "
             "      FROM fund_dca_tp_rounds "
-            "      WHERE method = 'share' AND code = ANY(%s) "
+            "      WHERE method = %s AND code = ANY(%s) "
             "      GROUP BY code, tp, method) t "
-            "WHERE r.code = t.code AND r.tp = t.tp AND r.method = 'share'",
-            (arr,))
+            "WHERE r.code = t.code AND r.tp = t.tp AND r.method = %s",
+            (args.method, arr, args.method))
     conn.commit()
-print("样本回填完成（method='share' 范围替换；当晚日更整表重写为全量）",
+print(f"样本回填完成（method={args.method} 范围替换；当晚日更整表重写为全量）",
       flush=True)

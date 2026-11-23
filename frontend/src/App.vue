@@ -448,6 +448,7 @@ const dcaTp = ref(0.20)
 const DCA_MODE_OPTIONS = [
   { key: 'amount', label: '等额定投' },
   { key: 'share', label: '等份额定投' },
+  { key: 'dd_ladder', label: '回撤加码' },
 ]
 const dcaMode = ref('amount')
 const dcaModeLabel = computed(() =>
@@ -3066,7 +3067,7 @@ watch(
             <div class="toolbar">
               <div>
                 <h2 class="h1">定投止盈回测</h2>
-                <p class="sub">{{ dca.meta?.params?.scale_min_yi ? `资产规模 ≥${dca.meta.params.scale_min_yi} 亿公募基金` : '全市场公募基金（不限规模）' }} · 月定投{{ dcaMode === 'share' ? `固定份额（首期 ${dca.meta?.params?.amount ?? 1000} 元折算，现金随净值波动——涨时花得多、跌时花得少）` : ` ${dca.meta?.params?.amount ?? 1000} 元` }} · 收益 ≥{{ dcaTpLabel(dcaTp) }} 全仓止盈重来<template v-if="dca.meta?.params?.min_age_years"> · 运作 ≥{{ dca.meta.params.min_age_years }} 年</template> · 年化=XIRR 资金加权<template v-if="dca.meta?.params?.window_end"> · 数据截至 {{ dca.meta.params.window_end }}</template></p>
+                <p class="sub">{{ dca.meta?.params?.scale_min_yi ? `资产规模 ≥${dca.meta.params.scale_min_yi} 亿公募基金` : '全市场公募基金（不限规模）' }} · 月定投{{ dcaMode === 'share' ? `固定份额（首期 ${dca.meta?.params?.amount ?? 1000} 元折算，现金随净值波动——涨时花得多、跌时花得少）` : dcaMode === 'dd_ladder' ? `基础 ${dca.meta?.params?.amount ?? 1000} 元 · 回撤梯度加码（较历史最高回撤 ≥10% 投 1.5 倍、≥20% 投 2 倍——跌得越深买得越多）` : ` ${dca.meta?.params?.amount ?? 1000} 元` }} · 收益 ≥{{ dcaTpLabel(dcaTp) }} 全仓止盈重来<template v-if="dca.meta?.params?.min_age_years"> · 运作 ≥{{ dca.meta.params.min_age_years }} 年</template> · 年化=XIRR 资金加权<template v-if="dca.meta?.params?.window_end"> · 数据截至 {{ dca.meta.params.window_end }}</template></p>
               </div>
             </div>
 
@@ -3079,7 +3080,7 @@ watch(
             <div class="dca-filter-row dca-filter-segs" style="margin: 0 0 14px">
               <div class="seg-group" v-if="!STATIC_MODE">
                 <span class="seg-label">定投方式</span>
-                <div class="src-seg" title="切换定投方式：等额=每期固定 1000 元；等份额=每期固定份额（首期 1000 元折算，涨时花得多、跌时花得少）。下方统计卡/止盈点对比/排行/散点分箱/详情弹窗全部跟随（起点条件与熊市断缴实验卡为等额固定快照不随切）">
+                <div class="src-seg" title="切换定投方式：等额=每期固定 1000 元；等份额=每期固定份额（首期 1000 元折算，涨时花得多、跌时花得少）；回撤加码=基础 1000 元按买入日回撤分档加倍（较历史最高回撤 ≥10% 投 1.5 倍、≥20% 投 2 倍——熊市加倍实验 68% 基金更优的口径推广）。下方统计卡/止盈点对比/排行/散点分箱/详情弹窗全部跟随（起点条件与熊市断缴实验卡为等额固定快照不随切）">
                   <button v-for="o in DCA_MODE_OPTIONS" :key="o.key"
                           class="src-seg-btn"
                           :class="{ active: dcaMode === o.key }"

@@ -1,9 +1,10 @@
 """全市场基金「定投 + 20% 止盈」回测核心（离线脚本与调度器日更共用）。
 
 口径约定：
-- 定投：每只基金每月首个净值日买入；定投方式两档（DCA_METHODS）——
+- 定投：每只基金每月首个净值日买入；定投方式三档（DCA_METHODS）——
   amount 等额定投（每期固定 1000 元，金额不影响收益率）/ share 等份额
-  定投（每期固定到手份额 = 1000/窗口首日复权净值，现金随净值波动）；
+  定投（每期固定到手份额 = 1000/窗口首日复权净值，现金随净值波动）/
+  dd_ladder 回撤梯度加码（买入日按当日回撤分档加倍，见 DD_LADDER）；
 - 复权：东财日增长率 pct_chg 已是分红再投资口径（已验证），链乘合成复权净值；
   pct_chg 缺失行用 (unit_nav+每份分红)/前日单位净值 兜底（分红由累计净值差推出）；
 - 止盈：任一净值日持仓收益率 = 持仓市值/已投入 - 1 ≥ 20% 即全仓赎回并开启新一轮
@@ -50,7 +51,14 @@ TP_THRESHOLDS = (0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40)
 # 份额 = AMOUNT/窗口首日复权净值，首期恰好 1000 元——涨时现金花得多、
 # 跌时花得少，成本摊平效果最差的反面基准；含费为外扣法对偶：现金 =
 # 份额×净值×(1+申购费率)）。API method 白名单与前端 tab 共用此事实源。
-DCA_METHODS = ("amount", "share")
+DCA_METHODS = ("amount", "share", "dd_ladder")
+# 回撤梯度加码（dd_ladder，2026-11-23 四轮）：月度买入日按当日回撤分档加倍
+# ——回撤 = adj/历史最高（含当日）- 1，因果无前视；取满足 回撤 ≤ 阈值 的
+# 最深一档的倍数（reversed 依序匹配，都不中为 1×——浅档在前直接 next 会
+# 让深回撤错拿中间档，手算测试当场抓过）。≤-20% 投 2× 沿用熊市加倍实验
+# D 组口径（2026-11-19 全市场 9,576 只：68% 基金比坚持等额定投更优），
+# 中间档 -10% → 1.5× 为自然梯度；每期现金 = 1000 × 倍数，费用/止盈/XIRR 共用。
+DD_LADDER = ((-0.10, 1.5), (-0.20, 2.0))
 
 
 # ===== 费用模型（典型档位近似，见模块 docstring） =====
@@ -237,10 +245,12 @@ def simulate_multi(dates: pd.DatetimeIndex, adj: np.ndarray,
     只是窗口 prep/月检等共享开销；状态机本体仍是 N 倍工作量（日更多阈值
     总计算量 ≈ 单阈值日更 ×N，见 run_backtest_tp docstring）。
 
-    method 选定投方式（DCA_METHODS，止盈/清算逻辑两种方式共用）：
+    method 选定投方式（DCA_METHODS，止盈/清算逻辑各方式共用）：
     - amount（等额，缺省）：每期现金固定 AMOUNT，外扣法折份额；
     - share（等份额）：每期到手份额固定 = AMOUNT/窗口首日复权净值，
-      现金 = 份额×净值×(1+申购费率)（无费时 ×1），invested 每期可变。
+      现金 = 份额×净值×(1+申购费率)（无费时 ×1），invested 每期可变；
+    - dd_ladder（回撤梯度加码）：每期现金 = AMOUNT×档位倍数（DD_LADDER，
+      按买入日回撤 = adj/历史最高（含当日）-1 分档），invested 每期可变。
     """
     if method not in DCA_METHODS:
         raise ValueError(f"unknown dca method: {method!r}")
@@ -249,9 +259,13 @@ def simulate_multi(dates: pd.DatetimeIndex, adj: np.ndarray,
     unit_shares = AMOUNT / adj[0]
     states = [_new_tp_state(tp) for tp in take_profits]
     months = dates.to_numpy().astype("datetime64[M]")
+    peak = -np.inf          # dd_ladder 用：历史最高（含当日）的运行峰值
     for i in range(len(dates)):
         a = adj[i]
         m = months[i]
+        if a > peak:
+            peak = a
+        dd = a / peak - 1.0
         for st in states:
             if m not in st["months"]:
                 st["months"].add(m)
@@ -263,7 +277,10 @@ def simulate_multi(dates: pd.DatetimeIndex, adj: np.ndarray,
                     sh = unit_shares
                     sub_fee = 0.0 if fee is None else cash - sh * a
                 else:
-                    cash = AMOUNT
+                    mult = (next((mv for th, mv in reversed(DD_LADDER)
+                                  if dd <= th), 1.0)
+                            if method == "dd_ladder" else 1.0)
+                    cash = AMOUNT * mult
                     net_amount = (cash if fee is None
                                   else cash / (1.0 + fee.sub_rate))
                     sh = net_amount / a

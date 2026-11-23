@@ -268,7 +268,7 @@ def import_rounds(conn, rows: list[tuple]) -> int:
 TP_DDL = """
 CREATE TABLE IF NOT EXISTS fund_dca_tp_result (
   tp              DOUBLE PRECISION NOT NULL,
-  method          VARCHAR(8)  NOT NULL DEFAULT 'amount',
+  method          VARCHAR(16) NOT NULL DEFAULT 'amount',
   code            VARCHAR(10) NOT NULL,
   name            VARCHAR(128) NOT NULL,
   fund_type       VARCHAR(64),
@@ -307,7 +307,7 @@ CREATE INDEX IF NOT EXISTS idx_fund_dca_tp_tp ON fund_dca_tp_result (tp, w10_xir
 
 CREATE TABLE IF NOT EXISTS fund_dca_tp_rounds (
   tp         DOUBLE PRECISION NOT NULL,
-  method     VARCHAR(8)  NOT NULL DEFAULT 'amount',
+  method     VARCHAR(16) NOT NULL DEFAULT 'amount',
   code       VARCHAR(10) NOT NULL,
   fee        VARCHAR(8)  NOT NULL DEFAULT 'gross',
   seq        INTEGER NOT NULL,
@@ -374,8 +374,13 @@ ALTER TABLE fund_dca_tp_result ADD COLUMN IF NOT EXISTS full_cur_xirr_nom DOUBLE
 -- 定投方式维度（2026-11-23）：存量表就地加 method 列（默认 amount，行数据
 -- 不丢、无空窗——2026-10-26/11-20 两次漏迁移教训），PK 守护式纳入 method
 -- （唯一性要求同 (code, tp, method)；新装表 CREATE 已含，此处只动旧表）
-ALTER TABLE fund_dca_tp_result ADD COLUMN IF NOT EXISTS method VARCHAR(8) NOT NULL DEFAULT 'amount';
-ALTER TABLE fund_dca_tp_rounds ADD COLUMN IF NOT EXISTS method VARCHAR(8) NOT NULL DEFAULT 'amount';
+ALTER TABLE fund_dca_tp_result ADD COLUMN IF NOT EXISTS method VARCHAR(16) NOT NULL DEFAULT 'amount';
+ALTER TABLE fund_dca_tp_rounds ADD COLUMN IF NOT EXISTS method VARCHAR(16) NOT NULL DEFAULT 'amount';
+-- 加宽守护（2026-11-23 四轮：dd_ladder 9 字符超初版 VARCHAR(8)，实跑踩过）——
+-- varchar 加宽为元数据级操作，幂等无害，存量值不受影响
+ALTER TABLE fund_dca_tp_result ALTER COLUMN method TYPE VARCHAR(16);
+ALTER TABLE fund_dca_tp_rounds ALTER COLUMN method TYPE VARCHAR(16);
+
 DO $$
 BEGIN
   IF NOT EXISTS (

@@ -304,8 +304,9 @@ class TestDcaShareMode:
         tab_y = tab.bounding_box()["y"]
         assert tab_y < metrics.bounding_box()["y"], \
             "定投方式 tab 应在统计卡之前"
-        # 唯一性：筛选面板里没有第二组 data-mode（已从面板移除）
-        assert page.locator("button[data-mode]").count() == 2   # 等额+等份额
+        # 唯一性：筛选面板里没有第二组 data-mode（已从面板移除）；
+        # 四轮起三枚：等额/等份额/回撤加码
+        assert page.locator("button[data-mode]").count() == 3
         # 深链接形态同样置顶
         page.goto(f"http://127.0.0.1:{frontend_port}/data/fund-dca?mode=share")
         expect(page.locator('button[data-mode="share"]')
@@ -380,6 +381,40 @@ class TestDcaShareMode:
         compare_calls = [u for u in mock_share if "/compare" in u]
         assert compare_calls and "equity=false" in compare_calls[-1], mock_share
         expect(card).to_contain_text("全市场池", timeout=10_000)
+
+    def test_dd_ladder_switch_and_request(self, servers, page, mock_dca,
+                                          mock_share, mock_navs,
+                                          mock_share_scatter):
+        """E2E-457：切「回撤加码」→ 列表/散点请求带 method=dd_ladder，
+        副标题出现回撤梯度加码口径文案，表格行渲染。"""
+        _, frontend_port = servers
+        open_dca(page, frontend_port)
+        page.locator('button[data-mode="dd_ladder"]').click()
+        expect(page.locator('button[data-mode="dd_ladder"]')
+              ).to_have_class(re.compile("active"), timeout=10_000)
+        list_calls = [u for u in mock_share
+                      if "/rounds" not in u and "/compare" not in u
+                      and "/summary" not in u]
+        assert list_calls and "method=dd_ladder" in list_calls[-1], mock_share
+        expect(page.locator(".toolbar .sub").first
+              ).to_contain_text("回撤梯度加码")
+        expect(page.locator(".browse-pv tbody tr", has_text="019387")
+              ).to_contain_text("+75.0%")     # mock 回显行
+        assert any("method=dd_ladder" in u for u in mock_share_scatter), \
+            mock_share_scatter
+
+    def test_dd_ladder_deeplink(self, servers, page, mock_dca, mock_share,
+                                mock_navs):
+        """E2E-458：?mode=dd_ladder 深链接 → tab 激活且首请求即带参。"""
+        _, frontend_port = servers
+        page.goto(f"http://127.0.0.1:{frontend_port}/data/fund-dca?mode=dd_ladder")
+        expect(page.get_by_role("heading", name="定投止盈回测")).to_be_visible()
+        expect(page.locator('button[data-mode="dd_ladder"]')
+              ).to_have_class(re.compile("active"), timeout=10_000)
+        list_calls = [u for u in mock_share
+                      if "/rounds" not in u and "/compare" not in u
+                      and "/summary" not in u]
+        assert list_calls and "method=dd_ladder" in list_calls[0], mock_share
 
     def test_modal_switchers_keep_method(self, servers, page, mock_dca,
                                          mock_share, mock_navs):
