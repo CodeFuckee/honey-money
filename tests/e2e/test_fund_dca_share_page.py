@@ -313,27 +313,52 @@ class TestDcaShareMode:
         assert page.locator('button[data-mode="share"]').bounding_box()["y"] \
             < page.locator(".learn-metrics").first.bounding_box()["y"]
 
-    def test_scatter_follows_method(self, servers, page, mock_dca, mock_share,
-                                    mock_navs, mock_share_scatter):
-        """E2E-453：切换定投方式 → 散点请求带 method=share、结论徽标显示
-        口径、分箱年化结论随方式变化（等份额整体更低）。"""
+    def test_master_bar_all_groups_at_top(self, servers, page, mock_dca,
+                                          mock_share, mock_navs):
+        """E2E-454：四组总开关（定投方式/止盈点/基金类型/费用口径）都在
+        统计卡之前的最前位置；筛选面板与散点卡不再有重复组。"""
         _, frontend_port = servers
         open_dca(page, frontend_port)
-        # 默认等额：结论卡 ≥10 年均值 = 0.076×0.9 ≈ +6.8%
-        concl = page.locator(".dca-conclusion")
-        expect(concl).to_contain_text("每基金只计一次")
-        expect(concl.locator(".dc-badge")).to_contain_text("等额定投")
-        _switch_share(page)
-        expect(concl.locator(".dc-badge")
-              ).to_contain_text("等份额定投", timeout=10_000)
-        # 等份额：最优格 ≥10 年 × <1 亿 平均年化 = 0.076×0.55 ≈ 4.2%
-        #（等额同格 ≈ 6.8%，两方式可区分）
-        expect(concl).to_contain_text("平均年化 4.2%", timeout=10_000)
-        scatter_calls = [u for u in mock_share_scatter if "method=share" in u]
+        metrics_y = page.locator(".learn-metrics").first.bounding_box()["y"]
+        for sel in ('button[data-mode="share"]', 'button[data-tp="0.2"]',
+                    'button[data-table-cat="equity"]',
+                    'button[data-table-fee="nom"]'):
+            btn = page.locator(sel).first
+            expect(btn).to_be_visible()
+            assert btn.bounding_box()["y"] < metrics_y, sel
+        # 全页唯一：面板/散点卡的重复组已移除
+        assert page.locator("button[data-tp]").count() == 8
+        assert page.locator("button[data-table-cat]").count() == 2
+        assert page.locator("button[data-table-fee]").count() == 3
+
+    def test_scatter_follows_tp(self, servers, page, mock_dca, mock_share,
+                                mock_navs, mock_share_scatter):
+        """E2E-455：切换止盈点 → 散点请求带 tp=0.15（跟随顶部总开关，
+        不再固定 20% 档）；标题口径提示同步。"""
+        _, frontend_port = servers
+        open_dca(page, frontend_port)
+        page.locator('button[data-tp="0.15"]').click()
+        expect(page.locator(".tp-compare tr.tp-row-active")
+              ).to_contain_text("15%", timeout=10_000)
+        scatter_calls = [u for u in mock_share_scatter if "tp=0.15" in u]
         assert scatter_calls, mock_share_scatter
-        # 散点卡标题带当前口径提示
         expect(page.locator(".card", has_text="三维散点").first
-              ).to_contain_text("等份额定投")
+              ).to_contain_text("止盈 15%", timeout=10_000)
+
+    def test_compare_follows_equity_toggle(self, servers, page, mock_dca,
+                                           mock_share, mock_navs):
+        """E2E-456：顶部基金类型切「全市场」→ 对比卡请求带 equity=false、
+        副标题池文案切换（权益+商品池 → 全市场池）。"""
+        _, frontend_port = servers
+        open_dca(page, frontend_port)
+        card = page.locator(".card", has_text="止盈点对比").first
+        expect(card).to_contain_text("权益+商品池")
+        page.locator('button[data-table-cat="all"]').click()
+        expect(page.locator('button[data-table-cat="all"]')
+              ).to_have_class(re.compile("active"), timeout=10_000)
+        compare_calls = [u for u in mock_share if "/compare" in u]
+        assert compare_calls and "equity=false" in compare_calls[-1], mock_share
+        expect(card).to_contain_text("全市场池", timeout=10_000)
 
     def test_modal_switchers_keep_method(self, servers, page, mock_dca,
                                          mock_share, mock_navs):

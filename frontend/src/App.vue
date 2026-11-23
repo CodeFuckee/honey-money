@@ -436,15 +436,15 @@ const dcaEquity = ref(true)
 
 // ===== 多止盈点市场级对比（2026-11-15 grilling 定案，同日追加 35%/40% → 5%~40% 八档） =====
 // 阈值切换只改排行/统计/弹窗明细的数据源（tp≠0.2 走 /api/funds/dca/tp*，
-// 行结构同旧端点 + tp 一列）；散点/分箱不随止盈点（跟随定投方式、固定 20% 档）；
+// 行结构同旧端点 + tp 一列）；散点/分箱跟随定投方式与止盈点（顶部总开关）；
 // 静态模式（冻结站点）无多阈值数据，切换器与对比区块整体隐藏
 const DCA_TP_OPTIONS = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40]
 const dcaTp = ref(0.20)
-// ===== 定投方式切换（2026-11-23：等额定投 / 等份额定投，tab 置页面最前） =====
+// ===== 定投方式切换（2026-11-23：等额定投 / 等份额定投，四组总开关置页面最前） =====
 // 等份额口径：每期固定到手份额 = 首期 1000 元折算，现金随净值波动（涨时
-// 花得多、跌时花得少，成本摊平效果最差的反面基准）；切换后排行/统计卡/
-// 对比卡/散点分箱/弹窗明细全部跟随（散点固定 20% 止盈档；起点条件与熊市
-// 断缴两实验卡为等额固定快照）；静态模式（冻结站点）无此维度数据，切换器隐藏
+// 花得多、跌时花得少，成本摊平效果最差的反面基准）；顶部总开关四组
+// （定投方式/止盈点/基金类型/费用口径）切换后排行/统计卡/对比卡/散点分箱/
+// 弹窗明细全部跟随（起点条件与熊市
 const DCA_MODE_OPTIONS = [
   { key: 'amount', label: '等额定投' },
   { key: 'share', label: '等份额定投' },
@@ -555,15 +555,16 @@ async function loadDca() {
   }
 }
 function dcaSearch() { dcaPage.value = 0; loadDca() }
-// 阈值切换：只影响排行/统计/弹窗明细（散点/分箱不随止盈点，跟随定投方式、固定 20% 档）
+// 阈值切换（顶部总开关）：排行/统计/对比高亮/散点分箱/弹窗明细跟随
 function onDcaTpChange(tp) {
   if (dcaTp.value === tp) return
   dcaTp.value = tp
   dcaPage.value = 0
   loadDca()
+  loadDcaScatter()
 }
 // 定投方式切换（页面置顶总开关）：排行/统计/对比卡/散点分箱/弹窗明细全部
-// 跟随（散点固定 20% 止盈档；起点条件与熊市断缴实验卡为等额固定快照）
+// 跟随（起点条件与熊市断缴实验卡为等额固定快照）
 function onDcaModeChange(mode) {
   if (dcaMode.value === mode) return
   dcaMode.value = mode
@@ -572,12 +573,13 @@ function onDcaModeChange(mode) {
   loadDcaTpCompare()
   loadDcaScatter()
 }
-// 八档对比聚合（权益类+商品池；跟随费用口径与定投方式，不随权益开关——池口径独立）
+// 八档对比聚合（跟随费用口径/定投方式/基金类型开关——equity=true 为权益+商品
+// 池（对比专用口径），false 全市场对照；三轮需求：所有统计跟随总开关）
 async function loadDcaTpCompare() {
   if (STATIC_MODE) return
   dcaTpLoading.value = true
   try {
-    const r = await fetch(`/api/funds/dca/tp/compare?fee=${dcaFeeMode.value}&method=${dcaMode.value}`)
+    const r = await fetch(`/api/funds/dca/tp/compare?fee=${dcaFeeMode.value}&method=${dcaMode.value}&equity=${dcaEquity.value}`)
     dcaTpCompare.value = await r.json()
   } catch (e) {
     dcaTpCompare.value = { status: 'down', detail: String(e), rows: [] }
@@ -830,7 +832,7 @@ async function loadDcaScatter() {
   try {
     const r = await fetch(STATIC_MODE
       ? `${DATA_BASE}/funds/dca/scatter.${dcaFeeMode.value}.json`
-      : `/api/funds/dca/scatter?fee=${dcaFeeMode.value}&equity=${dcaEquity.value}&method=${dcaMode.value}`)
+      : `/api/funds/dca/scatter?fee=${dcaFeeMode.value}&equity=${dcaEquity.value}&method=${dcaMode.value}&tp=${dcaTp.value}`)
     const body = await r.json()
     // 期间又切换过 → 丢弃旧响应；静态模式权益过滤在客户端做
     if (seq === dcaFeeReqSeq) dcaScatter.value = STATIC_MODE ? applyDcaEquity(body) : body
@@ -3068,19 +3070,54 @@ watch(
               </div>
             </div>
 
-            <!-- ===== 定投方式总开关（页面最前，2026-11-23 用户需求置顶）：切换后
-                 下方所有统计跟随——统计卡/止盈点对比/排行表/散点分箱/详情弹窗；
-                 散点固定 20% 止盈档；起点条件/熊市断缴两实验卡为等额固定快照 ===== -->
-            <div class="dca-filter-row dca-filter-segs" v-if="!STATIC_MODE"
-                 style="margin: 0 0 14px">
-              <div class="seg-group">
+            <!-- ===== 顶部总开关行（2026-11-23 三轮用户需求：四组口径切换全部置顶）：
+                 定投方式/止盈点/基金类型/费用口径——切换后下方所有统计跟随
+                 （统计卡/止盈点对比/排行表/散点分箱/详情弹窗；弹窗内另有局部
+                 止盈点/费率 tab 属明细级控件）。起点条件/熊市断缴两实验卡为
+                 等额固定快照不随切（标题已标注）；静态模式无多阈值/方式维度，
+                 对应组隐藏（类型/费用仍可用——客户端切换） ===== -->
+            <div class="dca-filter-row dca-filter-segs" style="margin: 0 0 14px">
+              <div class="seg-group" v-if="!STATIC_MODE">
                 <span class="seg-label">定投方式</span>
-                <div class="src-seg" title="切换定投方式：等额=每期固定 1000 元；等份额=每期固定份额（首期 1000 元折算，涨时花得多、跌时花得少）。下方统计卡/止盈点对比/排行/散点分箱/详情弹窗全部跟随（散点固定 20% 止盈档；起点条件与熊市断缴实验卡为等额固定快照不随切）">
+                <div class="src-seg" title="切换定投方式：等额=每期固定 1000 元；等份额=每期固定份额（首期 1000 元折算，涨时花得多、跌时花得少）。下方统计卡/止盈点对比/排行/散点分箱/详情弹窗全部跟随（起点条件与熊市断缴实验卡为等额固定快照不随切）">
                   <button v-for="o in DCA_MODE_OPTIONS" :key="o.key"
                           class="src-seg-btn"
                           :class="{ active: dcaMode === o.key }"
                           @click="onDcaModeChange(o.key)"
                           :data-mode="o.key">{{ o.label }}</button>
+                </div>
+              </div>
+              <div class="seg-group" v-if="!STATIC_MODE">
+                <span class="seg-label">止盈点</span>
+                <div class="src-seg" title="切换止盈线：排行/统计/对比高亮/散点分箱/明细跟随（对比区块行/圆点同款状态）">
+                  <button v-for="t in DCA_TP_OPTIONS" :key="t"
+                          class="src-seg-btn"
+                          :class="{ active: dcaTp === t }"
+                          @click="onDcaTpChange(t)"
+                          :data-tp="t">{{ dcaTpLabel(t) }}</button>
+                </div>
+              </div>
+              <div class="seg-group">
+                <span class="seg-label">基金类型</span>
+                <div class="src-seg" title="排行/统计/散点/对比池共用同一基金类型口径（默认仅权益类；对比卡池=权益 8 类+商品，全市场时为全市场对照）">
+                  <button class="src-seg-btn"
+                          :class="{ active: dcaEquity }"
+                          @click="dcaEquity = true"
+                          data-table-cat="equity">仅权益类</button>
+                  <button class="src-seg-btn"
+                          :class="{ active: !dcaEquity }"
+                          @click="dcaEquity = false"
+                          data-table-cat="all">全市场</button>
+                </div>
+              </div>
+              <div class="seg-group">
+                <span class="seg-label">费用口径</span>
+                <div class="src-seg" title="排行/统计/散点/对比/详情共用同一费用口径（不含费 / 含费·申购一折 / 含费·申购名义）">
+                  <button v-for="o in DCA_FEE_OPTIONS" :key="o.key"
+                          class="src-seg-btn"
+                          :class="{ active: dcaFeeMode === o.key }"
+                          @click="dcaFeeMode = o.key"
+                          :data-table-fee="o.key">{{ o.label }}</button>
                 </div>
               </div>
             </div>
@@ -3099,7 +3136,7 @@ watch(
               <div class="toolbar" style="margin: 0 0 6px">
                 <div>
                   <h2 class="h1" style="font-size: 18px">止盈点对比：止盈线设多少更划算？<span class="dc-hint" style="margin-left: 6px">当前口径：{{ dcaModeLabel }}</span></h2>
-                  <p class="sub">同一「月定投（{{ dcaModeLabel }}）+ 止盈重来」策略只换止盈线（5%~40% 八档）在权益类+商品在市基金上的整体表现 · 年化=XIRR 资金加权（钱在场的效率，跨阈值可比；总收益率天然偏向高阈值不作对比依据）· 每档采样 {{ dcaTpCompare.rows?.[0]?.count ?? 0 }} 只（在市且年化非空）· {{ dcaFeeLabel }}</p>
+                  <p class="sub">同一「月定投（{{ dcaModeLabel }}）+ 止盈重来」策略只换止盈线（5%~40% 八档）在{{ dcaEquity ? '权益类+商品' : '全市场' }}在市基金上的整体表现 · 年化=XIRR 资金加权（钱在场的效率，跨阈值可比；总收益率天然偏向高阈值不作对比依据）· 每档采样 {{ dcaTpCompare.rows?.[0]?.count ?? 0 }} 只（在市且年化非空）· {{ dcaFeeLabel }} · {{ dcaEquity ? '权益+商品池' : '全市场池' }}（随顶部基金类型开关）</p>
                 </div>
                 <div class="toolbar-right">
                   <span v-if="dcaTpLoading" class="sub">重算中…</span>
@@ -3144,7 +3181,7 @@ watch(
                     <text :x="p.x" :y="p.y - 9" text-anchor="middle" class="tp-v">{{ pctp(p.v) }}</text>
                   </g>
                 </svg>
-                <p class="note" style="margin: 10px 0 0">口径：权益类+商品池（权益 8 类白名单 + QDII-商品/商品；债基·FOF·货币·偏债·REITs 不在内——债基货基波动小到连 5% 都难触发，进平均会稀释阈值间差异）· 近 10 年窗口为主口径，「全史」自基金成立起 · 「曾止盈」= 窗口内触发过至少一轮止盈的基金占比 · 平均间隔按费用口径轮次聚合 · 点击表格行或折线圆点，排行表格切换到该止盈点；散点/分箱跟随定投方式（固定 20% 止盈档） · 本区块为历史回测统计，不构成任何操作建议</p>
+                <p class="note" style="margin: 10px 0 0">口径：权益类+商品池（权益 8 类白名单 + QDII-商品/商品；债基·FOF·货币·偏债·REITs 不在内——债基货基波动小到连 5% 都难触发，进平均会稀释阈值间差异）· 近 10 年窗口为主口径，「全史」自基金成立起 · 「曾止盈」= 窗口内触发过至少一轮止盈的基金占比 · 平均间隔按费用口径轮次聚合 · 点击表格行或折线圆点，排行表格切换到该止盈点；散点/分箱跟随顶部定投方式与止盈点开关 · 本区块为历史回测统计，不构成任何操作建议</p>
               </template>
               <div v-else class="browse-empty">多阈值对比数据尚未生成（日更回测首次写入后可用）</div>
             </div>
@@ -3153,7 +3190,7 @@ watch(
             <div class="card dip-report-block" v-if="!STATIC_MODE && dcaDipReport" style="margin-top: 16px; padding: 14px 16px 18px">
               <div class="toolbar" style="margin: 0 0 6px">
                 <div>
-                  <h2 class="h1" style="font-size: 18px">起点条件回测：什么时候开始定投，结果差多少？<span class="dc-hint" style="margin-left: 6px">等额口径固定快照（不随定投方式切换）</span></h2>
+                  <h2 class="h1" style="font-size: 18px">起点条件回测：什么时候开始定投，结果差多少？<span class="dc-hint" style="margin-left: 6px">等额口径固定快照（不随顶部定投方式/止盈点/费用口径切换）</span></h2>
                   <p class="sub">同一「月定投 + 止盈重来」策略从不同起点开始（权益基金 2015~2026 全历史、98 万个起点、每起点独立模拟到首轮止盈）· 每行 = 首轮止盈天数分位 / 3 年内止盈成功率 / 首轮资金加权年化（XIRR）· 无费口径 · 静态验证快照（重跑后刷新）</p>
                 </div>
               </div>
@@ -3198,7 +3235,7 @@ watch(
             <div class="card pause-exp-block" data-pause-exp v-if="!STATIC_MODE && dcaPauseExp" style="margin-top: 16px; padding: 14px 16px 18px">
               <div class="toolbar" style="margin: 0 0 6px">
                 <div>
-                  <h2 class="h1" style="font-size: 18px">熊市断缴实验：跌深了停扣，代价有多大？<span class="dc-hint" style="margin-left: 6px">等额口径固定快照（不随定投方式切换）</span></h2>
+                  <h2 class="h1" style="font-size: 18px">熊市断缴实验：跌深了停扣，代价有多大？<span class="dc-hint" style="margin-left: 6px">等额口径固定快照（不随顶部定投方式/止盈点/费用口径切换）</span></h2>
                   <p class="sub">熊市态 = 距历史高点回撤 ≤-20% 进入、收窄回 &gt;-10% 才恢复 · 同一只基金四条平行时间线配对（A 坚持定投 / B 断缴闲置 / C 断缴+恢复补投 / D 熊市加倍）· 权益基金全史 {{ dcaPauseUniverse.backtested?.toLocaleString() || '—' }} 只（截数 {{ dcaPauseUniverse.data_end || '—' }}）· 无费口径 · 历史实验统计，不构成任何操作建议</p>
                 </div>
                 <div class="src-seg" data-pause-mode style="flex-shrink: 0">
@@ -3306,45 +3343,6 @@ watch(
                   placeholder="显示列" class="dca-col-select"
                   :maxSelectedLabels="0" selectedItemsLabel="已选 {0} 列"
                   title="勾选表格要显示的列" aria-label="选择表格显示列" />
-              </div>
-              <div class="dca-filter-row dca-filter-segs">
-                <!-- 止盈点切换：排行/统计/明细跟随（对比区块行/圆点同款状态）；默认 20%；
-                     定投方式总开关已置顶（页面标题下方），散点跟随方式、止盈点固定 20% -->
-                <div class="seg-group" v-if="!STATIC_MODE">
-                  <span class="seg-label">止盈点</span>
-                  <div class="src-seg" title="切换止盈线：排行/统计/明细跟随（散点/分箱不随止盈点，跟随定投方式、固定 20% 档）">
-                    <button v-for="t in DCA_TP_OPTIONS" :key="t"
-                            class="src-seg-btn"
-                            :class="{ active: dcaTp === t }"
-                            @click="onDcaTpChange(t)"
-                            :data-tp="t">{{ dcaTpLabel(t) }}</button>
-                  </div>
-                </div>
-                <!-- 权益类筛选：与散点区同一状态（dcaEquity），排行/统计/散点联动 -->
-                <div class="seg-group">
-                  <span class="seg-label">基金类型</span>
-                  <div class="src-seg" title="排行/统计/散点共用同一基金类型口径（默认仅权益类）">
-                    <button class="src-seg-btn"
-                            :class="{ active: dcaEquity }"
-                            @click="dcaEquity = true"
-                            data-table-cat="equity">仅权益类</button>
-                    <button class="src-seg-btn"
-                            :class="{ active: !dcaEquity }"
-                            @click="dcaEquity = false"
-                            data-table-cat="all">全市场</button>
-                  </div>
-                </div>
-                <!-- 费用口径：与散点区同一状态（dcaFeeMode），排行/统计/散点/详情联动 -->
-                <div class="seg-group">
-                  <span class="seg-label">费用口径</span>
-                  <div class="src-seg" title="排行/统计/散点/详情共用同一费用口径">
-                    <button v-for="o in DCA_FEE_OPTIONS" :key="o.key"
-                            class="src-seg-btn"
-                            :class="{ active: dcaFeeMode === o.key }"
-                            @click="dcaFeeMode = o.key"
-                            :data-table-fee="o.key">{{ o.label }}</button>
-                  </div>
-                </div>
               </div>
               <!-- 区间筛选：常显（2026-11-17 用户反馈：折叠按钮多余，且固定五列
                    网格被 InputNumber 的 min-content 撑破、在窄屏冲出页面）——
@@ -3526,35 +3524,19 @@ watch(
                 </Column>
               </DataTable>
             </div>
-            <p class="note">口径：每月首个净值日买入（定投方式可切：等额=每期固定金额；等份额=每期固定份额、首期 1000 元折算、现金随净值波动），任一净值日持仓收益达止盈线即全仓赎回并重开新一轮（分红再投）；排行/统计/散点/详情共用同一费用口径，搜索栏或散点区可切换（不含费 / 含费·申购一折 / 含费·申购名义，赎回费各口径一致按持有天数阶梯收取）；排行/统计/散点共用同一基金类型口径，搜索栏或散点区可切换（默认仅权益类：股票型/偏股·灵活·平衡混合/股票指数/海外权益共 8 类，全市场可切回，债基·FOF·货币·偏债不在权益类内） · 统计卡为当前类型与在市口径全集分位，不随搜索与区间筛选变化 · 新基金（回测窗口 &lt;90 天）年化留空 · 「当前回撤」= 复权净值距历史最高的跌幅（日更顺带刷新），非在市基金无此数据；「甜蜜点」结论来自 2015~2026 权益基金 98 万起点历史模拟（-25~-30% 回撤起定投首轮止盈中位 582 天、成功率 63.2%、年化 32.0%，20% 止盈线含费口径） · 波动指标列（年化/下行波动率、最大回撤、夏普 + 波动率分位）为基金净值快照，全史口径（全部历史复权净值，2026-11-18 起由近1年改全史；复权日增长率、√252 年化、无风险利率 0，fund_risk_metrics 日更顺带刷新，样本不足 20 个收益为 —），与回测口径独立、不随费用/止盈点切换 · 「综合波动分位」= 全史年化波动率/下行波动率/最大回撤三项在全市场同类基金中的百分位排名等权平均（percent_rank，0~100%，越低越稳），日更顺带重算（三指标缺任一按可得项平均，全缺为 —） · 「震荡分位」= 全史净值 zigzag（±10% 确认反转）年均规则摆动轮数（频率 × 间隔均匀度）的横截面百分位，越高 = 净值越规律地上上下下 · 「止盈后收益率/止盈后年化」= 最近一次止盈日全仓赎回后重新开始定投的当前轮（进行中）总收益率与 XIRR（全史窗口口径，与「总收益率/年化·近10年」列不可直接对比；随费用口径与止盈点切换，轮次不足 90 天年化留空，全史从未止盈显示 —，日更回测顺带刷新）· 数据为离线回测快照，重跑 scripts/fund_dca_backtest.py 并经 app.dca_store 导入后刷新 · 点行或「详情」查看每轮止盈明细 · 止盈点切换（搜索栏按钮组或对比区块行/圆点）仅改排行/统计/明细数据源；定投方式切换（页面顶部「定投方式」按钮组：等额/等份额）联动排行/统计/对比卡/散点分箱/明细（散点固定 20% 止盈档；起点条件与熊市断缴两实验卡为等额固定快照） · 历史统计不构成任何操作建议</p>
+            <p class="note">口径：每月首个净值日买入（定投方式可切：等额=每期固定金额；等份额=每期固定份额、首期 1000 元折算、现金随净值波动），任一净值日持仓收益达止盈线即全仓赎回并重开新一轮（分红再投）；排行/统计/散点/对比/详情共用同一费用口径，页面顶部「费用口径」切换（不含费 / 含费·申购一折 / 含费·申购名义，赎回费各口径一致按持有天数阶梯收取）；排行/统计/散点/对比池共用同一基金类型口径，页面顶部「基金类型」切换（默认仅权益类：股票型/偏股·灵活·平衡混合/股票指数/海外权益共 8 类，全市场可切回，债基·FOF·货币·偏债不在权益类内；对比卡池在此基础上加 QDII-商品/商品） · 统计卡为当前类型与在市口径全集分位，不随搜索与区间筛选变化 · 新基金（回测窗口 &lt;90 天）年化留空 · 「当前回撤」= 复权净值距历史最高的跌幅（日更顺带刷新），非在市基金无此数据；「甜蜜点」结论来自 2015~2026 权益基金 98 万起点历史模拟（-25~-30% 回撤起定投首轮止盈中位 582 天、成功率 63.2%、年化 32.0%，20% 止盈线含费口径） · 波动指标列（年化/下行波动率、最大回撤、夏普 + 波动率分位）为基金净值快照，全史口径（全部历史复权净值，2026-11-18 起由近1年改全史；复权日增长率、√252 年化、无风险利率 0，fund_risk_metrics 日更顺带刷新，样本不足 20 个收益为 —），与回测口径独立、不随费用/止盈点切换 · 「综合波动分位」= 全史年化波动率/下行波动率/最大回撤三项在全市场同类基金中的百分位排名等权平均（percent_rank，0~100%，越低越稳），日更顺带重算（三指标缺任一按可得项平均，全缺为 —） · 「震荡分位」= 全史净值 zigzag（±10% 确认反转）年均规则摆动轮数（频率 × 间隔均匀度）的横截面百分位，越高 = 净值越规律地上上下下 · 「止盈后收益率/止盈后年化」= 最近一次止盈日全仓赎回后重新开始定投的当前轮（进行中）总收益率与 XIRR（全史窗口口径，与「总收益率/年化·近10年」列不可直接对比；随费用口径与止盈点切换，轮次不足 90 天年化留空，全史从未止盈显示 —，日更回测顺带刷新）· 数据为离线回测快照，重跑 scripts/fund_dca_backtest.py 并经 app.dca_store 导入后刷新 · 点行或「详情」查看每轮止盈明细 · 顶部总开关四组（定投方式/止盈点/基金类型/费用口径，2026-11-23 置顶）切换后排行/统计卡/对比卡/散点分箱/明细全部跟随（起点条件与熊市断缴两实验卡为等额口径固定快照） · 历史统计不构成任何操作建议</p>
 
 
             <!-- ===== 年限 × 规模 三维散点（每基金一点） + 分箱统计 ===== -->
             <div class="card" style="margin-top: 16px; padding: 14px 16px 18px">
               <div class="toolbar" style="margin: 0 0 6px">
                 <div>
-                  <h2 class="h1" style="font-size: 18px">年限 × 规模 × 年化 三维散点<span class="dc-hint" style="margin-left: 6px">{{ dcaModeLabel }} · 止盈 20% 档（随页面顶部定投方式切换）</span></h2>
+                  <h2 class="h1" style="font-size: 18px">年限 × 规模 × 年化 三维散点<span class="dc-hint" style="margin-left: 6px">{{ dcaModeLabel }} · 止盈 {{ dcaTpLabel(dcaTp) }}（随顶部总开关切换）</span></h2>
                   <p class="sub">每只在市基金一个点，落在自己的（运作年限，规模，年化）坐标上，不做任何分组重复计数 · 规模为对数轴 · 悬停点查看基金明细 · 统计截至 {{ dcaScatter?.ref_date || '—' }}</p>
                 </div>
                 <div class="toolbar-right">
                   <span v-if="dcaFeeLoading" class="sub" style="margin-right: 8px">重算中…</span>
-                  <div class="src-seg" :style="dcaFeeLoading ? 'opacity:.55' : ''">
-                    <button class="src-seg-btn"
-                            :class="{ active: dcaEquity }"
-                            @click="dcaEquity = true"
-                            data-scatter-cat="equity">仅权益类</button>
-                    <button class="src-seg-btn"
-                            :class="{ active: !dcaEquity }"
-                            @click="dcaEquity = false"
-                            data-scatter-cat="all">全市场</button>
-                  </div>
-                  <div class="src-seg" :style="dcaFeeLoading ? 'opacity:.55' : ''">
-                    <button v-for="o in DCA_FEE_OPTIONS" :key="o.key"
-                            class="src-seg-btn"
-                            :class="{ active: dcaFeeMode === o.key }"
-                            @click="dcaFeeMode = o.key"
-                            :data-fee="o.key">{{ o.label }}</button>
-                  </div>
+                  <!-- 类型/费用切换已上移页面顶部总开关行（三轮需求），此处只留加载态 -->
                 </div>
               </div>
               <div v-if="dcaScatter?.status === 'down'" class="browse-empty">

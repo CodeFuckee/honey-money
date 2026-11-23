@@ -362,17 +362,17 @@ class TestFundDcaPage:
         open_dca(page, frontend_port)
         concl = page.locator(".dca-conclusion")
         # 默认 含费·申购名义（保守上界）：徽标 + ≥10 年均值 6.8%
-        # （散点组按钮带 data-fee，与排行旁 data-table-fee 组区分开）
-        expect(page.locator(".src-seg:has(button[data-fee]) .src-seg-btn.active",
+        #（费用口径组已上移页面顶部总开关行，与排行共用 data-table-fee 钩子）
+        expect(page.locator(".src-seg:has(button[data-table-fee]) .src-seg-btn.active",
                             has_text="含费·申购名义")).to_have_count(1)
         expect(concl).to_contain_text("含费·申购名义 · 仅权益类 · 在市 3 只")
         expect(concl).to_contain_text("≥10 年 6.8%")
         # 切到 不含费：数值抬升
-        page.locator("button[data-fee='gross']").click()
+        page.locator("button[data-table-fee='gross']").click()
         expect(concl).to_contain_text("不含费 · 仅权益类 · 在市 3 只")
         expect(concl).to_contain_text("≥10 年 8.2%")
         # 切到 含费·申购一折：介于两者
-        page.locator("button[data-fee='disc']").click()
+        page.locator("button[data-table-fee='disc']").click()
         expect(concl).to_contain_text("含费·申购一折 · 仅权益类 · 在市 3 只")
         expect(concl).to_contain_text("≥10 年 7.4%")
 
@@ -417,8 +417,8 @@ class TestFundDcaPage:
         _, frontend_port = servers
         open_dca(page, frontend_port)
         concl = page.locator(".dca-conclusion")
-        page.locator("button[data-fee='gross']").click()
-        page.locator("button[data-fee='nom']").click()
+        page.locator("button[data-table-fee='gross']").click()
+        page.locator("button[data-table-fee='nom']").click()
         expect(concl).to_contain_text("含费·申购名义 · 仅权益类 · 在市 3 只")
         expect(concl).to_contain_text("≥10 年 6.8%")
         # 迟到的 gross 响应此时才到达 → 必须被 seq 守卫丢弃
@@ -731,16 +731,16 @@ class TestDcaEquityFilter:
         assert "fee=gross" in last and "equity=true" in last, last
 
     def test_scatter_badge_follows_equity(self, servers, page):
-        """E2E-423：散点结论徽标与散点区按钮随类型口径切换
-        （仅权益类 ↔ 全市场）。"""
+        """E2E-423：散点结论徽标随类型口径切换（仅权益类 ↔ 全市场）——
+        类型切换组已上移页面顶部总开关行（data-table-cat 钩子）。"""
         _, frontend_port = servers
         mock_dca_equity(page)
         open_dca(page, frontend_port)
         badge = page.locator(".dca-conclusion .dc-badge")
         expect(badge).to_contain_text("仅权益类")
-        page.locator('button[data-scatter-cat="all"]').click()
+        page.locator('button[data-table-cat="all"]').click()
         expect(badge).to_contain_text("全市场")
-        expect(page.locator('button[data-scatter-cat="all"]')
+        expect(page.locator('button[data-table-cat="all"]')
               ).to_have_class(re.compile("active"))
 
 # 用例表确认门说明：本功能在自主开发模式下进行，测试计划与用例表未单独

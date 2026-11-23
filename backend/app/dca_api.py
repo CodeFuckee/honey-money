@@ -437,18 +437,19 @@ def register_fund_dca_routes(app):
 
     @app.get("/api/funds/dca/scatter")
     def funds_dca_scatter(fee: str = "nom", equity: str = "true",
-                          method: str = "amount"):
+                          method: str = "amount", tp: str = "0.2"):
         """三维散点：每只在市基金一点 (运作年限, 规模亿, 年化) + 年限段 ×
         规模段分箱统计（每基金只计入唯一格子）。fee 选年化口径：
         gross=不含费 / disc=含费·申购一折 / nom=含费·申购名义（默认），
         非白名单值回落 nom；equity=true 默认仅权益类（false/其他=全市场）；
-        method 切定投方式（amount 等额旧表 / share 等份额走 tp 表固定 20%
-        档，白名单外回落 amount——2026-11-23 页面级 tab 联动）。
+        method/tp 跟随页面顶部总开关（定投方式/止盈点，白名单外各回落
+        amount/0.2——amount 且 20% 走旧表零回归，其余走 tp 表按档过滤）。
         降级约定同 /api/funds/dca。
         """
         return fetch_dca_scatter(config.DATABASE_URL, fee=fee.strip().lower(),
                                  equity=_parse_equity(equity),
-                                 method=_parse_method(method))
+                                 method=_parse_method(method),
+                                 tp=_parse_tp(tp.strip().lower()))
 
     @app.get("/api/funds/dca/tp")
     def funds_dca_tp(tp: str = "0.2", q: str = "", alive: str = "true",
@@ -644,27 +645,29 @@ def compute_bands(rows, ref):
 
 
 def fetch_dca_scatter(dsn: str, fee: str = "nom", equity: bool = True,
-                      method: str = "amount") -> dict:
+                      method: str = "amount", tp: float = TAKE_PROFIT) -> dict:
     """三维散点数据：每只在市基金一点 (运作年限, 规模亿, 年化) + 分箱统计。
 
     fee 选择年化口径：gross=不含费 / disc=含费·申购一折 / nom=含费·申购名义
     （赎回费三口径一致收取）；equity=True（默认）仅权益类白名单；
-    method 切定投方式（DCA_METHODS，2026-11-23 需求：切换后散点/分箱跟随
-    页面级 tab）——amount 走旧表 fund_dca_result（零回归），share 走
-    fund_dca_tp_result 固定 tp=0.2 档（散点不随止盈点切换的既有约定保留）。
-    响应带 fee / method / equity 回显。点数组
+    method 切定投方式、tp 切止盈档（均跟随页面顶部总开关，2026-11-23 三轮
+    需求：切换后散点/分箱跟随）——amount 且 tp=0.2（缺省）走旧表
+    fund_dca_result（零回归），其余组合走 fund_dca_tp_result 按 tp+method
+    过滤。响应带 fee / method / tp / equity 回显。点数组
     [age, scale, xirr, code, name, fund_type]，规模取对数轴定位由前端处理；
     降级约定同 /api/funds/dca。
     """
     xirr_col = _FEE_XIRR_COL.get(fee, "w10_xirr_nom")
     method_val = method if method in DCA_METHODS else "amount"
+    tp_val = next((t for t in TP_THRESHOLDS if abs(tp - t) < 1e-9),
+                  TAKE_PROFIT)
 
     def run():
         with psycopg.connect(dsn, connect_timeout=3) as conn:
             with conn.cursor() as cur:
                 cur.execute(_DCA_REF_SQL)
                 ref = cur.fetchone()[0]
-                if method_val == "amount":
+                if method_val == "amount" and tp_val == TAKE_PROFIT:
                     sql = (f"SELECT code, name, fund_type, scale_yi, "
                            f"full_start, {xirr_col}, w10_rounds, full_end "
                            f"FROM fund_dca_result "
@@ -681,7 +684,7 @@ def fetch_dca_scatter(dsn: str, fee: str = "nom", equity: bool = True,
                            f"WHERE alive AND tp = %s AND method = %s "
                            f"AND {xirr_col} IS NOT NULL "
                            f"AND full_start IS NOT NULL AND scale_yi IS NOT NULL")
-                    params = [TAKE_PROFIT, method_val]
+                    params = [tp_val, method_val]
                     if equity:
                         sql += " AND fund_type = ANY(%s)"
                         params.append(list(EQUITY_TYPES))
@@ -696,11 +699,12 @@ def fetch_dca_scatter(dsn: str, fee: str = "nom", equity: bool = True,
             [(scale, full_start, xirr, rounds)
              for _, _, _, scale, full_start, xirr, rounds, _fe in rows], ref)
         return {"status": "up", "fee": fee if fee in _FEE_XIRR_COL else "nom",
-                "method": method_val, "equity": bool(equity),
+                "method": method_val, "tp": tp_val, "equity": bool(equity),
                 "ref_date": ref.isoformat() if ref else None,
                 "points": points, **bands}
     return _safe(run, {"status": "down", "detail": "pg unreachable",
-                       "method": method_val, "equity": bool(equity),
+                       "method": method_val, "tp": tp_val,
+                       "equity": bool(equity),
                        "points": [],
                        "age_bands": [], "scale_bands": [], "matrix": []})
 

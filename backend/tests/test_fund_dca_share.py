@@ -538,3 +538,42 @@ class TestShareScatter:
         assert resp.status_code == 200
         body = resp.json()
         assert body["status"] == "down" and body.get("method") == "share"
+
+    def test_scatter_follows_tp(self, client, monkeypatch):
+        """散点跟随止盈点（三轮需求）：非 20% 档（任意 method）走 tp 表
+        且 tp/method 参数真传；amount+20%（缺省/乱值回落）仍走旧表。"""
+        import app.dca_api as dca_mod
+        conn = FakeConnOne((None,), rows=[])
+        _patch_connect(monkeypatch, dca_mod, conn)
+        resp = client.get("/api/funds/dca/scatter",
+                          params={"tp": "0.25", "method": "amount"})
+        assert resp.json()["tp"] == 0.25
+        main = [s for s in conn.executed if s.startswith("SELECT code,")][-1]
+        assert "FROM fund_dca_tp_result" in main
+        assert any(0.25 in (p or ()) for p in conn.params), conn.params
+
+        conn2 = FakeConnOne((None,), rows=[])
+        _patch_connect(monkeypatch, dca_mod, conn2)
+        client.get("/api/funds/dca/scatter", params={"tp": "0.15"})
+        main2 = [s for s in conn2.executed if s.startswith("SELECT code,")][-1]
+        assert "FROM fund_dca_tp_result" in main2
+        assert any(0.15 in (p or ()) for p in conn2.params), conn2.params
+
+    def test_scatter_tp_fallback_keeps_legacy(self, client, monkeypatch):
+        """乱值 tp 回落 0.2：amount → 旧表；share → tp 表 0.2 档。"""
+        import app.dca_api as dca_mod
+        conn = FakeConnOne((None,), rows=[])
+        _patch_connect(monkeypatch, dca_mod, conn)
+        resp = client.get("/api/funds/dca/scatter", params={"tp": "0.99"})
+        assert resp.json()["tp"] == 0.2
+        main = [s for s in conn.executed if s.startswith("SELECT code,")][-1]
+        assert "FROM fund_dca_result" in main and "tp = %s" not in main
+
+        conn2 = FakeConnOne((None,), rows=[])
+        _patch_connect(monkeypatch, dca_mod, conn2)
+        client.get("/api/funds/dca/scatter",
+                   params={"tp": "abc", "method": "share"})
+        main2 = [s for s in conn2.executed if s.startswith("SELECT code,")][-1]
+        assert "FROM fund_dca_tp_result" in main2 and "tp = %s" in main2
+        assert any(0.2 in (p or ()) and "share" in (p or ())
+                   for p in conn2.params), conn2.params

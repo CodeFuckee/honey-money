@@ -162,7 +162,7 @@ class TestDcaCurrentRound:
         """E2E-446：切「不含费」→ 两列取原列（+12.0% / +45.0%）。"""
         _, frontend_port = servers
         open_dca(page, frontend_port)
-        page.locator("[data-fee='gross']").first.click()
+        page.locator("[data-table-fee='gross']").first.click()
         row = page.locator(".browse-pv tbody tr", has_text="019387")
         expect(row).to_contain_text("+12.0%")
         expect(row).to_contain_text("+45.0%")
