@@ -28,9 +28,10 @@ ap = argparse.ArgumentParser(description="非等额定投方式样本回填（�
 ap.add_argument("--dsn", default=DSN)
 ap.add_argument("--limit", type=int, default=400, help="样本基金数")
 ap.add_argument("--method", default="share",
-                choices=["share", "dd_ladder", "dd_ladder_deep"],
+                choices=["share", "dd_ladder", "dd_ladder_deep",
+                         "profit_dd_ladder"],
                 help="定投方式（share 等份额 / dd_ladder 回撤梯度加码 / "
-                     "dd_ladder_deep 深回撤加码）")
+                     "dd_ladder_deep 深回撤加码 / profit_dd_ladder 浮盈阶梯）")
 args = ap.parse_args()
 
 with psycopg.connect(args.dsn, connect_timeout=10) as conn:

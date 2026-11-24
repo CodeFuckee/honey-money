@@ -450,6 +450,7 @@ const DCA_MODE_OPTIONS = [
   { key: 'share', label: '等份额定投' },
   { key: 'dd_ladder', label: '回撤加码' },
   { key: 'dd_ladder_deep', label: '深回撤加码' },
+  { key: 'profit_dd_ladder', label: '浮盈阶梯' },
 ]
 // 定投方式说明（2026-11-23 五轮：? 图标点击弹出全部说明；悬停按钮 title
 // 显示对应方式详情）——brief 是面板里的一句话定位，detail 是完整口径
@@ -473,6 +474,11 @@ const DCA_MODE_HELP = {
     title: '深回撤加码',
     brief: '跌得更深才加码',
     detail: '每月基础 1000 元，买入日较历史最高回撤 ≥20% 投 1.5 倍、≥30% 投 2 倍（余者 1 倍）——比「回撤加码」更保守的梯度：浅跌（-10%~-20%）不追投，只在深熊出手，回撤期现金压力更小、加码次数更少。分档加倍状态机与「回撤加码」完全共用，仅档位阈值更深。',
+  },
+  profit_dd_ladder: {
+    title: '浮盈阶梯',
+    brief: '浮盈少买、深跌加倍',
+    detail: '每月基础 1000 元，按当轮持仓浮盈调节：浮盈 ≥10% 投 0.5 倍、≥20% 投 0.25 倍（浮盈档优先）——涨得越多买得越少、高位少囤筹码；浮盈不足 10% 时落深回撤档：较历史最高回撤 ≥20% 投 1.5 倍、≥30% 投 2 倍，余者 1 倍。止盈清算后新一轮首期按回撤档重新起步。贵时少买、深跌加码的双向调节。',
   },
 }
 const dcaModeHelpShow = ref(false)
@@ -3102,7 +3108,7 @@ watch(
                  定投方式/止盈点/基金类型/费用口径——切换后下方所有统计跟随
                  （统计卡/止盈点对比/排行表/散点分箱/详情弹窗；弹窗内另有局部
                  止盈点/费率 tab 属明细级控件）。定投方式组带 ? 图标：点击弹出
-                 四种方式完整说明，悬停各按钮 title 显示对应方式详情。
+                 五种方式完整说明，悬停各按钮 title 显示对应方式详情。
                  起点条件/熊市断缴两实验卡为等额固定快照不随切（标题已标注）；
                  静态模式无多阈值/方式维度，对应组隐藏（类型/费用仍可用——客户端切换） ===== -->
             <div class="dca-filter-row dca-filter-segs" style="margin: 0 0 14px">
@@ -3119,7 +3125,7 @@ watch(
                 <button class="mode-help-btn" @click="dcaModeHelpShow = !dcaModeHelpShow"
                         :class="{ active: dcaModeHelpShow }"
                         data-mode-help aria-label="定投方式说明"
-                        title="查看四种定投方式的完整说明">?</button>
+                        title="查看五种定投方式的完整说明">?</button>
                 <div v-if="dcaModeHelpShow" class="mode-help-pop" data-mode-help-pop>
                   <div v-for="o in DCA_MODE_OPTIONS" :key="o.key" class="mode-help-item">
                     <b>{{ DCA_MODE_HELP[o.key].title }}</b>

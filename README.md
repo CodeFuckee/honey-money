@@ -19,9 +19,11 @@ backend/            Python 后端（FastAPI）
   app/task_store.py   爬虫任务持久化（crawl_task 表 CRUD + 预置任务播种）
   app/scheduler.py    进程内任务调度器（每日到点/启动补跑/全局串行/advisory lock 互斥）
   app/tasks_api.py    任务管理 API（CRUD/触发/取消/停止/历史）
-  app/dca_backtest.py 定投回测核心（脚本与调度器日更共用；定投方式两档
-                      DCA_METHODS：amount 等额 / share 等份额——止盈状态机
-                      共用，日更双 method 计算）
+  app/dca_backtest.py 定投回测核心（脚本与调度器日更共用；定投方式五档
+                      DCA_METHODS：amount 等额 / share 等份额 /
+                      dd_ladder 回撤加码 / dd_ladder_deep 深回撤加码 /
+                      profit_dd_ladder 浮盈阶梯（浮盈档优先+深撤加码）
+                      ——止盈状态机共用，日更按 method 全量计算）
   app/risk_metrics.py 基金风险/波动指标纯函数（年化/下行波动率、最大回撤、
                       夏普、60 日滚动波动率及历史分位；复权口径 √252 年化；
                       定投日更顺带全量重算落 fund_risk_metrics）
@@ -33,7 +35,8 @@ backend/            Python 后端（FastAPI）
   app/dca_store.py    定投止盈回测快照存储（fund_dca_result / fund_dca_meta 两表 +
                       fund_dca_tp_result / fund_dca_tp_rounds / fund_dca_tp_meta
                       多阈值三表（5%~40% 八档 × 定投方式 method 维度
-                      （amount 等额/share 等份额，2026-11-23，与旧表同构 +
+                      （五档 amount/share/dd_ladder/dd_ladder_deep/
+                      profit_dd_ladder，2026-11-23~24，与旧表同构 +
                       tp/method 维度，存量表 ALTER 就地迁移））+
                       fund_dip_timing 时机表（当前回撤/距前高/回撤桶，日更顺带刷新）+
                       fund_risk_metrics 波动指标表（近1/3/5年与全史四窗口，日更顺带刷新）+
@@ -92,10 +95,14 @@ frontend/           Vue3 + Vite 前端
                       离线回测排行：顶部四组口径总开关（2026-11-23 三轮：
                       定投方式/止盈点 5%~40%/基金类型/费用口径全部置页面
                       最前，切换后统计卡/止盈点对比/排行/散点分箱/详情弹窗
-                      全部跟随；定投方式三档 2026-11-23 四轮：等额/等份额
+                      全部跟随；定投方式五档：等额/等份额
                       （每期固定到手份额、现金随净值波动）/回撤加码
-                      （dd_ladder：买入日回撤 ≥10% 投 1.5×、≥20% 投 2×），
-                      ? 图标点击弹出三方式完整说明、悬停按钮看对应详情；
+                      （dd_ladder：买入日回撤 ≥10% 投 1.5×、≥20% 投 2×）/
+                      深回撤加码（dd_ladder_deep：回撤 ≥20% 投 1.5×、
+                      ≥30% 投 2×，浅跌不追投）/浮盈阶梯（profit_dd_ladder：
+                      当轮浮盈 ≥10% 投 0.5×、≥20% 投 0.25× 浮盈档优先，
+                      未触发落深回撤档——贵时少买深跌加码），
+                      ? 图标点击弹出五种方式完整说明、悬停按钮看对应详情；
                       口径副标题已删，?mode= 深链接）+「止盈点对比」
                       市场级区块（八档中位/均值年化、正收益占比、止盈成功率、
                       平均轮次与间隔 + SVG 折线，权益类+商品池，点击行/圆点

@@ -51,7 +51,8 @@ TP_THRESHOLDS = (0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40)
 # 份额 = AMOUNT/窗口首日复权净值，首期恰好 1000 元——涨时现金花得多、
 # 跌时花得少，成本摊平效果最差的反面基准；含费为外扣法对偶：现金 =
 # 份额×净值×(1+申购费率)）。API method 白名单与前端 tab 共用此事实源。
-DCA_METHODS = ("amount", "share", "dd_ladder", "dd_ladder_deep")
+DCA_METHODS = ("amount", "share", "dd_ladder", "dd_ladder_deep",
+               "profit_dd_ladder")
 # 回撤梯度加码（dd_ladder，2026-11-23 四轮）：月度买入日按当日回撤分档加倍
 # ——回撤 = adj/历史最高（含当日）- 1，因果无前视；取满足 回撤 ≤ 阈值 的
 # 最深一档的倍数（reversed 依序匹配，都不中为 1×——浅档在前直接 next 会
@@ -65,8 +66,17 @@ DD_LADDER = ((-0.10, 1.5), (-0.20, 2.0))
 # 费用/止盈与 dd_ladder 完全共用，仅档位表不同。
 DD_LADDER_DEEP = ((-0.20, 1.5), (-0.30, 2.0))
 # method → 梯度表（simulate_multi 按此分派；新增梯度方式即扩此映射 +
-# DCA_METHODS + 白名单测试钉值）
-DD_LADDERS = {"dd_ladder": DD_LADDER, "dd_ladder_deep": DD_LADDER_DEEP}
+# DCA_METHODS + 白名单测试钉值）。profit_dd_ladder 的回撤半边复用深梯度表。
+DD_LADDERS = {"dd_ladder": DD_LADDER, "dd_ladder_deep": DD_LADDER_DEEP,
+              "profit_dd_ladder": DD_LADDER_DEEP}
+# 浮盈阶梯（profit_dd_ladder，2026-11-24 七轮用户定案）：贵时少买、深跌
+# 加码的双向调节——当轮浮盈（= 持仓市值/已投入 - 1，与止盈触发线同口径）
+# ≥10% 投 0.5×、≥20% 投 0.25×（浮盈档优先，取满足条件的最高浮盈档，
+# 与回撤 ≤ 取最深档方向相反）；未触发浮盈档落回撤档（深梯度表
+# ≥20% → 1.5×、≥30% → 2×），余者 1×。新轮首买 invested=0 浮盈无定义
+# → 直接看回撤档；止盈清算即重置，浮盈档随轮次呼吸。
+PROFIT_LADDER = ((0.10, 0.5), (0.20, 0.25))
+PROFIT_LADDERS = {"profit_dd_ladder": PROFIT_LADDER}
 
 
 # ===== 费用模型（典型档位近似，见模块 docstring） =====
@@ -263,7 +273,11 @@ def simulate_multi(dates: pd.DatetimeIndex, adj: np.ndarray,
     - dd_ladder（回撤梯度加码）：每期现金 = AMOUNT×档位倍数（DD_LADDER，
       按买入日回撤 = adj/历史最高（含当日）-1 分档），invested 每期可变；
     - dd_ladder_deep（深回撤加码）：同 dd_ladder 换深梯度表（DD_LADDER_DEEP，
-      ≥20% → 1.5×、≥30% → 2×），invested 每期可变。
+      ≥20% → 1.5×、≥30% → 2×），invested 每期可变；
+    - profit_dd_ladder（浮盈阶梯）：浮盈档优先——当轮浮盈 = 持仓市值/
+      已投入 - 1（与止盈触发线同口径）≥10% → 0.5×、≥20% → 0.25×；
+      未触发浮盈档落深梯度回撤档（≥20% → 1.5×、≥30% → 2×），余者 1×。
+      新轮首买 invested=0 浮盈无定义直接看回撤档，invested 每期可变。
     """
     if method not in DCA_METHODS:
         raise ValueError(f"unknown dca method: {method!r}")
@@ -271,6 +285,7 @@ def simulate_multi(dates: pd.DatetimeIndex, adj: np.ndarray,
     # 无前视——adj[0] 即首个月度买入价）
     unit_shares = AMOUNT / adj[0]
     ladder = DD_LADDERS.get(method)   # 梯度加码方式的档位表（amount/share 为 None）
+    pr_ladder = PROFIT_LADDERS.get(method)   # 浮盈阶梯档位表（仅 profit_dd_ladder）
     states = [_new_tp_state(tp) for tp in take_profits]
     months = dates.to_numpy().astype("datetime64[M]")
     peak = -np.inf          # dd_ladder 用：历史最高（含当日）的运行峰值
@@ -291,8 +306,18 @@ def simulate_multi(dates: pd.DatetimeIndex, adj: np.ndarray,
                     sh = unit_shares
                     sub_fee = 0.0 if fee is None else cash - sh * a
                 else:
-                    mult = (next((mv for th, mv in reversed(ladder)
-                                  if dd <= th), 1.0) if ladder else 1.0)
+                    # 浮盈档优先（profit_dd_ladder）：当轮浮盈 = 市值/已投入
+                    # - 1（与止盈触发线同口径）取最高浮盈档；invested=0 新轮
+                    # 首买浮盈无定义、或浮盈未触发 → 落回撤档（其余方式
+                    # pr_ladder 为 None，行为与原回撤分派逐位一致）
+                    mult = None
+                    if pr_ladder and st["invested"] > 0:
+                        pr = st["basis_units"] * a / st["invested"] - 1.0
+                        mult = next((mv for th, mv in reversed(pr_ladder)
+                                     if pr >= th), None)
+                    if mult is None:
+                        mult = (next((mv for th, mv in reversed(ladder)
+                                      if dd <= th), 1.0) if ladder else 1.0)
                     cash = AMOUNT * mult
                     net_amount = (cash if fee is None
                                   else cash / (1.0 + fee.sub_rate))
@@ -346,7 +371,8 @@ def simulate(dates: pd.DatetimeIndex, adj: np.ndarray,
     （净申购 = 金额/(1+费率)，投入现金流仍记全额），止盈/期末清算的
     回款现金流为扣赎回费后净额。止盈触发线按市值口径（持仓市值/已投入
     -1 ≥ take_profit 即全仓赎回并开启新一轮），与用户在 APP 里看到的
-    一致。method 选定投方式（amount/share/dd_ladder/dd_ladder_deep，口径见
+    一致。method 选定投方式（amount/share/dd_ladder/dd_ladder_deep/
+    profit_dd_ladder，口径见
     simulate_multi 与 DCA_METHODS 注释）。实现为 simulate_multi 单档
     委托，行为逐字段一致。
 

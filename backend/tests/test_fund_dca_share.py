@@ -48,11 +48,11 @@ def _three_month_nav(final_scale: float):
 class TestSimulateShare:
     def test_methods_pin_values(self):
         """定投方式口径锚定：等额 amount / 等份额 share（2026-11-23 定案）；
-        四轮追加 dd_ladder、五轮追加 dd_ladder_deep（见
+        四轮追加 dd_ladder、六轮 dd_ladder_deep、七轮 profit_dd_ladder（见
         test_fund_dca_dd_ladder.py）。"""
         from app.dca_backtest import DCA_METHODS
         assert DCA_METHODS == ("amount", "share", "dd_ladder",
-                               "dd_ladder_deep")
+                               "dd_ladder_deep", "profit_dd_ladder")
 
     def test_amount_method_equals_default(self):
         """method='amount' 与缺省调用逐字段一致（等额行为零回归锚）。"""
@@ -505,7 +505,8 @@ class TestShareRoutes:
         import app.dca_api as dca_mod
         from app.dca_backtest import DCA_METHODS
         assert dca_mod.DCA_METHODS == DCA_METHODS == \
-            ("amount", "share", "dd_ladder", "dd_ladder_deep")
+            ("amount", "share", "dd_ladder", "dd_ladder_deep",
+             "profit_dd_ladder")
 
 
 class TestShareScatter:
