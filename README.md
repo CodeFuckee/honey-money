@@ -23,7 +23,12 @@ backend/            Python 后端（FastAPI）
                       DCA_METHODS：amount 等额 / share 等份额 /
                       dd_ladder 回撤加码 / dd_ladder_deep 深回撤加码 /
                       profit_dd_ladder 浮盈阶梯（浮盈档优先+深撤加码）
-                      ——止盈状态机共用，日更按 method 全量计算）
+                      ——止盈状态机共用，日更按 method 全量计算；
+                      脏检测日更 run_full_backtest_tp_dirty：逐基金输入
+                      指纹（nav 聚合+basic+scale）比对，只重算有变基金，
+                      周末/节假日零更新夜仅刷派生列；引擎版本串 =
+                      ENGINE_VERSION_BASE+常量哈希（改方法/阈值/费率/
+                      设置页口径自动全量），BACKTEST_FORCE_FULL=1 强制全量）
   app/risk_metrics.py 基金风险/波动指标纯函数（年化/下行波动率、最大回撤、
                       夏普、60 日滚动波动率及历史分位；复权口径 √252 年化；
                       定投日更顺带全量重算落 fund_risk_metrics）
@@ -40,6 +45,9 @@ backend/            Python 后端（FastAPI）
                       tp/method 维度，存量表 ALTER 就地迁移））+
                       fund_dip_timing 时机表（当前回撤/距前高/回撤桶，日更顺带刷新）+
                       fund_risk_metrics 波动指标表（近1/3/5年与全史四窗口，日更顺带刷新）+
+                      fund_dca_fp 基金输入指纹表（脏检测日更：merge_* 按 code
+                      范围替换、未变基金行保留；alive 全表刷新/时机死行清理/
+                      分位回填集合 SQL）+
                       fund_dip_validation 起点条件验证表 / fund_bear_pause_fund
                       · _market · _meta 断缴实验三表（离线脚本导入，重跑整表替换）；
                       python -m app.dca_store <csv> 导入 scripts 离线回测产物，幂等）
@@ -66,6 +74,15 @@ backend/            Python 后端（FastAPI）
                       /api/funds/dca/pause-experiment（熊市断缴实验市场级：
                       子样本×口径 A/B/C/D 配对统计 + meta + 案例基金）+
                       /api/funds/dca/bear-pause/{code}（单基金四组对照）
+  app/settings_store.py 应用级键值设置（app_settings 表，key/value/updated_at，
+                      启动兜底建表；当前唯一设置项 backtest_min_span_days=
+                      回测年化运作期限下限，整数 90~3650 默认 90 不可关闭，
+                      修改后下一次回测生效——日更编排与样本回填脚本启动时
+                      读取，参数化引擎 MIN_SPAN_DAYS 两处判定：全窗口年化与
+                      止盈后当前轮年化）
+  app/settings_api.py 设置 API：GET /api/settings（设置全集，PG 不可达降级
+                      status=down）+ PUT /api/settings/backtest-min-span
+                      （非法值 400 带 detail；库不可达降级 200/down）
   app/bear_pause.py   熊市断缴实验引擎（bear_state 迟滞带熊市态
                       （回撤 ≤-20% 进入 / >-10% 恢复）+ A 坚持定投/
                       B 断缴闲置/C 断缴补投/D 熊市加倍四组模拟 + 市场级
@@ -201,6 +218,11 @@ frontend/           Vue3 + Vite 前端
                       1997/2001 两危机仅上证线并注明；危机区间与事件为
                       人工知识硬编码（backend/app/market_crises.py CRISES，
                       scratch/crises_verify.py 可复核））；
+                      「设置」顶级页（/settings，侧栏第 6 项：应用级设置——
+                      回测年化运作期限下限（天）数字输入 + 保存，非法值
+                      前端拦截/后端 400、保存成功提示「下一次回测生效」；
+                      定投回测页口径文案（回测窗口/轮次不足 N 天年化留空）
+                      动态绑定该设置值）；
                       教学页六大经典回测策略（vectorbt 引擎，撮合模式可切换
                       对比未来函数，净值对照买入持有）+ 单股/批量/全市场
                       三模式分段切换 + 🌐 全量回测（同策略全市场后台任务：

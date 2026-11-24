@@ -19,6 +19,7 @@ import psycopg
 sys.path.insert(0, "backend")
 
 from app import dca_backtest                      # noqa: E402
+from app import settings_store                    # noqa: E402
 from app.dca_store import (_TP_INSERT, _TP_UPSERT_ROUND, _TP_COLS,  # noqa: E402
                            _TP_ROUNDS_COLS, ensure_tp_schema)
 
@@ -45,10 +46,13 @@ with psycopg.connect(args.dsn, connect_timeout=10) as conn:
     basic = dca_backtest._load_basic(conn, codes)
     scale_map = dca_backtest._load_scale(conn)
     nav = dca_backtest._load_nav(conn, codes)
-print(f"净值行：{len(nav):,}", flush=True)
+    # 年化运作期限下限随设置页（缺省 90；修改后下一次回放生效）
+    min_span_days = settings_store.get_min_span_days(
+        conn, default=dca_backtest.MIN_SPAN_DAYS)
+print(f"净值行：{len(nav):,}；运作期限下限：{min_span_days} 天", flush=True)
 
 rows, rounds_rows = dca_backtest.run_backtest_tp(
-    nav, basic, scale_map, method=args.method,
+    nav, basic, scale_map, method=args.method, min_span_days=min_span_days,
     # 进度日志带 flush=True 关键字（dca_backtest 452/553），log 契约是
     # print 兼容 callable——单参数 lambda 在样本 ≥1000 只时 TypeError
     # （n_funds % 1000 触发点，2026-11-23 全量回放踩出）

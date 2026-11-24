@@ -6,6 +6,61 @@
 ## [Unreleased]
 
 ### Added
+- **定投日更脏检测——基金级输入指纹，周末/零更新夜从小时级降到分钟级
+  （2026-11-24）**：日更回测（5 方法 × 8 阈值全市场，本机实测 ~6h）改为
+  `run_full_backtest_tp_dirty` 逐基金比对「输入指纹」——指纹 = nav 聚合
+  （行数/首末净值日/三列 `::numeric` 精确和，数据源回头修正历史净值也能
+  抓住）+ fund_basic（名称→C 类判定/类型→费率档/退市标记）+ fund_scale
+  （规模季度更新），一条 GROUP BY 在 PG 侧聚合不拉明细；指纹没变的基金
+  复用库中已有结果行，只重算有变基金。口径安全性锚定：复权链
+  `cumprod(日增长率)` 逐行只依赖当天与前一天，追加新净值不改写历史复权点
+  → 未变基金的全部结果行（含已关闭轮次）可安全复用。① 引擎：指纹 SQL
+  `load_input_fingerprints` + 纯函数 `compute_dirty`（首跑/引擎变 → 全量）
+  + 引擎版本串 `engine_version()` = `ENGINE_VERSION_BASE`（改算法逻辑手动
+  bump）+ 计算常量哈希（方法清单/止盈档位/费率表/回撤梯度/浮盈阶梯调用时
+  取全局，改即自动全量）+ 设置页 `min_span_days` 作 extra 纳入（DB 运行时
+  配置不进代码常量，显式透传防脏数据）；`_timing_risk_rows` 从
+  `run_full_backtest_tp` 抽出两路共用，旧编排零行为变化。② 存储：新表
+  `fund_dca_fp`（挂启动清单）+ `merge_rows/merge_rounds/merge_tp_rows/
+  merge_tp_rounds` 按 code 范围替换（间隔聚合范围化变体，绝不全表 RESET
+  ——未变基金的间隔列保留，先例 dca_share_sample）+ `refresh_alive` 全表
+  集合刷新（45 天窗口推进时跳过基金也翻转，活→死单向）+ `merge_timing`
+  （死行 NOT EXISTS 清理 + 保留行时间戳统一刷）+ `merge_risk`（范围替换后
+  重跑 `_RISK_SCORE_BACKFILL` 横截面回填，分位恒全样本一致）+
+  `replace_fingerprints`；调度器切 merge 序列（单事务性质保持），meta
+  fund_count 显式传全市场基金数，日志/params 增补 engine 与重算/跳过/清理
+  计数；`BACKTEST_FORCE_FULL=1` 强制全量（清空 fund_dca_fp 同效）。
+  ③ 行为：周末/节假日零更新夜 dirty=∅ → 零计算仅刷派生列，分钟级；
+  工作日约九成基金有新净值重算（省 ~10-30%）；all_end 取全市场指纹
+  max(末净值日)（排除单行基金，与旧口径 max(full_end) 逐位一致）。
+  ④ 测试：+25 单测（引擎版本确定性/extra/常量敏感、compute_dirty 五情形、
+  指纹表读写 round-trip、merge 系列 SQL 序列与范围化断言、alive 刷新/
+  时机清理/回填必执行、编排器周末快路径零加载/部分重算只喂脏基金/引擎变
+  全量/FORCE_FULL）+ 全量 E2E 无回归；README 结构说明同步。
+- **应用设置页 + 回测运作期限下限可配置（2026-11-24）**：新增顶级「设置」页
+  （/settings，侧栏第 6 项），可配置回测年化的基金运作期限下限
+  `backtest_min_span_days`——参数化引擎常量 MIN_SPAN_DAYS 的两处判定
+  （全窗口年化 + 止盈后当前轮年化，同值联动），背景是当日「+20 只次新基金
+  87 天 <90 天线年化置空、统计卡在市数 15,024 vs 15,004」事件让
+  MIN_SPAN_DAYS 首次浮出为用户可见口径（90 天线与净值披露滞后的完整排查
+  见知识库）。① 存储：`app_settings` 键值表（key/value/updated_at，启动
+  兜底建表独立失败域）；② 引擎：`simulate_multi`/`simulate`/
+  `run_backtest`/`run_backtest_tp` 全链 `min_span_days` 参数化（缺省 None
+  → 晚绑定读模块常量，既有 monkeypatch 测试零改动）；日更编排
+  `run_full_backtest_tp` 与样本回填脚本启动时读设置一次、整轮统一，读
+  失败记日志回落 90 天不崩（批量韧性）。③ API：`GET /api/settings`（PG
+  不可达降级 200/down）+ `PUT /api/settings/backtest-min-span`（整数
+  90~3650、默认 90、不可关闭；非法值 400 带 detail；用户定案四口径：两处
+  统一/下次回测生效/90~3650/独立顶级页）。④ 前端：设置页数字输入+保存
+  （非法值前端拦截不发包——E2E 抓出 `Number('')=0` 绕过守卫缺口并修复），
+  定投回测页口径文案（回测窗口/轮次不足 N 天年化留空）动态绑定设置值；
+  顶级导航计数 5→6 + **侧栏布局修复**：第 6 项顶破视口后 flex 收缩曾把
+  数据源行 32px 压成 30.4px（像素断言抓出）——侧栏改纵向滚动+子项禁止
+  收缩，行高恢复设计值。⑤ 测试：+45 单测（store DDL/缺行/坏值回退/校验
+  边界、引擎 span 边界 87/88/90 与参数解锁/锁定、cur_xirr 联动、
+  run_backtest_tp 透传、monkeypatch 兼容、日更读设置下传、路由 up/down/
+  400 参数化）+3 E2E（E2E-471 主流程 PUT 契约、E2E-472 非法值双路径、
+  E2E-473 深链+down 占位；编号避让并行会话金融危机史页的 464~470）。
 - **金融危机史页（/data/crises，2026-11-24 八轮）**：历史上七次金融危机
   期间 A 股的表现——1997 亚洲金融危机（-30.6%）、2001 国有股减持熊市
   （-54.9%）、2008 全球金融危机（-72.0%，6124 至今未收复）、2015-16 股灾

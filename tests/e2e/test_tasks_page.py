@@ -85,11 +85,11 @@ def card(page, name):
 
 class TestNavAndDegraded:
     def test_nav_has_tasks_entry(self, servers, page):
-        """E2E-110 回归：侧栏五项且「任务」可进入任务页。"""
+        """E2E-110 回归：侧栏六项且「任务」可进入任务页。"""
         _, frontend_port = servers
         page.goto(f"http://127.0.0.1:{frontend_port}/")
         nav = page.locator(".sidebar .nav-item")
-        expect(nav).to_have_count(5)
+        expect(nav).to_have_count(6)
         expect(nav.filter(has_text="任务")).to_contain_text("任务")
         page.get_by_role("button", name="任务").click()
         expect(page.get_by_role("heading", name="爬虫任务")).to_be_visible()

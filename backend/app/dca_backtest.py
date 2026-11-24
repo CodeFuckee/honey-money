@@ -38,6 +38,7 @@ import psycopg
 from scipy.optimize import brentq
 
 from .risk_metrics import compute_risk_metrics, risk_row
+from . import settings_store
 
 AMOUNT = 1000.0
 TAKE_PROFIT = 0.20
@@ -211,8 +212,13 @@ def _new_tp_state(tp: float) -> dict:
 
 
 def _finalize_tp_state(st: dict, dates: pd.DatetimeIndex, adj: np.ndarray,
-                       fee: FeeSchedule | None) -> dict:
-    """期末清算 + 结果组装（与原 simulate 尾部逐字段一致）。"""
+                       fee: FeeSchedule | None,
+                       min_span_days: int | None = None) -> dict:
+    """期末清算 + 结果组装（与原 simulate 尾部逐字段一致）。
+
+    min_span_days：年化运作期限下限（天），None=读模块常量 MIN_SPAN_DAYS
+    （晚绑定，monkeypatch 兼容）；同时管全窗口年化与止盈后当前轮年化。
+    """
     if st["basis_units"] > 0:
         end_value = _net_redeem(st["lots"], dates, len(dates) - 1, adj[-1], fee)
         st["flows"].append((dates[-1], end_value))
@@ -222,6 +228,8 @@ def _finalize_tp_state(st: dict, dates: pd.DatetimeIndex, adj: np.ndarray,
     profit = (st["realized"] + (end_value - st["invested"])
               if st["basis_units"] > 0 else st["realized"])
     span = (dates[-1] - dates[0]).days
+    if min_span_days is None:
+        min_span_days = MIN_SPAN_DAYS
     # 「最近一次止盈后」当前轮（进行中，2026-11-19 用户需求）：止盈重新
     # 开始定投至窗口末日的收益。rounds=0 时前提不存在 → 全 None；
     # end_value 即当前轮期末市值（净赎回口径，与窗口 profit_rate 一致）
@@ -234,7 +242,7 @@ def _finalize_tp_state(st: dict, dates: pd.DatetimeIndex, adj: np.ndarray,
             cur_flows = [(d, a) for d, a in st["flows"] if d > last_tp]
             cur_flows.append((dates[-1], end_value))
             cur_xirr = (xirr(cur_flows)
-                        if (dates[-1] - last_tp).days >= MIN_SPAN_DAYS
+                        if (dates[-1] - last_tp).days >= min_span_days
                         else None)
     return {
         "start": str(dates[0].date()),
@@ -246,7 +254,7 @@ def _finalize_tp_state(st: dict, dates: pd.DatetimeIndex, adj: np.ndarray,
         "invested": round(invested_total, 2),
         "final_value": round(invested_total + profit, 2),
         "profit_rate": profit / invested_total if invested_total > 0 else None,
-        "xirr": xirr(st["flows"]) if span >= MIN_SPAN_DAYS else None,
+        "xirr": xirr(st["flows"]) if span >= min_span_days else None,
         "last_tp": str(last_tp.date()) if last_tp is not None else None,
         "cur_invested": cur_invested,
         "cur_profit_rate": cur_pr,
@@ -257,7 +265,8 @@ def _finalize_tp_state(st: dict, dates: pd.DatetimeIndex, adj: np.ndarray,
 def simulate_multi(dates: pd.DatetimeIndex, adj: np.ndarray,
                    fee: FeeSchedule | None = None,
                    take_profits=TP_THRESHOLDS,
-                   method: str = "amount") -> dict:
+                   method: str = "amount",
+                   min_span_days: int | None = None) -> dict:
     """单基金单窗口单遍多阈值：同一净值序列上同时跑多档止盈。
 
     每档阈值一个独立状态机（月度买入/日频触发线/轮次事件与 simulate
@@ -278,6 +287,10 @@ def simulate_multi(dates: pd.DatetimeIndex, adj: np.ndarray,
       已投入 - 1（与止盈触发线同口径）≥10% → 0.5×、≥20% → 0.25×；
       未触发浮盈档落深梯度回撤档（≥20% → 1.5×、≥30% → 2×），余者 1×。
       新轮首买 invested=0 浮盈无定义直接看回撤档，invested 每期可变。
+
+    min_span_days：年化运作期限下限（天），None=读模块常量 MIN_SPAN_DAYS
+    （设置页 backtest_min_span_days 经调用方下传；全窗口年化与止盈后当前
+    轮年化同用，窗口 <90 天的次新基金年化置空即出自此规则）。
     """
     if method not in DCA_METHODS:
         raise ValueError(f"unknown dca method: {method!r}")
@@ -357,14 +370,16 @@ def simulate_multi(dates: pd.DatetimeIndex, adj: np.ndarray,
                 st["basis_units"] = 0.0
                 st["invested"] = 0.0
                 st["round_sub_fee"] = 0.0
-    return {st["tp"]: _finalize_tp_state(st, dates, adj, fee)
+    return {st["tp"]: _finalize_tp_state(st, dates, adj, fee,
+                                         min_span_days=min_span_days)
             for st in states}
 
 
 def simulate(dates: pd.DatetimeIndex, adj: np.ndarray,
              fee: FeeSchedule | None = None,
              take_profit: float = TAKE_PROFIT,
-             method: str = "amount") -> dict:
+             method: str = "amount",
+             min_span_days: int | None = None) -> dict:
     """单基金单窗口单阈值：每月首个净值日买入，日频检查止盈。
 
     fee=None 为无费口径（原行为）；给定调度时申购按外扣法折份额
@@ -384,11 +399,13 @@ def simulate(dates: pd.DatetimeIndex, adj: np.ndarray,
     合计/赎回费（无费场景为 0）；net_profit=本轮净收益（回款-投入）。
     res["last_tp"]/["cur_invested"]/["cur_profit_rate"]/["cur_xirr"]：
     「最近一次止盈后」当前轮（进行中）四字段——止盈日/本轮已投入/
-    本轮市值口径收益率/本轮 XIRR（<90 天置 None）；rounds=0 全 None
+    本轮市值口径收益率/本轮 XIRR（窗口不足运作期限 min_span_days 置
+    None，缺省 90 天）；rounds=0 全 None
     （cur_profit_rate 用净赎回口径期末市值，与窗口 profit_rate 一致）。
     """
     return simulate_multi(dates, adj, fee, [take_profit],
-                          method=method)[take_profit]
+                          method=method,
+                          min_span_days=min_span_days)[take_profit]
 
 
 def prep_window(df: pd.DataFrame, start: pd.Timestamp | None):
@@ -408,7 +425,8 @@ COLS_FULL = ["start", "end", "months", "rounds", "invested", "final_value",
 
 
 def run_backtest(nav: pd.DataFrame, basic: pd.DataFrame,
-                 scale_map: dict, *, end_ts=None, log=print) -> tuple[list[dict], list[tuple]]:
+                 scale_map: dict, *, end_ts=None, log=print,
+                 min_span_days: int | None = None) -> tuple[list[dict], list[tuple]]:
     """纯计算编排：净值/基金基础信息/规模映射 → （结果行， 轮次行）。
 
     nav：code,nav_date,unit_nav,accum_nav,pct_chg（已按 code,nav_date 排序）；
@@ -440,13 +458,16 @@ def run_backtest(nav: pd.DataFrame, basic: pd.DataFrame,
         }
         w10_res_by_fee = {}
         for prefix, prep in (("full", full_p), ("w10", w10_p)):
-            res = simulate(*prep, fee["gross"]) if prep else None
+            res = (simulate(*prep, fee["gross"], min_span_days=min_span_days)
+                   if prep else None)
             for k in COLS_FULL:
                 row[f"{prefix}_{k}"] = res[k] if res else None
             # 含费场景多出年化列；w10 的三场景轮次明细全量入库（止盈日
             # 随场景份额略有差异，各自自洽）
-            disc_res = simulate(*prep, fee["disc"]) if prep else None
-            nom_res = simulate(*prep, fee["nom"]) if prep else None
+            disc_res = (simulate(*prep, fee["disc"], min_span_days=min_span_days)
+                        if prep else None)
+            nom_res = (simulate(*prep, fee["nom"], min_span_days=min_span_days)
+                       if prep else None)
             if prefix == "full":
                 # 全史「最近一次止盈后」当前轮三口径字段（止盈日随费用
                 # 口径位移，invested 与费用无关记一份）
@@ -499,7 +520,8 @@ def _or_none(res: dict | None, key: str):
 def run_backtest_tp(nav: pd.DataFrame, basic: pd.DataFrame,
                     scale_map: dict, thresholds=TP_THRESHOLDS, *,
                     end_ts=None, method: str = "amount",
-                    log=print) -> tuple[list[dict], list[tuple]]:
+                    log=print,
+                    min_span_days: int | None = None) -> tuple[list[dict], list[tuple]]:
     """多阈值纯计算编排：每基金每窗口每口径一次 simulate_multi 扫描。
 
     nav/basic/scale_map 同 run_backtest；end_ts：10y 窗口右端（缺省=数据集
@@ -537,7 +559,8 @@ def run_backtest_tp(nav: pd.DataFrame, basic: pd.DataFrame,
         for prefix, prep in (("full", full_p), ("w10", w10_p)):
             for fee_name in ("gross", "disc", "nom"):
                 multi = (simulate_multi(*prep, fee[fee_name], thresholds,
-                                        method=method)
+                                        method=method,
+                                        min_span_days=min_span_days)
                          if prep else None)
                 for tp in thresholds:
                     per_tp_fee[tp][prefix][fee_name] = (
@@ -723,11 +746,21 @@ def run_full_backtest_tp(dsn: str, *, thresholds=TP_THRESHOLDS,
         basic = _load_basic(conn, codes)
         scale_map = _load_scale(conn)
         nav = _load_nav(conn, codes)
-    log(f"净值行：{len(nav):,}")
+        # 年化运作期限下限随设置页（backtest_min_span_days，缺省 90）：
+        # 整轮统一一份值，日更/手动回放各自启动时读取；批量任务不许因
+        # 设置表异常整轮崩——读失败记日志回落默认值
+        try:
+            min_span_days = settings_store.get_min_span_days(
+                conn, default=MIN_SPAN_DAYS)
+        except Exception as exc:
+            log(f"  设置表读取失败，回退运作期限下限 {MIN_SPAN_DAYS} 天：{exc}")
+            min_span_days = MIN_SPAN_DAYS
+    log(f"净值行：{len(nav):,}；运作期限下限：{min_span_days} 天")
     tp_rows, tp_rounds = [], []
     for method in DCA_METHODS:
         m_rows, m_rounds = run_backtest_tp(nav, basic, scale_map, thresholds,
-                                           method=method, log=log)
+                                           method=method, log=log,
+                                           min_span_days=min_span_days)
         tp_rows.extend(m_rows)
         tp_rounds.extend(m_rounds)
     # 旧口径行 = amount 且 tp=TAKE_PROFIT 派生（去掉 tp/method 维度），

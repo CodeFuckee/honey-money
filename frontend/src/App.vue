@@ -56,6 +56,7 @@ const ROUTE_BY_NAV = {
   fundDca: '/data/fund-dca', market: '/data/market-compare',
   crises: '/data/crises',
   backtest: '/backtest', learn: '/learn', stock: '/stock', fund: '/fund',
+  settings: '/settings',
 }
 const NAV_BY_PATH = Object.fromEntries(
   Object.entries(ROUTE_BY_NAV).map(([nav, path]) => [path, nav]))
@@ -1608,9 +1609,88 @@ const _onCrisesResize = () => crisesChartInstance && crisesChartInstance.resize(
 
 const crisesDays = (n) => n == null ? '—' : `${n} 个交易日`
 
+// ===== 设置页（2026-11-24）：回测年化运作期限下限（app_settings 表，
+// GET /api/settings 读取、PUT /api/settings/backtest-min-span 修改；
+// 修改后下一次回测生效，存量行不重算）。backtestMinSpan 供回测口径
+// 文案绑定（列表口径 note 与弹窗 title，回退 90——静默失败不弹错）。 =====
+const settingsStatus = ref('idle')
+const settingsDetail = ref('')
+const minSpanInput = ref(90)
+const minSpanSaving = ref(false)
+const minSpanMsg = ref('')
+const settingsError = ref('')
+const backtestMinSpan = ref(90)
+
+async function loadSettings() {
+  settingsStatus.value = 'loading'
+  settingsError.value = ''
+  minSpanMsg.value = ''
+  try {
+    const resp = await fetch('/api/settings')
+    const body = await resp.json()
+    if (body.status === 'up' && body.settings) {
+      settingsStatus.value = 'up'
+      minSpanInput.value = body.settings.backtest_min_span_days
+      backtestMinSpan.value = body.settings.backtest_min_span_days
+    } else {
+      settingsStatus.value = 'down'
+      settingsDetail.value = body.detail || '设置服务不可用'
+    }
+  } catch (e) {
+    settingsStatus.value = 'down'
+    settingsDetail.value = String(e)
+  }
+}
+
+async function saveMinSpanDays() {
+  settingsError.value = ''
+  minSpanMsg.value = ''
+  const raw = minSpanInput.value
+  const v = Number(raw)
+  // 空值（v-model.number 得 ''）视为非法本地拦截，不发包
+  if (raw === '' || raw === null || !Number.isInteger(v)) {
+    settingsError.value = '请输入 90~3650 的整数天数'
+    return
+  }
+  minSpanSaving.value = true
+  try {
+    const resp = await fetch('/api/settings/backtest-min-span', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value: v }),
+    })
+    const body = await resp.json()
+    if (resp.status === 400) {
+      settingsError.value = body.detail || '取值须为 90~3650 的整数'
+      return
+    }
+    if (body.status !== 'up') {
+      settingsError.value = body.detail || '保存失败：设置服务不可用'
+      return
+    }
+    minSpanInput.value = body.value
+    backtestMinSpan.value = body.value
+    minSpanMsg.value = `已保存：运作期限下限 ${body.value} 天，下一次回测生效`
+  } catch (e) {
+    settingsError.value = String(e)
+  } finally {
+    minSpanSaving.value = false
+  }
+}
+
+async function loadBacktestMinSpan() {
+  try {
+    const resp = await fetch('/api/settings')
+    const body = await resp.json()
+    if (body.status === 'up' && body.settings) {
+      backtestMinSpan.value = body.settings.backtest_min_span_days
+    }
+  } catch { /* 口径文案回退 90 */ }
+}
+
 watch(activeNav, (nav, prev) => {
   if (nav === 'funds') loadFunds()
-  if (nav === 'fundDca') { loadDca(); loadDcaScatter(); loadDcaTpCompare(); loadDcaDipReport(); loadDcaPauseExperiment() }
+  if (nav === 'fundDca') { loadDca(); loadDcaScatter(); loadDcaTpCompare(); loadDcaDipReport(); loadDcaPauseExperiment(); loadBacktestMinSpan() }
+  if (nav === 'settings') loadSettings()
   if (nav === 'market') loadMarketCompare()
   if (nav === 'crises') loadMarketCrises()
   if (nav === 'fund' && fund.value) {
@@ -2796,7 +2876,8 @@ watch(
               : [
               { id: 'dash', label: '仪表盘' }, { id: 'data', label: '数据' },
               { id: 'tasks', label: '任务' },
-              { id: 'backtest', label: '回测' }, { id: 'learn', label: '教学' }])"
+              { id: 'backtest', label: '回测' }, { id: 'learn', label: '教学' },
+              { id: 'settings', label: '设置' }])"
             :key="n.id" class="nav-item"
             :class="{ active: activeNav === n.id, 'sub-active': (activeNav.startsWith('src-') || activeNav === 'stock' || activeNav === 'funds' || activeNav === 'fund' || activeNav === 'fundDca' || activeNav === 'market' || activeNav === 'crises') && n.id === 'data' }"
             :title="sidebarCollapsed ? n.label : null"
@@ -2820,6 +2901,10 @@ watch(
             <svg v-else-if="n.id === 'backtest'" class="nav-icon" viewBox="0 0 20 20" fill="none">
               <path d="M3 17h14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
               <path d="M5 13l4-4.5 3 3 4-6.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <svg v-else-if="n.id === 'settings'" class="nav-icon" viewBox="0 0 20 20" fill="none">
+              <circle cx="10" cy="10" r="2.6" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M10 2.8v2.4M10 14.8v2.4M2.8 10h2.4M14.8 10h2.4M4.9 4.9l1.7 1.7M13.4 13.4l1.7 1.7M15.1 4.9l-1.7 1.7M6.6 13.4l-1.7 1.7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
             </svg>
             <svg v-else class="nav-icon" viewBox="0 0 20 20" fill="none">
               <path d="M3 4.2c2.4-1.1 4.8-1.1 7 0 2.2-1.1 4.6-1.1 7 0v11.6c-2.4-1.1-4.8-1.1-7 0-2.2-1.1-4.6-1.1-7 0z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
@@ -3677,7 +3762,7 @@ watch(
                   </template>
                 </Column>
                 <Column field="full_cur_xirr" style="width: 104px" sortable bodyClass="num-col" v-if="colVisible('full_cur_xirr')">
-                  <template #header><span title="止盈后年化（全史口径）：最近一次止盈日重新开始定投的当前轮 XIRR（资金加权，投入现金流=止盈后每月定投、回收=当前市值），轮次不足 90 天留空；随费用口径与止盈点切换；与「年化·近10年」口径不同、不可直接对比">止盈后年化</span></template>
+                  <template #header><span :title="`止盈后年化（全史口径）：最近一次止盈日重新开始定投的当前轮 XIRR（资金加权，投入现金流=止盈后每月定投、回收=当前市值），轮次不足 ${backtestMinSpan} 天留空；随费用口径与止盈点切换；与「年化·近10年」口径不同、不可直接对比`">止盈后年化</span></template>
                   <template #body="{ data }">
                     <span v-if="dcaFeeVal(data, 'full_cur_xirr') != null"
                       :class="dcaFeeVal(data, 'full_cur_xirr') >= 0 ? 'chg-up' : 'chg-down'">{{ pct1(dcaFeeVal(data, 'full_cur_xirr')) }}</span>
@@ -3696,7 +3781,7 @@ watch(
                 </Column>
               </DataTable>
             </div>
-            <p class="note">口径：每月首个净值日买入（定投方式可切：等额=每期固定金额；等份额=每期固定份额、首期 1000 元折算、现金随净值波动），任一净值日持仓收益达止盈线即全仓赎回并重开新一轮（分红再投）；排行/统计/散点/对比/详情共用同一费用口径，页面顶部「费用口径」切换（不含费 / 含费·申购一折 / 含费·申购名义，赎回费各口径一致按持有天数阶梯收取）；排行/统计/散点/对比池共用同一基金类型口径，页面顶部「基金类型」切换（默认仅权益类：股票型/偏股·灵活·平衡混合/股票指数/海外权益共 8 类，全市场可切回，债基·FOF·货币·偏债不在权益类内；对比卡池在此基础上加 QDII-商品/商品） · 统计卡为当前类型与在市口径全集分位，不随搜索与区间筛选变化 · 新基金（回测窗口 &lt;90 天）年化留空 · 「当前回撤」= 复权净值距历史最高的跌幅（日更顺带刷新），非在市基金无此数据；「甜蜜点」结论来自 2015~2026 权益基金 98 万起点历史模拟（-25~-30% 回撤起定投首轮止盈中位 582 天、成功率 63.2%、年化 32.0%，20% 止盈线含费口径） · 波动指标列（年化/下行波动率、最大回撤、夏普 + 波动率分位）为基金净值快照，全史口径（全部历史复权净值，2026-11-18 起由近1年改全史；复权日增长率、√252 年化、无风险利率 0，fund_risk_metrics 日更顺带刷新，样本不足 20 个收益为 —），与回测口径独立、不随费用/止盈点切换 · 「综合波动分位」= 全史年化波动率/下行波动率/最大回撤三项在全市场同类基金中的百分位排名等权平均（percent_rank，0~100%，越低越稳），日更顺带重算（三指标缺任一按可得项平均，全缺为 —） · 「震荡分位」= 全史净值 zigzag（±10% 确认反转）年均规则摆动轮数（频率 × 间隔均匀度）的横截面百分位，越高 = 净值越规律地上上下下 · 「止盈后收益率/止盈后年化」= 最近一次止盈日全仓赎回后重新开始定投的当前轮（进行中）总收益率与 XIRR（全史窗口口径，与「总收益率/年化·近10年」列不可直接对比；随费用口径与止盈点切换，轮次不足 90 天年化留空，全史从未止盈显示 —，日更回测顺带刷新）· 数据为离线回测快照，重跑 scripts/fund_dca_backtest.py 并经 app.dca_store 导入后刷新 · 点行或「详情」查看每轮止盈明细 · 顶部总开关四组（定投方式/止盈点/基金类型/费用口径，2026-11-23 置顶）切换后排行/统计卡/对比卡/散点分箱/明细全部跟随（起点条件与熊市断缴两实验卡为等额口径固定快照） · 历史统计不构成任何操作建议</p>
+            <p class="note">口径：每月首个净值日买入（定投方式可切：等额=每期固定金额；等份额=每期固定份额、首期 1000 元折算、现金随净值波动），任一净值日持仓收益达止盈线即全仓赎回并重开新一轮（分红再投）；排行/统计/散点/对比/详情共用同一费用口径，页面顶部「费用口径」切换（不含费 / 含费·申购一折 / 含费·申购名义，赎回费各口径一致按持有天数阶梯收取）；排行/统计/散点/对比池共用同一基金类型口径，页面顶部「基金类型」切换（默认仅权益类：股票型/偏股·灵活·平衡混合/股票指数/海外权益共 8 类，全市场可切回，债基·FOF·货币·偏债不在权益类内；对比卡池在此基础上加 QDII-商品/商品） · 统计卡为当前类型与在市口径全集分位，不随搜索与区间筛选变化 · 新基金（回测窗口 &lt;{{ backtestMinSpan }} 天）年化留空 · 「当前回撤」= 复权净值距历史最高的跌幅（日更顺带刷新），非在市基金无此数据；「甜蜜点」结论来自 2015~2026 权益基金 98 万起点历史模拟（-25~-30% 回撤起定投首轮止盈中位 582 天、成功率 63.2%、年化 32.0%，20% 止盈线含费口径） · 波动指标列（年化/下行波动率、最大回撤、夏普 + 波动率分位）为基金净值快照，全史口径（全部历史复权净值，2026-11-18 起由近1年改全史；复权日增长率、√252 年化、无风险利率 0，fund_risk_metrics 日更顺带刷新，样本不足 20 个收益为 —），与回测口径独立、不随费用/止盈点切换 · 「综合波动分位」= 全史年化波动率/下行波动率/最大回撤三项在全市场同类基金中的百分位排名等权平均（percent_rank，0~100%，越低越稳），日更顺带重算（三指标缺任一按可得项平均，全缺为 —） · 「震荡分位」= 全史净值 zigzag（±10% 确认反转）年均规则摆动轮数（频率 × 间隔均匀度）的横截面百分位，越高 = 净值越规律地上上下下 · 「止盈后收益率/止盈后年化」= 最近一次止盈日全仓赎回后重新开始定投的当前轮（进行中）总收益率与 XIRR（全史窗口口径，与「总收益率/年化·近10年」列不可直接对比；随费用口径与止盈点切换，轮次不足 {{ backtestMinSpan }} 天年化留空，全史从未止盈显示 —，日更回测顺带刷新）· 数据为离线回测快照，重跑 scripts/fund_dca_backtest.py 并经 app.dca_store 导入后刷新 · 点行或「详情」查看每轮止盈明细 · 顶部总开关四组（定投方式/止盈点/基金类型/费用口径，2026-11-23 置顶）切换后排行/统计卡/对比卡/散点分箱/明细全部跟随（起点条件与熊市断缴两实验卡为等额口径固定快照） · 历史统计不构成任何操作建议</p>
 
 
             <!-- ===== 年限 × 规模 三维散点（每基金一点） + 分箱统计 ===== -->
@@ -3872,7 +3957,7 @@ watch(
                     :class="summaryFeeVal(dcaRoundsSummaryRow, 'full_cur_profit_rate') >= 0 ? 'chg-up' : 'chg-down'">{{ pct1(summaryFeeVal(dcaRoundsSummaryRow, 'full_cur_profit_rate')) }}</span><span v-else>—</span></div>
                 </div>
                 <div class="dc-item">
-                  <div class="dc-label" title="止盈后年化（全史）：当前轮 XIRR（资金加权：止盈后每月定投为投入、当前市值为回收），轮次不足 90 天留空；随费率口径切换；与上方「年化·近10年」口径不同、不可直接对比">止盈后年化<span class="dc-hint">全史·{{ dcaRoundsFeeLabel }}</span></div>
+                  <div class="dc-label" :title="`止盈后年化（全史）：当前轮 XIRR（资金加权：止盈后每月定投为投入、当前市值为回收），轮次不足 ${backtestMinSpan} 天留空；随费率口径切换；与上方「年化·近10年」口径不同、不可直接对比`">止盈后年化<span class="dc-hint">全史·{{ dcaRoundsFeeLabel }}</span></div>
                   <div class="dc-value"><span v-if="summaryFeeVal(dcaRoundsSummaryRow, 'full_cur_xirr') != null"
                     :class="summaryFeeVal(dcaRoundsSummaryRow, 'full_cur_xirr') >= 0 ? 'chg-up' : 'chg-down'">{{ pct1(summaryFeeVal(dcaRoundsSummaryRow, 'full_cur_xirr')) }}</span><span v-else>—</span></div>
                 </div>
@@ -4121,6 +4206,41 @@ watch(
             </template>
             <div class="card" v-else style="padding: 28px 16px">
               <div class="browse-empty">暂无数据</div>
+            </div>
+          </template>
+
+          <!-- ===== 设置（2026-11-24）：应用级设置，修改后下一次回测生效 ===== -->
+          <template v-else-if="activeNav === 'settings'">
+            <div class="toolbar">
+              <div>
+                <h2 class="h1">设置</h2>
+                <p class="sub">应用级设置 · 修改后下一次回测（当晚日更 / 手动回放）生效，已入库数据不重算</p>
+              </div>
+            </div>
+            <div class="card" v-if="settingsStatus === 'loading'"
+              style="padding: 28px 16px; text-align: center">
+              <p class="note" style="margin: 0">正在加载设置…</p>
+            </div>
+            <div class="card" v-else-if="settingsStatus === 'down'" style="padding: 28px 16px">
+              <div class="browse-empty">设置数据不可用：{{ settingsDetail || '后端暂不可达' }}</div>
+            </div>
+            <div class="card" v-else style="padding: 16px 18px 20px">
+              <div class="settings-row" data-min-span-row>
+                <label class="settings-label" for="min-span-input">
+                  <b>回测年化运作期限下限</b>
+                  <span class="settings-hint">基金历史净值首日 ~ 末日跨度不足该天数时，年化（含近10年 / 止盈后当前轮）留空，统计卡「在市」口径随之不含该基金</span>
+                </label>
+                <div class="settings-input">
+                  <input id="min-span-input" class="settings-input-num" type="number"
+                    data-min-span-input v-model.number="minSpanInput" min="90" max="3650" step="1">
+                  <span class="settings-unit">天</span>
+                  <button class="btn" data-min-span-save :disabled="minSpanSaving"
+                    @click="saveMinSpanDays">{{ minSpanSaving ? '保存中…' : '保存' }}</button>
+                </div>
+              </div>
+              <p class="note" style="margin: 10px 0 0">取值 90~3650 天，默认 90；下一次回测（当晚日更 / scripts/dca_share_sample.py 手动回放）起按新值计算。</p>
+              <p v-if="minSpanMsg" class="note" data-settings-saved style="margin: 6px 0 0; color: #1a7f37">{{ minSpanMsg }}</p>
+              <p v-if="settingsError" class="note" data-settings-error style="margin: 6px 0 0; color: #c9313d">{{ settingsError }}</p>
             </div>
           </template>
 
@@ -5055,7 +5175,12 @@ body {
   border-right: 1px solid var(--sidebar-border);
   padding: 16px 12px;
   display: flex; flex-direction: column; align-items: stretch;
+  /* 导航项变多（2026-11-24 第 6 项「设置」）后超出视口高时纵向滚动，
+     而不是压缩各行行高（.src-item 32px 设计值曾被压成 30.4px 炸像素断言）；
+     子项一律禁止 flex 收缩 */
+  overflow-y: auto;
 }
+.sidebar > * { flex: none; }
 .group { font-size: 11px; color: var(--fg-3); margin: 10px 10px 6px; }
 .group:first-child { margin-top: 0; }
 .nav-item {
@@ -5521,6 +5646,15 @@ body {
   margin: 8px 0 0; padding-top: 8px; border-top: 1px solid #e0e0e0;
   font-size: 11px; color: #8d8d8d; line-height: 1.5;
 }
+/* 设置页（2026-11-24）：单条设置一行式（标签+说明在左、输入+保存在右） */
+.settings-row { display: flex; align-items: flex-start; gap: 18px; flex-wrap: wrap; }
+.settings-label { flex: 1 1 260px; min-width: 0; font-size: 13px; }
+.settings-hint { display: block; color: #525252; font-size: 12px;
+  margin-top: 4px; line-height: 1.5; }
+.settings-input { display: flex; align-items: center; gap: 8px; }
+.settings-input-num { width: 110px; padding: 6px 10px; font-size: 14px;
+  border: 1px solid var(--card-border-color, #e0e0e0); border-radius: 6px; }
+.settings-unit { font-size: 12px; color: #525252; white-space: nowrap; }
 /* 列显示过滤（MultiSelect）：与搜索行 small 控件同高，窄屏可收缩 */
 .funds-search .dca-col-select { min-width: 118px; max-width: 160px; }
 .funds-search .dca-col-select .p-multiselect-label { font-size: 12px; padding: 5px 8px; }

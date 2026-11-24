@@ -96,9 +96,9 @@ def test_shell_and_nav(servers, page):
     assert box["width"] == vp["width"] and box["height"] == vp["height"], \
         f"窗口未铺满视口: {box['width']}x{box['height']} != {vp['width']}x{vp['height']}"
 
-    # 侧栏导航：五项（仪表盘/数据/任务/回测/教学），「仪表盘」默认激活
+    # 侧栏导航：六项（仪表盘/数据/任务/回测/教学/设置），「仪表盘」默认激活
     nav = page.locator(".sidebar .nav-item")
-    expect(nav).to_have_count(5)
+    expect(nav).to_have_count(6)
     expect(page.locator(".sidebar .nav-item.active")).to_have_text("仪表盘")
 
     # 切到「数据」页：标题 + 真数据表（本地无 PG → 降级空表）可见

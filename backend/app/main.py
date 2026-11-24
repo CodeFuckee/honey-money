@@ -34,6 +34,8 @@ from .dca_api import register_fund_dca_routes
 from .infra import check_postgres, check_proxy_pool
 from .market_compare import register_market_routes
 from .market_crises import register_crises_routes
+from .settings_api import register_settings_routes
+from . import settings_store
 from .scheduler import PgAdvisoryLock, TaskScheduler, build_crawl_executor
 from .task_store import TaskStore
 from .tasks_api import register_task_routes
@@ -66,7 +68,8 @@ def create_app(*, scheduler: TaskScheduler | None = None,
                            ("多阈值回测表", dca_store.ensure_tp_schema),
                            ("基金波动表", dca_store.ensure_risk_schema),
                            ("熊市断缴表", dca_store.ensure_bear_pause_schema),
-                           ("指数表", index_store.ensure_schema)):
+                           ("指数表", index_store.ensure_schema),
+                           ("设置表", settings_store.ensure_settings_schema)):
             try:
                 with connect(config.DATABASE_URL) as conn:
                     init(conn)
@@ -228,6 +231,7 @@ def create_app(*, scheduler: TaskScheduler | None = None,
     register_fund_dca_routes(app)
     register_market_routes(app)
     register_crises_routes(app)
+    register_settings_routes(app, connect=connect)
 
     return app
 
