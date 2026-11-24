@@ -1,4 +1,8 @@
-"""任务管理 API 测试：CRUD/触发/取消/停止/状态查询，全离线（假连接+假调度器）。
+"""任务管理 API 测试：CRUD/触发/取消/停止/状态查询，全离线（假连接+假控制面。
+
+控制面假件接口 = PgTaskControl 协议（runtime_state/request_run/
+cancel_queued/stop_running/last_error/delete，见 app/task_runtime.py）
+——生产里 worker 在另一进程消费这些指令，测试内存假件同形状。
 
 约定：查询接口始终 200（PG 不可达在 body.status 表达，同 /api/infra 降级风格）；
 写操作用标准状态码（404 不存在 / 409 状态冲突 / 422 参数非法）。
@@ -19,13 +23,14 @@ TASK_ROW = {"id": 1, "name": "新浪每日增量", "source": "sina",
             "mode": "incremental", "schedule_time": "18:00", "enabled": True}
 
 
-class FakeScheduler:
-    """调度器假件：只维护运行态内存与操作调用记录。"""
+class FakeTaskControl:
+    """任务控制面假件：只维护运行态内存与操作调用记录（协议=PgTaskControl）。"""
 
     def __init__(self, phases=None, last_results=None):
         self.phases = dict(phases or {})
         self.last_results = dict(last_results or {})
         self.calls: list[tuple] = []
+        self.deleted: list[int] = []
 
     def runtime_state(self):
         return {"phases": dict(self.phases), "progress": {},
@@ -45,6 +50,14 @@ class FakeScheduler:
     def stop_running(self, task_id):
         self.calls.append(("stop", task_id))
         return self.phases.get(task_id) == "running"
+
+    def last_error(self, task_id):
+        result = self.last_results.get(task_id)
+        return (result or {}).get("detail") if result and result.get("error") \
+            else None
+
+    def delete(self, task_id):
+        self.deleted.append(task_id)
 
 
 class FakeTaskConn:
@@ -119,18 +132,18 @@ class FakeTaskStore:
 
 
 def make_client(*, tasks=(), phases=None, ran=(), connect=None, last_results=None):
-    """构建注入假件的测试 app：返回 (client, store, scheduler)。"""
+    """构建注入假件的测试 app：返回 (client, store, control)。"""
     store = FakeTaskStore(tasks)
     store.ran.update(ran)
-    sched = FakeScheduler(phases=phases, last_results=last_results)
-    app = create_app(scheduler=sched, task_store=store,
+    ctrl = FakeTaskControl(phases=phases, last_results=last_results)
+    app = create_app(task_control=ctrl, task_store=store,
                      connect=connect or (lambda *a, **k: FakeTaskConn(store)))
-    return TestClient(app), store, sched
+    return TestClient(app), store, ctrl
 
 
 class TestGetTasks:
     def test_lists_tasks_with_runtime_merge(self):
-        client, store, sched = make_client(tasks=[TASK_ROW], phases={1: "queued"})
+        client, store, ctrl = make_client(tasks=[TASK_ROW], phases={1: "queued"})
         resp = client.get("/api/tasks")
         assert resp.status_code == 200
         body = resp.json()
@@ -265,17 +278,17 @@ class TestDeleteTask:
 
     def test_delete_queued_cancels_first(self):
         """删除排队中的任务：先移出队列再删。"""
-        client, _, sched = make_client(tasks=[TASK_ROW], phases={1: "queued"})
+        client, _, ctrl = make_client(tasks=[TASK_ROW], phases={1: "queued"})
         assert client.delete("/api/tasks/1").status_code == 200
-        assert ("cancel", 1) in sched.calls
+        assert ("cancel", 1) in ctrl.calls
 
 
 class TestRunTask:
     def test_run_ok(self):
-        client, _, sched = make_client(tasks=[TASK_ROW])
+        client, _, ctrl = make_client(tasks=[TASK_ROW])
         resp = client.post("/api/tasks/1/run")
         assert resp.status_code == 200
-        assert ("run", 1) in sched.calls
+        assert ("run", 1) in ctrl.calls
 
     def test_run_missing_404(self):
         client, _, _ = make_client()

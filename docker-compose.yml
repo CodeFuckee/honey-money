@@ -2,13 +2,17 @@
 # 用法：cp .env.example .env （按需改端口/连接串）→ docker compose up -d
 # 群晖：Container Manager → 项目 → 指向本仓库目录，同样走 .env + up
 #
-# 拓扑（三容器；frontend 对外、mcp 供 agent 远程接入，公共设施走宿主）：
+# 拓扑（四容器；frontend 对外、mcp 供 agent 远程接入，公共设施走宿主）：
 #   [外部 :28080] → frontend(nginx) ─┬─ 静态托管 Vue
 #                                  └─ /api 反代 → backend:8000
 #   [内网 :28081] → mcp（streamable HTTP，agent 经 http://<NAS>:28081/mcp 直连）
 #   backend ──→ NAS 宿主上的既有 PostgreSQL（host.docker.internal:5433，库 honey_money）
 #          ──→ NAS 上的公共代理池（host.docker.internal:5010，独立部署的
 #               proxy-pool:2.4.1-aclfix + 专用 redis 8，多项目共用）
+#   worker  ──→ 同上两设施（与 backend 同镜像，command 不同——任务执行
+#               独立容器：backend 只留 API（SCHEDULER_ENABLED=0），流水线
+#               重建 backend 不再打断运行中任务；运行态/指令经 PG
+#               task_runtime 跨进程，worker 重建由 CI 空闲守门保护）
 # 注意：PostgreSQL 与代理池均不由本编排创建，需确保：
 #   ① 宿主 5433 有 PG（库/用户 honey_money）；② 宿主 5010 有公共代理池在跑。
 # mcp 无鉴权，仅限内网使用（与 backend 同安全级别）；不对公网映射端口。
@@ -37,11 +41,36 @@ services:
       DATABASE_URL: ${DATABASE_URL:-postgresql://honey_money:honey_money@host.docker.internal:5433/honey_money}
       # 公共代理池：NAS 上独立部署（宿主 5010），多项目共用；换私有池时在此覆盖
       PROXY_POOL_URL: ${PROXY_POOL_URL:-http://host.docker.internal:5010}
+      # 任务执行独立到 worker 容器：backend 只留 API，不再自动调度——
+      # 流水线重建 backend（新代码生效）与运行中任务从此互不干扰
+      SCHEDULER_ENABLED: "0"
       # GitHub Pages 自动发布（可选）：回测日更后顺带推送静态快照刷新公开页。
       # 填含 token 的仓库 URL（fine-grained PAT，Contents 读写，仅授权
       # honey-money 仓）；留空则日更跳过发布，公开页保持上一份快照
       PAGES_REPO_URL: ${PAGES_REPO_URL:-}
       PAGES_WORKDIR: /srv/pages
+
+  worker:
+    build: ./backend            # 与 backend 同镜像：调度/执行代码同源
+    restart: unless-stopped
+    command: python -m app.worker
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # 与 backend 共享命名卷（同 compose 项目即同卷）：Cookie API 写、
+      # worker 读；Pages 工作区跟执行 job 的进程走
+      - em_cookie:/srv/data
+      - pages_workspace:/srv/pages
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://honey_money:honey_money@host.docker.internal:5433/honey_money}
+      PROXY_POOL_URL: ${PROXY_POOL_URL:-http://host.docker.internal:5010}
+      PAGES_REPO_URL: ${PAGES_REPO_URL:-}
+      PAGES_WORKDIR: /srv/pages
+      # worker 走 print 到 stdout（无 uvicorn 的 stderr 通道），不设此值会
+      # 4KB 块缓冲导致 docker logs 长时间空白（爬虫进程消失假象同款教训）
+      PYTHONUNBUFFERED: "1"
+    # 不设 depends_on：worker 生命周期必须与 backend 完全解耦（backend
+    # 重建/重启不影响运行中任务——这是拆分的全部意义）
 
   mcp:
     build: ./backend            # 与 backend 同镜像，仅启动命令不同

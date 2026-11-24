@@ -17,7 +17,18 @@ backend/            Python 后端（FastAPI）
                       eastmoney(接口客户端) / sina(新浪客户端) / store(存储) /
                       runner(编排) / __main__(CLI)
   app/task_store.py   爬虫任务持久化（crawl_task 表 CRUD + 预置任务播种）
-  app/scheduler.py    进程内任务调度器（每日到点/启动补跑/全局串行/advisory lock 互斥）
+  app/task_runtime.py 任务运行态持久化（task_runtime 单表：队列/phase/进度/
+                      停止指令落 PG——任务执行独立 worker 容器后 API 与
+                      worker 跨进程共享的唯一介质）+ PgTaskControl（API
+                      侧控制面：入队/取消/停止/快照/last_error）
+  app/scheduler.py    任务调度器（每日到点/启动补跑/全局串行/advisory lock
+                      互斥；运行态经 TaskRuntime 落 PG，生产宿主于 worker
+                      容器，SCHEDULER_ENABLED=1 时兼容单进程模式）
+  app/worker.py       任务执行 worker 入口（python -m app.worker：schema
+                      兜底 + 遗留运行清理 + 调度常驻；backend 只留 API，
+                      流水线重建 backend 不再打断运行中任务）
+  app/startup.py      启动兜底清单（建表/补列/遗留运行清理——backend 与
+                      worker 共用的单一事实源）
   app/tasks_api.py    任务管理 API（CRUD/触发/取消/停止/历史）
   app/dca_backtest.py 定投回测核心（脚本与调度器日更共用；定投方式五档
                       DCA_METHODS：amount 等额 / share 等份额 /
@@ -256,8 +267,11 @@ frontend/           Vue3 + Vite 前端
   nginx.conf          生产：静态托管 + /api 反代后端
 deploy/             （预留：将来放 NAS 专属编排变体）
 tests/e2e/          Playwright E2E（自拉后端 uvicorn + 前端 vite preview）
-docker-compose.yml  五服务编排（frontend/backend/postgres/redis/proxy_pool）
-.gitlab-ci.yml      main 流水线：backend-test（pytest 全绿才可部署）
+docker-compose.yml  四容器编排（frontend/backend/worker/mcp；PG 与代理池走宿主）
+scripts/nas/        NAS 运维脚本（busy_check.py：部署守门的运行中任务查询）
+.gitlab-ci.yml      main 流水线：backend-test（pytest 全绿才可部署）+
+                    deploy-nas（空闲守门）+ deploy-catchup-nas（每小时补部署，
+                    需配 Schedules）
 .env.example        环境变量模板（复制为 .env，改密码/端口）
 docs/               调研文档（A 股日线数据源实测等）
 scripts/            离线研究/数据管道脚本（不入 CI）：fund_scale_fetch*.py
@@ -466,22 +480,33 @@ docker exec honey-money-backend-1 python -m app.crawler --source fund --mode inc
 清盘/终止；数据页基金列表可按 全部/仅在市/仅退市 过滤。免 Cookie、带
 Referer 即可；货币基金无单位净值走势按跳过处理。
 
-## 每日数据更新调度（进程内自治，无需外部计划任务）
+## 每日数据更新调度（独立 worker 容器，无需外部计划任务）
 
-backend 启动即拉起任务调度循环（`app/scheduler.py`），到点自动增量爬取：
+任务（爬虫/定投回测日更/指数日更）由 **worker 容器**（`python -m
+app.worker`，与 backend 同镜像）执行——backend 只留 API
+（compose 设 `SCHEDULER_ENABLED=0`），到点自动增量爬取：
 
 - **调度时刻**：北京时间（`Asia/Shanghai`，与容器时区无关）每日 HH:MM，
   不辨交易日——非交易日照常执行，增量断点机制保证空转无害；
-- **错过补跑**：到点时恰在重启/关机 → 下次启动自动补跑一次（trigger=catch_up）；
+- **错过补跑**：到点时恰在重启/关机 → worker 下次启动自动补跑一次
+  （trigger=catch_up）；
 - **全局串行**：同一时刻只跑一个任务，后到自动排队；执行前取 PostgreSQL
   advisory lock——手动 CLI 与调度任务并发写库也被互斥；
+- **运行态落 PG（task_runtime 表）**：队列/阶段/进度/停止指令在 PG 而非
+  进程内存——API 与 worker 跨进程共享；队列跨 worker 重启存活；
+  「任务」页的触发/取消/停止写指令行、worker 轮询消费（停止 ≤5s 生效）；
+- **部署不打断任务（2026-11-24）**：流水线重建 backend（API 新代码生效）
+  与运行中任务互不干扰；worker 由 CI 空闲守门保护（部署前查 PG：有任务
+  运行/排队 → worker 延后重建，每小时 `deploy-catchup-nas` 定时流水线在
+  空闲后补上新镜像，镜像没变时空操作）；
 - **防封参数内置**：任务仅可配 数据源/模式/时刻，限速/抖动/分批/熔停用安全
   默认值不可配；预置「新浪每日增量 18:00」默认禁用，页面上开开关即用；
   预置启用：「定投回测日更 23:00」「指数日更 17:30」（上证指数+沪深300
   日线，519 vs 924 对比页与金融危机史页数据源；东财被风控时逐指数
   新浪兜底，924 线不停更）；
 - **管理**：前端「任务」页（启停/手动触发/实时进度 3s 轮询/历史）或
-  `/api/tasks` 接口；`SCHEDULER_ENABLED=0` 可整体关闭调度（CLI 手动跑不受影响）。
+  `/api/tasks` 接口；`SCHEDULER_ENABLED=0` 可整体关闭调度（CLI 手动跑
+  不受影响；单进程开发模式置 1，调度器宿主于 backend，行为同拆分前）。
 
 ## CI/CD
 
@@ -491,6 +516,13 @@ backend 启动即拉起任务调度循环（`app/scheduler.py`），到点自动
 2. `deploy-nas`（仅 main，runner #18 "nas"，tags `linux,docker,nas,deploy`）：
    test 全绿后自动在群晖上 `docker compose up -d --build`——该 runner 映射了
    NAS 宿主 docker，容器直接落在 NAS 上持久运行。
+   **空闲守门（2026-11-24）**：部署前查 PG 运行态（`scripts/nas/
+   busy_check.py` 经 docker exec 喂进旧 backend 容器跑）——任务运行中/排队
+   → worker（与迁移期的 backend）延后重建；教学页全量回测运行中 → backend
+   延后重建；各等最多 10 分钟仍忙则只重建安全子集，**流水线保持绿**；
+   每小时 `deploy-catchup-nas` 定时流水线（需在 GitLab CI/CD → Schedules
+   建 main 分支每小时计划）在空闲后补上被延后的服务——镜像没变化时
+   compose 判定无需重建 = 秒级空操作。
 
 前置：项目 CI/CD Variables 已配置 `POSTGRES_PASSWORD`（masked）。
 部署后访问 `http://<NAS>:28080`（默认端口）。手动重部署也可以在 NAS 上

@@ -6,6 +6,10 @@
 - 新建/编辑/删除               → POST / PATCH / DELETE
 - 立即执行/取消排队/停止运行    → POST .../run | cancel | stop
 - 单任务运行历史               → GET /api/tasks/{id}/runs
+
+运行态与指令走 task_control（生产=PgTaskControl 写 PG task_runtime 指令行，
+由 worker 进程消费——任务执行独立容器后 API 与执行不在一个进程，见
+app/task_runtime.py；TaskScheduler 同款方法，单进程开发模式等价）。
 """
 
 import datetime as dt
@@ -15,7 +19,8 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, field_validator
 
 from . import config
-from .scheduler import SH_TZ, TaskScheduler, next_run_at
+from .scheduler import SH_TZ, next_run_at
+from .task_runtime import PgTaskControl
 from .task_store import TaskStore
 
 VALID_SOURCES = ("sina", "eastmoney", "fund", "backtest")
@@ -81,7 +86,7 @@ class TaskPatch(BaseModel):
         return TaskIn._time_ok(v)
 
 
-def register_task_routes(app: FastAPI, *, scheduler: TaskScheduler,
+def register_task_routes(app: FastAPI, *, task_control: PgTaskControl,
                          task_store: TaskStore, connect) -> None:
     """挂载任务路由（依赖注入便于测试假件）。"""
 
@@ -96,21 +101,12 @@ def register_task_routes(app: FastAPI, *, scheduler: TaskScheduler,
         return task
 
     def _phase(task_id: int) -> str:
-        return scheduler.runtime_state()["phases"].get(task_id, "idle")
-
-    def _last_error(task_id: int):
-        """上次执行体异常原因（内存态，重启即失；正常/未跑过为 None）。
-
-        执行体异常发生在 start_run 之前时 crawl_run 无记录（如建表缺失），
-        「历史」查不到——失败原因只能从调度器的内存结果里透出。"""
-        result = scheduler.last_results.get(task_id)
-        return (result or {}).get("detail") if result and result.get("error") \
-            else None
+        return task_control.runtime_state()["phases"].get(task_id, "idle")
 
     @app.get("/api/tasks")
     def list_tasks():
-        state = scheduler.runtime_state()
         try:
+            state = task_control.runtime_state()
             now = dt.datetime.fromisoformat(state["server_time"])
             with connect(config.DATABASE_URL) as conn:
                 tasks = []
@@ -128,12 +124,12 @@ def register_task_routes(app: FastAPI, *, scheduler: TaskScheduler,
                         "next_run_at": nxt.isoformat() if nxt else None,
                         "progress": state["progress"].get(t["id"]),
                         "last_run": last[0] if last else None,
-                        "last_error": _last_error(t["id"]),
+                        "last_error": task_control.last_error(t["id"]),
                     })
         except Exception as exc:              # PG 不可达：降级而非 5xx
             return {"status": "down", "detail": f"{type(exc).__name__}: "
                                                 f"{str(exc)[:120]}",
-                    "server_time": state["server_time"], "tasks": [],
+                    "server_time": now_sh().isoformat(), "tasks": [],
                     "queue": [], "running": None}
         return {
             "status": "up", "server_time": state["server_time"], "tasks": tasks,
@@ -174,7 +170,7 @@ def register_task_routes(app: FastAPI, *, scheduler: TaskScheduler,
         if phase == "running":
             raise HTTPException(409, "任务运行中不可删除，请先停止运行")
         if phase == "queued":
-            scheduler.cancel_queued(task_id)   # 移出队列再删
+            task_control.cancel_queued(task_id)   # 移出队列再删
         try:
             with connect(config.DATABASE_URL) as conn:
                 if not task_store.delete_task(conn, task_id):
@@ -182,6 +178,10 @@ def register_task_routes(app: FastAPI, *, scheduler: TaskScheduler,
                 conn.commit()
         except psycopg.Error as exc:
             raise HTTPException(503, f"数据库不可达: {exc}")
+        try:
+            task_control.delete(task_id)   # 运行态行同步清（防快照残留幽灵）
+        except psycopg.Error:
+            pass                           # 定义行已删；运行态行下次清理兜底
         return {"deleted": task_id}
 
     @app.post("/api/tasks/{task_id}/run")
@@ -189,21 +189,21 @@ def register_task_routes(app: FastAPI, *, scheduler: TaskScheduler,
         _require(task_id)
         if _phase(task_id) in ("queued", "running"):
             raise HTTPException(409, "任务已在排队/运行中")
-        if not scheduler.request_run(task_id):
+        if not task_control.request_run(task_id):
             raise HTTPException(409, "任务已在排队/运行中")
-        return {"triggered": task_id, "queue_position": len(scheduler.runtime_state()["queue"])}
+        return {"triggered": task_id, "queue_position": len(task_control.runtime_state()["queue"])}
 
     @app.post("/api/tasks/{task_id}/cancel")
     def cancel_task(task_id: int):
         _require(task_id)
-        if not scheduler.cancel_queued(task_id):
+        if not task_control.cancel_queued(task_id):
             raise HTTPException(409, "任务不在排队中")
         return {"cancelled": task_id}
 
     @app.post("/api/tasks/{task_id}/stop")
     def stop_task(task_id: int):
         _require(task_id)
-        if not scheduler.stop_running(task_id):
+        if not task_control.stop_running(task_id):
             raise HTTPException(409, "任务未在运行")
         return {"stopping": task_id}
 

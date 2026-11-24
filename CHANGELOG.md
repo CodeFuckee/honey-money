@@ -6,6 +6,36 @@
 ## [Unreleased]
 
 ### Added
+- **任务执行独立 worker 容器——流水线重新部署不再打断回测/爬取任务（2026-11-24）**：
+  起因=每次推送 main 触发部署都会重建 backend 容器、杀掉运行中的定投日更
+  （此前已两次实证：日更被容器重启杀掉后 crawl_run 行敞开 16 小时）。
+  架构改造：①新增 worker 容器（与 backend 同镜像，`python -m
+  app.worker`——schema 兜底 + 遗留运行清理 + 调度常驻）独占任务执行，
+  backend 只留 API（compose 设 `SCHEDULER_ENABLED=0`），重建 backend 与
+  运行中任务从此互不干扰；②运行态落 PG 新表 task_runtime（每任务一行：
+  phase/trigger_kind/enqueued_at/progress JSONB/last_result JSONB/
+  stop_requested）——队列/进度/结果/停止指令跨进程，API 写指令行、worker
+  轮询消费（停止 ≤5s 翻译成 asyncio.Event，executor 六种 job 零改动）；
+  入队是条件 upsert（`ON CONFLICT … WHERE phase='idle'`，排队/运行中
+  原子拒绝）；**队列跨 worker 重启存活**（内存队列时代重启即丢，顺带修掉）；
+  ③启动兜底清单抽出 `app/startup.py`（backend 与 worker 共用单一事实源），
+  遗留运行清理只在宿主调度器的进程跑——纯 API 模式的 backend 重启绝不碰
+  crawl_run/task_runtime 运行行（worker 可能正在跑，误标即污染）；调度器
+  5 个内存 dict 全部退役，TaskScheduler 经注入 runtime 读写（测试接缝
+  scan_once/drain_once 保留）；④CI 空闲守门：deploy-nas 部署前查 PG
+  （`scripts/nas/busy_check.py` 经 docker exec 喂进旧 backend 容器跑，
+  容器无 psql）——任务运行中/排队 → worker+backend 延后重建；教学页
+  全量回测（backtest_full，仍在 backend）运行中 → backend 延后重建；
+  各等最多 10 分钟仍忙则只重建安全子集并显式提示，**流水线保持绿**；
+  新增每小时 `deploy-catchup-nas` 定时流水线在空闲后补上被延后的服务
+  （镜像没变化时 compose 判定无需重建=秒级空操作；需在 GitLab Schedules
+  建 main 每小时计划）；⑤单进程开发模式（SCHEDULER_ENABLED=1）行为同
+  拆分前，本地开发/E2E 不受影响；em_cookie/pages_workspace 卷同栈共享
+  （Cookie API 写、worker 读）。+47 单测（task_runtime 存储 21：条件
+  upsert/pop 置 running/启动清理只动 running 行保留排队/快照映射/控制面
+  last_error 规则；调度器适配 + 停止指令经 PG 轮询生效 2 + 队列跨重启
+  存活 1；任务 API 换 task_control 假件）；后端 941 全绿 + E2E 全量无回归；
+  API JSON 形状不变（前端零改动）。
 - **设置页回测进度显示（2026-11-24）**：运行中呈现推算进度条——已运行时长/预估耗时（full 按 8 小时、dirty 按 10 分钟）百分比渲染 + 完成态显示「上次回测：起 ~ 止（用时 X）」；时间基准用 `GET /api/settings` 新增的 `server_now` 校正客户端时钟偏差（进度推算不受本机时钟漂移影响）；停留在设置页时每秒走表、每 30 秒自动拉取真实状态（离开页面停止定时器）。设计约束：引擎在 spawn 子进程内计算、期间无库上进度信号（并行分块重算仍在演进），本轮为推算进度 + 明确标注「按预估耗时推算，完成度以实际为准」；基金级真实进度待分块重算稳定后接入。+1 单测（server_now 存在且为含时区ISO 串）+2 E2E（E2E-477 运行中进度渲染 2h/8h≈25% 区间断言/478 完成态进度块消失+上次用时+dirty 确认框「约 10 分钟」）。
 - **定投日更重算单机并行化——基金分片 × 进程池动态负载均衡（2026-11-24）**：
   `run_full_backtest_tp_dirty` 的重算分支改造为分片派发：脏基金按

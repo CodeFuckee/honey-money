@@ -7,9 +7,11 @@
 - /api/crawl/stats        爬虫数据统计
 - /api/tasks[...]         爬虫任务管理（CRUD/触发/取消/停止/历史）
 
-任务调度：lifespan 启动时初始化任务表（含预置任务）并拉起进程内调度循环
-（每日到点自动爬取 + 启动补跑，见 app/scheduler.py）；SCHEDULER_ENABLED=0
-可整体关闭（任务 CRUD 仍可用，仅不再自动执行）。
+任务调度：生产拓扑下任务执行独立到 worker 容器（python -m app.worker，
+见 app/worker.py）——backend 只留 API（compose 设 SCHEDULER_ENABLED=0），
+流水线重建 backend 不再打断运行中任务；运行态/指令经 PG task_runtime
+跨进程（见 app/task_runtime.py）。SCHEDULER_ENABLED=1 仍支持单进程开发
+模式（调度器宿主于 backend，行为与拆分前一致）。
 """
 
 from contextlib import asynccontextmanager
@@ -18,34 +20,31 @@ import psycopg
 from fastapi import FastAPI
 
 from . import config
-from . import backtest_full
-from . import dca_store
 from . import em_cookie
-from . import index_store
-from . import market_compare
-from . import market_crises
+from . import startup
 from .backtest_api import register_backtest_routes
 from .backtest_full_api import register_full_backtest_routes
 from .browse import fetch_fund_list, fetch_fund_navs, fetch_stock_bars, fetch_stock_basic, fetch_stock_list
-from .crawler.fund_store import FundStore
-from .crawler.store import Store
 from .crawl_stats import fetch_crawl_stats
 from .dca_api import register_fund_dca_routes
 from .infra import check_postgres, check_proxy_pool
 from .market_compare import register_market_routes
 from .market_crises import register_crises_routes
 from .settings_api import register_settings_routes
-from . import settings_store
 from .scheduler import PgAdvisoryLock, TaskScheduler, build_crawl_executor
+from .task_runtime import PgTaskControl
 from .task_store import TaskStore
 from .tasks_api import register_task_routes
 
 
 def create_app(*, scheduler: TaskScheduler | None = None,
-               task_store: TaskStore | None = None, connect=None) -> FastAPI:
+               task_store: TaskStore | None = None, connect=None,
+               task_control: PgTaskControl | None = None) -> FastAPI:
     """依赖注入参数供测试换假件；缺省按配置构造生产件。"""
     task_store = task_store or TaskStore()
     connect = connect or psycopg.connect
+    task_control = task_control or PgTaskControl(config.DATABASE_URL,
+                                                 connect=connect)
     if scheduler is None:
         scheduler = TaskScheduler(
             dsn=config.DATABASE_URL,
@@ -54,47 +53,15 @@ def create_app(*, scheduler: TaskScheduler | None = None,
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        # 四个初始化各自独立事务/失败域：一个挂不回滚其他
-        # （教训：任务 seed 曾与建表同事务，NULL 违约连带回滚新表；
-        # 教训2：基金表漏在启动清单里，调度执行体不建表，首次基金任务
-        # UndefinedTable 秒退且无 run 记录——2026-10-26；
-        # 教训3：多阈值表迁移只在日更里跑，新代码 SELECT 新列后、当日日更前
-        # 生产接口整页 down——2026-11-19，与教训2同根：启动即兜底建表补列）
-        for name, init in (("基础表", Store().init_schema),
-                           ("任务表", task_store.init_schema),
-                           ("基金表", FundStore().init_schema),
-                           ("全量回测表", backtest_full.ensure_schema),
-                           ("定投回测表", dca_store.ensure_schema),
-                           ("多阈值回测表", dca_store.ensure_tp_schema),
-                           ("回测指纹表", dca_store.ensure_fp_schema),
-                           ("基金波动表", dca_store.ensure_risk_schema),
-                           ("熊市断缴表", dca_store.ensure_bear_pause_schema),
-                           ("指数表", index_store.ensure_schema),
-                           ("设置表", settings_store.ensure_settings_schema)):
-            try:
-                with connect(config.DATABASE_URL) as conn:
-                    init(conn)
-                    conn.commit()
-            except Exception as exc:               # PG 暂不可达：服务照常起
-                print(f"[startup] {name}初始化失败（不影响其他表）: {exc}")
-        try:
-            # 重启恢复：遗留 running 标 interrupted（须在建表提交后执行，
-            # 否则第二连接看不到未提交的新表并使整个初始化回滚）
-            backtest_full.mark_interrupted_on_startup()
-        except Exception as exc:
-            print(f"[startup] 全量回测中断标记失败（表未建好时跳过）: {exc}")
-        try:
-            # 同款兜底：爬虫/回测运行行遗留未收尾标记 aborted（重启杀掉
-            # 进程内运行与 spawn 子进程，行会永远停在 finished_at IS NULL，
-            # 任务状态与回测进度判定会被陈旧行污染——2026-11-24）
-            with connect(config.DATABASE_URL) as conn:
-                n = Store().mark_interrupted_on_startup(conn)
-                conn.commit()
-            if n:
-                print(f"[startup] 遗留运行标记 interrupted：{n} 行")
-        except Exception as exc:
-            print(f"[startup] 遗留运行标记失败（跳过）: {exc}")
+        # 兜底建表/补列清单在 app/startup.py（backend 与 worker 共用的单一
+        # 事实源——教训2/3：清单漏表 → UndefinedTable / 新代码读新列整页
+        # down；每项独立事务/失败域）
+        startup.run_schema_inits(connect, task_store=task_store)
         if config.SCHEDULER_ENABLED:
+            # 遗留运行清理只在宿主调度器的进程做：compose 下 backend 是纯
+            # API（=0），worker 可能正在跑，重启 backend 不得误标它的活
+            # 运行行——worker 启动时自己做（见 startup.cleanup_interrupted_runs）
+            startup.cleanup_interrupted_runs(connect)
             await scheduler.start()
         # vectorbt numba 编译预热（后台）：部署后首次用户回测从数十秒降到秒级
         import asyncio
@@ -120,6 +87,7 @@ def create_app(*, scheduler: TaskScheduler | None = None,
         return response
 
     app.state.scheduler = scheduler
+    app.state.task_control = task_control
 
     @app.get("/healthz")
     def healthz():
@@ -236,7 +204,7 @@ def create_app(*, scheduler: TaskScheduler | None = None,
         """
         return fetch_crawl_stats(config.DATABASE_URL)
 
-    register_task_routes(app, scheduler=scheduler, task_store=task_store,
+    register_task_routes(app, task_control=task_control, task_store=task_store,
                          connect=connect)
     register_backtest_routes(app)
     register_full_backtest_routes(app)

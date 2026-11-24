@@ -1,4 +1,5 @@
-"""爬虫任务调度器：backend 进程内自治调度，替代外部计划任务。
+"""爬虫任务调度器：常驻进程内自治调度（生产=worker 容器，见 app/worker.py；
+单进程开发模式 SCHEDULER_ENABLED=1 时宿主于 backend），替代外部计划任务。
 
 职责边界：
 - 调度：每 poll_interval 秒扫描 crawl_task（上海时区 HH:MM，不辨交易日——
@@ -10,8 +11,12 @@
   CLI 与调度任务并发写库、未来多 worker 重复调度；取不到则等待重试；
 - 执行：委托注入的 executor 协程（生产=build_crawl_executor：拉清单 +
   CrawlRunner，防封参数内置安全默认值），调度器不感知爬虫细节，可全假件测试；
-- 停止：stop_event 协作式停止（runner 停止派发、优雅落库，不算失败）；
-- 状态：运行态（phase/progress/队列）只在内存——随进程消失，历史在 crawl_run。
+- 停止：协作式——API 把停止指令写进 task_runtime.stop_requested（跨进程），
+  本进程 5s 轮询翻译成 asyncio.Event，executor 各 job 照旧消费（runner
+  停止派发、优雅落库，不算失败）；
+- 状态：运行态（phase/progress/队列/结果）全经注入的 runtime（生产=
+  TaskRuntime 落 PG）——队列跨重启存活、任务 API 跨进程读写，本进程内存
+  不再持有任何运行态；历史在 crawl_run。
 
 scan_once / drain_once 单步公开方法：测试直接驱动，不跑真实循环；
 start() 拉起的后台循环只是反复调用它们。
@@ -31,6 +36,7 @@ from .crawler.rate import RateLimiter
 from .crawler.runner import CrawlRunner
 from .crawler.sina import SinaClient
 from .crawler.store import Store
+from .task_runtime import TaskRuntime
 from .task_store import TaskStore
 
 SH_TZ = ZoneInfo("Asia/Shanghai")
@@ -443,7 +449,9 @@ def httpx_async_client(**kw):
 class TaskScheduler:
     def __init__(self, *, dsn: str, poll_interval: float = 30.0,
                  clock=None, sleeper=None, executor=None, lock=None,
-                 connect=None, task_store: TaskStore | None = None):
+                 connect=None, task_store: TaskStore | None = None,
+                 runtime: TaskRuntime | None = None,
+                 stop_poll_interval: float = 5.0):
         self._dsn = dsn
         self._poll_interval = poll_interval
         self._clock = clock or (lambda: dt.datetime.now(SH_TZ))
@@ -452,12 +460,8 @@ class TaskScheduler:
         self._lock = lock
         self._connect = connect or psycopg.connect
         self._tasks = task_store or TaskStore()
-        self._queue: list[dict] = []          # {task_id, trigger, cancelled}
-        self._phases: dict[int, str] = {}     # task_id → queued | running | idle
-        self._progress: dict[int, dict] = {}
-        self._stop_events: dict[int, asyncio.Event] = {}
-        self._running_task_id: int | None = None
-        self.last_results: dict[int, dict] = {}
+        self._runtime = runtime or TaskRuntime(dsn, connect=self._connect)
+        self._stop_poll_interval = stop_poll_interval
         self._loop_task: asyncio.Task | None = None
 
     # ---- 后台循环 ----
@@ -476,8 +480,8 @@ class TaskScheduler:
         while True:
             try:
                 await self.scan_once(startup=first)
-                while self._queue:            # 串行清空队列
-                    await self.drain_once()
+                while await self.drain_once():    # 串行清空队列
+                    pass
             except Exception as exc:          # PG 短暂不可达等：记日志下轮再来
                 print(f"[scheduler] 扫描异常（下轮重试）: {exc}")
             first = False
@@ -495,7 +499,8 @@ class TaskScheduler:
                     continue
                 if not task["schedule_time"]:
                     continue          # 纯手动任务（无调度时刻）不参与排程
-                if self._phases.get(task["id"]) in ("queued", "running"):
+                if await asyncio.to_thread(self._runtime.phase, conn,
+                                           task["id"]) in ("queued", "running"):
                     continue
                 if await asyncio.to_thread(self._tasks.ran_today, conn, task["id"],
                                            now.date().isoformat()):
@@ -504,22 +509,25 @@ class TaskScheduler:
                 due = now.replace(hour=int(hh), minute=int(mm),
                                   second=0, microsecond=0)
                 if now >= due:
-                    self._enqueue(task["id"],
-                                  trigger="catch_up" if startup else "schedule")
+                    await asyncio.to_thread(
+                        self._runtime.push, conn, task["id"],
+                        "catch_up" if startup else "schedule")
 
     async def drain_once(self) -> bool:
         """执行队列中下一个有效任务（一次一个，全局串行）。无任务返回 False。"""
-        while self._queue:
-            entry = self._queue.pop(0)
-            if entry["cancelled"]:
-                continue
+        while True:
+            with self._connect(self._dsn) as conn:
+                entry = await asyncio.to_thread(self._runtime.pop_next, conn)
+            if entry is None:
+                return False
             task = await asyncio.to_thread(self._load_task, entry["task_id"])
             if task is None:                  # 排队期间被删除：跳过
-                self._phases.pop(entry["task_id"], None)
+                with self._connect(self._dsn) as conn:
+                    await asyncio.to_thread(self._runtime.mark_idle, conn,
+                                            entry["task_id"])
                 continue
             await self._execute(entry, task)
             return True
-        return False
 
     def _load_task(self, task_id: int) -> dict | None:
         with self._connect(self._dsn) as conn:
@@ -529,13 +537,27 @@ class TaskScheduler:
         task_id = task["id"]
         trigger = entry["trigger"]
         stop_event = asyncio.Event()
-        self._stop_events[task_id] = stop_event
-        self._phases[task_id] = "running"
-        self._running_task_id = task_id
+        poller = asyncio.create_task(self._poll_stop(task_id, stop_event))
         exec_task = {**task, "_trigger": trigger}
 
+        # 进度落库限频（5s）：爬虫 progress 是股级回调（全量可达万次），
+        # 跨进程后逐股打库不可取；首末次立即写，运行中显示 ≤5s 粒度
+        last_write, last_state = 0.0, None
+
         def progress(done: int, total: int) -> None:
-            self._progress[task_id] = {"done": done, "total": total}
+            nonlocal last_write, last_state
+            state = {"done": done, "total": total}
+            if state == last_state:
+                return
+            now_ts = dt.datetime.now(SH_TZ).timestamp()
+            if last_write and now_ts - last_write < 5.0:
+                return
+            last_write, last_state = now_ts, state
+            try:
+                with self._connect(self._dsn) as conn:
+                    self._runtime.set_progress(conn, task_id, done, total)
+            except Exception as exc:      # 进度落库失败不影响执行
+                print(f"[task] #{task_id} 进度落库失败（忽略）: {exc}")
 
         result: dict = {"trigger": trigger, "error": False, "stopped": False,
                         "total": 0, "ok": 0, "failed": 0, "bars": 0,
@@ -558,54 +580,57 @@ class TaskScheduler:
             result["detail"] = f"{type(exc).__name__}: {str(exc)[:200]}"
             print(f"[task] #{task_id} 执行异常: {result['detail']}")
         finally:
+            poller.cancel()
+            try:
+                await poller
+            except asyncio.CancelledError:
+                pass
             if locked:
                 await self._lock.release()
             result["started_at"] = started.isoformat()
             result["finished_at"] = dt.datetime.now(SH_TZ).isoformat()
-            self.last_results[task_id] = result
-            self._progress.pop(task_id, None)
-            self._stop_events.pop(task_id, None)
-            self._running_task_id = None
-            self._phases[task_id] = "idle"
+            try:
+                with self._connect(self._dsn) as conn:
+                    self._runtime.finish(conn, task_id, result)
+            except Exception as exc:      # 结果落库失败：行由下次启动清理兜底
+                print(f"[task] #{task_id} 结果落库失败（行留 running 由重启清理）: {exc}")
             print(f"[task] #{task_id} 结束：{'已停止' if result['stopped'] else ''}"
                   f"{'异常' if result['error'] else ''} "
                   f"成 {result['ok']} / 败 {result['failed']}")
 
-    # ---- 管理操作（同步，纯内存/快速 DB 读）----
+    async def _poll_stop(self, task_id: int, stop_event: asyncio.Event) -> None:
+        """轮询 PG 停止指令 → 进程内 asyncio.Event（executor 各 job 已有
+        消费逻辑，此处只是跨进程翻译层）。PG 抖动不放大为任务失败。"""
+        while True:
+            try:
+                with self._connect(self._dsn) as conn:
+                    if await asyncio.to_thread(self._runtime.is_stop_requested,
+                                               conn, task_id):
+                        stop_event.set()
+                        return
+            except Exception:
+                pass
+            await asyncio.sleep(self._stop_poll_interval)
 
-    def _enqueue(self, task_id: int, *, trigger: str) -> None:
-        self._queue.append({"task_id": task_id, "trigger": trigger,
-                            "cancelled": False})
-        self._phases[task_id] = "queued"
+    # ---- 管理操作（写 PG 指令行；worker 在另一进程消费——单进程开发
+    # 模式下同一进程内即时可见）----
 
     def request_run(self, task_id: int) -> bool:
         """手动触发（不管 enabled）；排队/运行中拒绝。"""
-        if self._phases.get(task_id) in ("queued", "running"):
-            return False
-        self._enqueue(task_id, trigger="manual")
-        return True
+        with self._connect(self._dsn) as conn:
+            return self._runtime.push(conn, task_id, "manual")
 
     def cancel_queued(self, task_id: int) -> bool:
-        if self._phases.get(task_id) != "queued":
-            return False
-        for entry in self._queue:
-            if entry["task_id"] == task_id:
-                entry["cancelled"] = True
-        self._phases.pop(task_id, None)
-        return True
+        with self._connect(self._dsn) as conn:
+            return self._runtime.cancel_queued(conn, task_id)
 
     def stop_running(self, task_id: int) -> bool:
-        """停止运行中任务：置位 stop_event，runner 停止派发、优雅落库。"""
-        if self._phases.get(task_id) != "running":
-            return False
-        self._stop_events[task_id].set()
-        return True
+        """停止运行中任务：置 PG 停止标志，≤stop_poll_interval 生效。"""
+        with self._connect(self._dsn) as conn:
+            return self._runtime.request_stop(conn, task_id)
 
     def runtime_state(self) -> dict:
-        return {
-            "phases": dict(self._phases),
-            "progress": {k: dict(v) for k, v in self._progress.items()},
-            "queue": [e["task_id"] for e in self._queue if not e["cancelled"]],
-            "running_task_id": self._running_task_id,
-            "server_time": self._clock().isoformat(),
-        }
+        with self._connect(self._dsn) as conn:
+            state = self._runtime.snapshot(conn)
+        state["server_time"] = self._clock().isoformat()
+        return state

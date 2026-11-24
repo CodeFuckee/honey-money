@@ -1,5 +1,8 @@
 """调度器测试：扫描入队、启动补跑、全局串行、手动触发、取消/停止、互斥锁。
 
+运行态全经注入的 FakeRuntime（接口=TaskRuntime，内存版）——与生产
+「PG task_runtime 跨进程」同一条协议（见 app/task_runtime.py）。
+
 全离线：时钟/睡眠/执行体/锁/连接全部注入假件，scan_once/drain_once 单步驱动，
 不跑真实定时循环，行为完全确定。
 """
@@ -91,6 +94,91 @@ class FakeLock:
         self.held = False
 
 
+
+class FakeRuntime:
+    """task_runtime 假件：内存版队列/阶段/进度/结果（接口=TaskRuntime）。"""
+
+    def __init__(self):
+        self._rows: dict[int, dict] = {}
+        self._seq = 0
+        self.last_results: dict[int, dict] = {}
+
+    def _row(self, tid):
+        return self._rows.setdefault(tid, {})
+
+    def phase(self, conn, tid):
+        return self._row(tid).get("phase", "idle")
+
+    def push(self, conn, tid, trigger):
+        row = self._row(tid)
+        if row.get("phase") in ("queued", "running"):
+            return False
+        self._seq += 1
+        row.update(phase="queued", trigger=trigger, seq=self._seq,
+                   progress=None)
+        return True
+
+    def pop_next(self, conn):
+        queued = [(t, r) for t, r in self._rows.items()
+                  if r.get("phase") == "queued"]
+        if not queued:
+            return None
+        tid, row = min(queued, key=lambda x: x[1]["seq"])
+        row.update(phase="running", progress=None, stop_requested=False)
+        return {"task_id": tid, "trigger": row["trigger"]}
+
+    def cancel_queued(self, conn, tid):
+        row = self._row(tid)
+        if row.get("phase") != "queued":
+            return False
+        row.update(phase="idle", trigger=None, progress=None)
+        return True
+
+    def request_stop(self, conn, tid):
+        row = self._row(tid)
+        if row.get("phase") != "running":
+            return False
+        row["stop_requested"] = True
+        return True
+
+    def is_stop_requested(self, conn, tid):
+        return bool(self._row(tid).get("stop_requested"))
+
+    def set_progress(self, conn, tid, done, total):
+        self._row(tid)["progress"] = {"done": done, "total": total}
+
+    def finish(self, conn, tid, result):
+        row = self._row(tid)
+        row.update(phase="idle", trigger=None, progress=None,
+                   stop_requested=False, last_result=result)
+        self.last_results[tid] = result
+
+    def mark_idle(self, conn, tid):
+        row = self._row(tid)
+        row.update(phase="idle", trigger=None, progress=None)
+
+    def snapshot(self, conn):
+        order = sorted(self._rows.items(), key=lambda x: x[1].get("seq") or 0)
+        phases, progress, queue, running = {}, {}, [], None
+        for tid, row in order:
+            ph = row.get("phase", "idle")
+            phases[tid] = ph
+            if row.get("progress") is not None:
+                progress[tid] = row["progress"]
+            if ph == "queued":
+                queue.append(tid)
+            elif ph == "running" and running is None:
+                running = tid
+        return {"phases": phases, "progress": progress, "queue": queue,
+                "running_task_id": running}
+
+    def last_result(self, conn, tid):
+        return self._row(tid).get("last_result")
+
+    def delete(self, conn, tid):
+        self._rows.pop(tid, None)
+
+
 RESULT = {"total": 3, "ok": 3, "failed": 0, "bars": 3, "failures": []}
 
 
@@ -113,7 +201,8 @@ class FakeExecutor:
 
 
 def make_scheduler(*, tasks=(), clock=None, lock=None, executor=None,
-                   task_store=None, poll_interval=30.0, **kw):
+                   task_store=None, poll_interval=30.0, runtime=None, **kw):
+    """构建调度器（运行态假件经 sched._runtime 访问）。"""
     return TaskScheduler(
         dsn="postgresql://fake", poll_interval=poll_interval,
         clock=clock or FakeClock(sh(hour=17)),
@@ -122,6 +211,8 @@ def make_scheduler(*, tasks=(), clock=None, lock=None, executor=None,
         lock=lock or FakeLock(),
         connect=lambda *a, **k: FakeConn(),
         task_store=task_store or FakeTaskStore(tasks),
+        runtime=runtime or FakeRuntime(),
+        stop_poll_interval=0.01,                   # 停止指令经 PG 轮询，测试用快轮询
         **kw,
     )
 
@@ -138,7 +229,7 @@ class TestScan:
         finally:
             run.close()
         assert sched.runtime_state()["phases"] == {1: "idle"}
-        assert sched.last_results[1]["trigger"] == "schedule"
+        assert sched._runtime.last_results[1]["trigger"] == "schedule"
 
     def test_null_schedule_manual_task_never_scheduled(self):
         """手动任务（schedule_time NULL）：scan 不入队也不崩——曾 AttributeError
@@ -153,8 +244,8 @@ class TestScan:
             loop.run_until_complete(sched.drain_once())
         finally:
             loop.close()
-        assert all(e["task_id"] != 2 for e in sched._queue)
-        assert sched.last_results.get(2) is None
+        assert 2 not in sched.runtime_state()["queue"]
+        assert sched._runtime.last_results.get(2) is None
 
     def test_disabled_task_never_scheduled(self):
         sched = make_scheduler(tasks=[FakeTask(1, enabled=False)],
@@ -165,7 +256,7 @@ class TestScan:
             loop.run_until_complete(sched.drain_once())
         finally:
             loop.close()
-        assert sched._queue == []
+        assert sched.runtime_state()["queue"] == []
         assert sched.runtime_state()["phases"] == {}
 
     def test_already_ran_today_not_rescheduled(self):
@@ -179,7 +270,7 @@ class TestScan:
             loop.run_until_complete(sched.scan_once())
         finally:
             loop.close()
-        assert sched._queue == []
+        assert sched.runtime_state()["queue"] == []
 
     def test_future_task_not_enqueued(self):
         sched = make_scheduler(tasks=[FakeTask(1)], clock=FakeClock(sh(hour=17)))
@@ -188,7 +279,7 @@ class TestScan:
             loop.run_until_complete(sched.scan_once())
         finally:
             loop.close()
-        assert sched._queue == []
+        assert sched.runtime_state()["queue"] == []
 
     def test_running_or_queued_not_double_enqueued(self):
         """任务已排队/运行中时，扫描不得重复入队。"""
@@ -201,7 +292,7 @@ class TestScan:
             loop.run_until_complete(sched.scan_once())      # 第二次扫描
         finally:
             loop.close()
-        assert len(sched._queue) == 1
+        assert sched.runtime_state()["queue"] == [1]
 
 
 class TestCatchUp:
@@ -214,7 +305,7 @@ class TestCatchUp:
             loop.run_until_complete(sched.drain_once())
         finally:
             loop.close()
-        assert sched.last_results[1]["trigger"] == "catch_up"
+        assert sched._runtime.last_results[1]["trigger"] == "catch_up"
 
     def test_catch_up_runs_only_once_per_day(self):
         store = FakeTaskStore([FakeTask(1)])
@@ -229,7 +320,7 @@ class TestCatchUp:
             loop.run_until_complete(sched.drain_once())
         finally:
             loop.close()
-        assert len(sched.last_results) == 1
+        assert len(sched._runtime.last_results) == 1
 
     def test_catch_up_suppressed_if_already_ran(self):
         store = FakeTaskStore([FakeTask(1)])
@@ -241,7 +332,7 @@ class TestCatchUp:
             loop.run_until_complete(sched.scan_once(startup=True))
         finally:
             loop.close()
-        assert sched._queue == []
+        assert sched.runtime_state()["queue"] == []
 
 
 class TestSerialQueue:
@@ -276,7 +367,7 @@ class TestSerialQueue:
             loop.run_until_complete(sched.drain_once())
         finally:
             loop.close()
-        assert len(sched.last_results) == 1
+        assert len(sched._runtime.last_results) == 1
         assert sched.runtime_state()["phases"] == {1: "idle", 2: "queued"}
 
 
@@ -293,7 +384,7 @@ class TestManualRun:
         finally:
             loop.close()
         assert ok is True
-        assert sched.last_results[1]["trigger"] == "manual"
+        assert sched._runtime.last_results[1]["trigger"] == "manual"
 
     def test_manual_does_not_count_as_planned_run(self):
         """手动跑完不写计划标记：当晚调度照常（scan 仍会入队）。"""
@@ -340,7 +431,7 @@ class TestCancelAndStop:
             loop.close()
         assert ok is True
         assert executor.calls == []
-        assert sched.runtime_state()["phases"] == {}
+        assert sched.runtime_state()["phases"] == {1: "idle"}
 
     def test_cancel_idle_task_returns_false(self):
         sched = make_scheduler(tasks=[FakeTask(1)], clock=FakeClock(sh(hour=12)))
@@ -430,8 +521,60 @@ class TestLock:
         finally:
             loop.close()
         assert lock.held is False
-        assert sched.last_results[1]["error"] is True
+        assert sched._runtime.last_results[1]["error"] is True
         assert sched.runtime_state()["phases"] == {1: "idle"}
+
+
+class TestStopViaRuntime:
+    def test_stop_running_writes_flag_and_executor_sees_stop(self):
+        """停止是跨进程指令：stop_running 只写 runtime 标志（本进程没有
+        Event 可置位），执行循环内 5s 轮询（测试 0.01s）翻译成 stop_event
+        ——executor 的既有消费逻辑零改动。"""
+        seen: dict = {}
+
+        async def during(task, progress, stop_event):
+            await asyncio.sleep(0.05)
+            seen["requested"] = sched.stop_running(task["id"])   # 写 PG 标志
+            await asyncio.sleep(0.2)                             # 给轮询留窗
+            seen["event_set"] = stop_event.is_set()
+
+        sched = make_scheduler(tasks=[FakeTask(1)],
+                               clock=FakeClock(sh(hour=18, minute=5)),
+                               executor=FakeExecutor(during=during))
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(sched.scan_once())
+            loop.run_until_complete(sched.drain_once())
+        finally:
+            loop.close()
+        assert seen == {"requested": True, "event_set": True}
+        assert sched._runtime.last_results[1]["stopped"] is True
+        assert sched._runtime.last_results[1]["error"] is False
+        # 收尾复位停止标志（下次运行干净起步）
+        assert sched._runtime.is_stop_requested(None, 1) is False
+
+    def test_stop_idle_task_rejected(self):
+        sched = make_scheduler(tasks=[FakeTask(1)], clock=FakeClock(sh(hour=12)))
+        assert sched.stop_running(1) is False
+
+
+class TestQueuePersistence:
+    def test_queued_task_survives_new_scheduler(self):
+        """队列在 runtime（PG）里：调度器实例换新（=worker 重启）后排队的
+        任务仍被消费——内存队列时代重启即丢，这是拆分顺带修掉的缺陷。"""
+        rt = FakeRuntime()
+        conn = FakeConn()
+        rt.push(conn, 1, "manual")                     # 上一代 worker 入的队
+        sched = make_scheduler(tasks=[FakeTask(1)],
+                               clock=FakeClock(sh(hour=18, minute=5)),
+                               runtime=rt)
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(sched.drain_once())
+        finally:
+            loop.close()
+        assert [c["id"] for c in sched._executor.calls] == [1]
+        assert sched._runtime.last_results[1]["trigger"] == "manual"
 
 
 class TestProgressAndState:

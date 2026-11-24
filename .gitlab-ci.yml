@@ -3,6 +3,11 @@
 # 部署原理：#18 runner 运行在群晖 Docker 里且映射了宿主 docker，
 # 作业内执行 docker compose 实际作用对象是 NAS 的 Docker daemon，
 # 容器因此直接落在 NAS 上并持久存在（作业结束后不会被清理）。
+#
+# 空闲守门（2026-11-24 任务执行独立 worker 后）：任务（爬虫/定投回测日更）
+# 跑在 worker 容器、教学页全量回测跑在 backend 容器——重建即杀。部署前
+# 查 PG 运行态：忙的服务延后重建（流水线保持绿，每小时 deploy-catchup-nas
+# 定时流水线在空闲后补上，镜像没变时空操作）。
 
 # —— 基础镜像预取（防外网容器 registry 阻断）——
 # 2026-10-06 流水线 3370 根因：本网络直连 Docker Hub 与公共镜像加速全部挂起
@@ -26,6 +31,34 @@
       echo "镜像源不可用，换下一个: $m"
     done
     echo "错误：所有镜像源均拉不到 $canonical"; exit 1
+  }
+
+# —— 运行中任务查询（空闲守门）——
+# 查询通道：docker exec 进旧 backend 容器跑 psycopg 原生 SQL（runner 容器
+# 无 psql；backend 容器自带 psycopg 与 DATABASE_URL）。两个旗互不影响：
+#   CRAWL_BUSY = task_runtime 有排队/运行行 ∪ crawl_run 有未收尾行
+#                → 延后重建 worker（任务在它进程里）**与 backend**
+#                （backend 延后是为迁移期安全：守门上线初的旧 backend 仍是
+#                调度宿主；之后多延几小时无害，catchup 会补）
+#   FULL_BUSY  = backtest_full_run 有 running/canceling 行
+#                → 延后重建 backend（教学页全量回测仍在 backend 进程）
+# 表不存在（如首次上 task_runtime 时旧容器还是老代码）或 PG 抖动 → 视为
+# 空闲：守门是尽力保护而非部署前置条件，误闲的代价由「worker 启动清理
+# 遗留运行」兜住（app/startup.py cleanup_interrupted_runs）。
+.nas-busy-query: &nas-busy-query |
+  busy_query() {
+    CRAWL_BUSY=0; FULL_BUSY=0
+    cid=$(docker ps -q --filter "name=honey-money-backend" | head -1)
+    if [ -z "$cid" ]; then echo "backend 容器不存在（首次部署）：视为空闲"; return 0; fi
+    # 查询脚本经 stdin 喂进容器（repo 已检出到 runner 工作区，单一事实源
+    # 在 scripts/nas/busy_check.py，本地可直接跑同一脚本自测）
+    docker exec -i "$cid" python - > /tmp/hm-busy.txt 2>/dev/null \
+      < "$CI_PROJECT_DIR/scripts/nas/busy_check.py" || true
+    if [ -s /tmp/hm-busy.txt ]; then
+      CRAWL_BUSY=$(awk '{print $1}' /tmp/hm-busy.txt)
+      FULL_BUSY=$(awk '{print $2}' /tmp/hm-busy.txt)
+    fi
+    echo "运行态查询：crawl_busy=$CRAWL_BUSY full_busy=$FULL_BUSY"
   }
 
 stages:
@@ -53,6 +86,9 @@ deploy-nas:
   variables:
     COMPOSE_PROJECT_NAME: honey-money   # 固定项目名：job 目录每次随机，不固定会残留孤儿项目
   rules:
+    # 定时流水线（每小时补部署）走 deploy-catchup-nas，不重复全量部署
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
     - if: '$CI_COMMIT_BRANCH == "main"'
   before_script:
     - |
@@ -71,9 +107,32 @@ deploy-nas:
       elif command -v docker-compose > /dev/null 2>&1; then DC="docker-compose";
       else echo "runner 内无 docker compose 可用"; exit 1; fi
     - echo "使用 $DC 部署到 NAS ..."
-    # --remove-orphans：清除已从编排移除但仍在运行的旧服务容器（如内置 postgres）
-    - $DC -p honey-money up -d --build --remove-orphans
-    - $DC -p honey-money ps
+    # —— 空闲守门 ——：忙的容器延后重建（流水线保持绿——延后不是失败；
+    # 每小时 deploy-catchup-nas 在空闲后补上）。先等最多 10 分钟（30s×20）
+    # 让与短任务（分钟级爬取）的撞车自行错开；长任务（全量回测 6~10h、
+    # 定投日更 ~1h）等不完就走延后分支。
+    - *nas-busy-query
+    - |
+      busy_query
+      i=0
+      while { [ "$CRAWL_BUSY" = "1" ] || [ "$FULL_BUSY" = "1" ]; } && [ $i -lt 20 ]; do
+        i=$((i+1))
+        echo "任务运行中（crawl_busy=$CRAWL_BUSY full_busy=$FULL_BUSY），等待空闲 [$i/20]…"
+        sleep 30
+        busy_query
+      done
+      if [ "$CRAWL_BUSY" = "0" ] && [ "$FULL_BUSY" = "0" ]; then
+        echo "空闲：全量部署（frontend/backend/worker/mcp）"
+        # --remove-orphans：清除已从编排移除但仍在运行的旧服务容器（如内置 postgres）
+        $DC -p honey-money up -d --build --remove-orphans
+      elif [ "$CRAWL_BUSY" = "1" ]; then
+        echo "爬虫/回测任务运行中：worker 与 backend 延后重建，本次仅更新 frontend/mcp（任务不受影响）"
+        $DC -p honey-money up -d --build --no-deps frontend mcp
+      else
+        echo "教学页全量回测运行中（full_busy=1）：backend 延后重建，本次更新 frontend/mcp/worker"
+        $DC -p honey-money up -d --build --no-deps frontend mcp worker
+      fi
+      $DC -p honey-money ps
     # 部署健康门：compose 返回 ≠ 后端可服务——uvicorn 要先跑完 lifespan
     # （schema 初始化/调度器启动）才接客，期间 nginx 502、前端整页「数据
     # 不可用」（2026-10-14 实测约 1 分钟窗口）。轮询 healthz 通过才算部署
@@ -102,6 +161,48 @@ deploy-nas:
       echo "部署后 120s healthz 未就绪，判部署失败"; exit 1
     # 注：不做 docker image prune——群晖 daemon 上实测会挂起不返回（流水线 3080 卡 30min），
     # 镜像清理留给 NAS 定期任务（Container Manager 或计划任务手动清理）
+  environment:
+    name: nas
+
+# 空闲补部署（每小时定时流水线，需在 GitLab CI/CD → Schedules 建 main
+# 分支每小时计划）：deploy-nas 守门场景下被延后的 backend/worker 在任务
+# 跑完后由本作业补上新镜像——镜像没变化时 compose 判定容器无需重建 =
+# 秒级空操作，忙时跳过等下一轮（新代码生效最多延迟 1 小时）。
+deploy-catchup-nas:
+  stage: deploy
+  image: docker:27-cli
+  tags: [linux, docker, nas, deploy]
+  timeout: 30m
+  variables:
+    COMPOSE_PROJECT_NAME: honey-money
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $CI_COMMIT_BRANCH == "main"'
+  before_script:
+    - |
+      docker info > /dev/null 2>&1 || {
+        echo "runner 容器访问不到 docker daemon（socket 映射未生效）"; exit 1; }
+  script:
+    - *mirror-fetch
+    - fetch_base python:3.12-slim docker.1panel.live docker.1ms.run docker.m.daocloud.io
+    - |
+      if docker compose version > /dev/null 2>&1; then DC="docker compose";
+      elif command -v docker-compose > /dev/null 2>&1; then DC="docker-compose";
+      else echo "runner 内无 docker compose 可用"; exit 1; fi
+    - *nas-busy-query
+    - |
+      busy_query
+      if [ "$CRAWL_BUSY" = "1" ]; then
+        echo "爬虫/回测任务运行中：跳过本次补部署（worker/backend 均不动，等下一轮）"
+        exit 0
+      fi
+      if [ "$FULL_BUSY" = "1" ]; then
+        echo "教学页全量回测运行中：仅补 worker（backend 等下一轮）"
+        $DC -p honey-money up -d --build --no-deps worker
+      else
+        echo "空闲：补部署 backend+worker（镜像无变化=空操作）"
+        $DC -p honey-money up -d --build --no-deps backend worker
+      fi
+      $DC -p honey-money ps
   environment:
     name: nas
 
