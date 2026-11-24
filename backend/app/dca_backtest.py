@@ -920,6 +920,100 @@ def compute_dirty(cur_fps: dict[str, tuple], cur_engine: str,
     return dirty, gone
 
 
+# ===== 单机并行重算（2026-11-24）：脏基金按基金分片 → 进程池动态负载均衡 =====
+# 块小（缺省 250 只 ≈ 5 方法 ~3.5 分钟）+ 池按空闲领取下一块 → 历史长短
+# 不同的基金天然均衡，无需预排序。worker 自开 PG 连接只加载自己分片的
+# 净值（IO 随分片摊掉，父进程不再全量加载）。
+
+def _chunk_codes(codes: list[str], size: int) -> list[list[str]]:
+    """基金分片（保持顺序；负载均衡由池的空闲领取语义保证）。"""
+    if size <= 0:
+        size = 250
+    return [list(codes[i:i + size]) for i in range(0, len(codes), size)]
+
+
+def _chunk_size() -> int:
+    """分片大小：BACKTEST_CHUNK_SIZE env 覆盖，缺省 250 只（NAS 内存吃紧
+    时可调小，如 100，配合降 worker）。"""
+    raw = os.environ.get("BACKTEST_CHUNK_SIZE", "")
+    return int(raw) if raw.isdigit() and int(raw) >= 1 else 250
+
+
+def _worker_count() -> int:
+    """worker 进程数：BACKTEST_WORKERS env 覆盖；缺省 min(4, cpu)——NAS
+    4 核 8GB 的安全缺省，本机手动全量可设 8~12。=1 串行内联（不拉池，
+    单测亦走此路）。"""
+    raw = os.environ.get("BACKTEST_WORKERS", "")
+    if raw.isdigit() and int(raw) >= 1:
+        return int(raw)
+    return max(1, min(4, os.cpu_count() or 1))
+
+
+def _run_chunk_tasks(args_list: list[tuple], workers: int) -> list:
+    """分片派发缝：workers≤1 或只有一块 → 串行内联（退化路径/单测）；
+    否则 spawn 进程池 map。worker 异常经 map 原样抛回（调度器记 aborted，
+    与顺序版一致）。"""
+    if workers <= 1 or len(args_list) <= 1:
+        return [_backtest_chunk_worker(*a) for a in args_list]
+    import concurrent.futures
+    import multiprocessing
+    ctx = multiprocessing.get_context("spawn")
+    with concurrent.futures.ProcessPoolExecutor(max_workers=workers,
+                                                mp_context=ctx) as pool:
+        # map(fn, *iterables) 星散：args_list 是 (dsn, codes, ...) 元组列表，
+        # 逐元组单参传会让 worker 报缺参（map(fn, list) 只给一个位置参数）
+        return list(pool.map(_backtest_chunk_worker, *zip(*args_list)))
+
+
+def _backtest_chunk_worker(dsn: str, codes, min_span_days: int,
+                           cutoff_iso: str | None, computed_at_iso: str | None,
+                           end_ts_iso: str | None) -> tuple[
+        list[dict], list[tuple], list[dict], list[tuple],
+        list[tuple], list[tuple]]:
+    """并行分片 worker（模块级函数可被 spawn pickle，教训②）。自加载本块
+    basic/scale/nav → 5 方法 × 8 阈值全算（end_ts 必须用父进程下发的全局
+    值——缺省会取本块 nav 的最大净值日，各块窗口右端漂移）→ 时机/风险行
+    （按 cutoff 门控 alive）。返回 (old_rows, old_rounds, tp_rows,
+    tp_rounds, timing_rows, risk_rows)；alive 交由父进程统一重盖。"""
+    with psycopg.connect(dsn, connect_timeout=10) as conn:
+        basic = _load_basic(conn, list(codes))
+        scale_map = _load_scale(conn)
+        nav = _load_nav(conn, list(codes))
+    end_ts = pd.Timestamp(end_ts_iso) if end_ts_iso else None
+    thresholds = TP_THRESHOLDS
+    tp_rows: list[dict] = []
+    tp_rounds: list[tuple] = []
+    for method in DCA_METHODS:
+        m_rows, m_rounds = run_backtest_tp(nav, basic, scale_map, thresholds,
+                                           end_ts=end_ts, method=method,
+                                           log=print,
+                                           min_span_days=min_span_days)
+        tp_rows.extend(m_rows)
+        tp_rounds.extend(m_rounds)
+        print(f"[chunk {codes[0]}~{codes[-1]}] {method} 完成 "
+              f"{len(m_rows):,} 行", flush=True)
+    # 旧口径行 = amount 且 tp=TAKE_PROFIT 派生（同顺序版）
+    old_rows = [{k: v for k, v in r.items() if k not in ("tp", "method")}
+                for r in tp_rows
+                if r["tp"] == TAKE_PROFIT and r["method"] == "amount"]
+    old_rounds = [t[:1] + t[3:] for t in tp_rounds
+                  if t[1] == "amount" and t[2] == TAKE_PROFIT]
+    cutoff = pd.Timestamp(cutoff_iso) if cutoff_iso else None
+    alive_by_code = {}
+    for r in old_rows:
+        r["alive"] = bool(cutoff is not None and r["full_end"]
+                          and pd.Timestamp(r["full_end"]) >= cutoff)
+        alive_by_code[r["code"]] = r["alive"]
+    for r in tp_rows:
+        r["alive"] = alive_by_code.get(r["code"], False)
+    timing_rows, risk_rows = _timing_risk_rows(nav, alive_by_code,
+                                               computed_at_iso)
+    # 本块算完即释放净值（worker 进程会被池复用跑下一块）
+    del nav, basic, scale_map
+    gc.collect()
+    return old_rows, old_rounds, tp_rows, tp_rounds, timing_rows, risk_rows
+
+
 def run_full_backtest_tp_dirty(dsn: str, *, log=print) -> tuple[
         list[dict], list[tuple], list[dict], list[tuple], list[tuple],
         list[tuple], dict, dict[str, tuple]]:
@@ -978,28 +1072,37 @@ def run_full_backtest_tp_dirty(dsn: str, *, log=print) -> tuple[
     codes_dirty = sorted(dirty)
     log(f"脏检测：基金 {total:,} 只，重算 {len(dirty):,} 只 / 跳过 "
         f"{total - len(dirty):,} 只（清理 gone {len(gone):,} 只），引擎 {engine}")
-    with psycopg.connect(dsn, connect_timeout=10) as conn:
-        basic = _load_basic(conn, codes_dirty)
-        scale_map = _load_scale(conn)
-        nav = _load_nav(conn, codes_dirty)
-    log(f"净值行：{len(nav):,}")
-    tp_rows, tp_rounds = [], []
-    for method in DCA_METHODS:
-        m_rows, m_rounds = run_backtest_tp(nav, basic, scale_map, thresholds,
-                                           method=method, log=log,
-                                           min_span_days=min_span_days)
-        tp_rows.extend(m_rows)
-        tp_rounds.extend(m_rounds)
-    # 旧口径行 = amount 且 tp=TAKE_PROFIT 派生（去掉 tp/method 维度），
-    # 与 run_backtest 输出一致（同 run_full_backtest_tp）
-    old_rows = [{k: v for k, v in r.items() if k not in ("tp", "method")}
-                for r in tp_rows
-                if r["tp"] == TAKE_PROFIT and r["method"] == "amount"]
-    old_rounds = [t[:1] + t[3:] for t in tp_rounds
-                  if t[1] == "amount" and t[2] == TAKE_PROFIT]
-    # alive：本次只标 dirty 基金（跳过基金的 alive 由 merge 后的全表刷新
-    # SQL 统一翻转）；cutoff 用全局 all_end（指纹 max 末净值日，跳过基金
-    # 也计入——不能只看本次重算子集的 max，否则窗口末日回退、边界基金误翻转）
+    # 两个全局锚点由父进程从指纹派生后下发 worker（分片后不能各自取局部
+    # max）：end_ts=全市场 max 净值日（含单行基金，与全量 nav.max() 逐位
+    # 一致——最新净值日基金必然有新指纹=必然在重算集内）；computed_at/
+    # all_end=按 nav_count≥2 过滤（单行基金无结果行，同旧口径）；cutoff=
+    # alive 45 天窗口
+    end_ts = max((fp[2] for fp in cur_fps.values() if fp[2]), default=None)
+    computed_at = str(all_end)[:10] if all_end else None
+    cutoff_iso = (str((pd.Timestamp(all_end)
+                       - pd.Timedelta(days=_ALIVE_WINDOW_DAYS)).date())
+                  if all_end else None)
+    chunks = _chunk_codes(codes_dirty, _chunk_size())
+    workers = min(_worker_count(), len(chunks)) or 1
+    log(f"并行重算：{len(chunks)} 块 × ≤{_chunk_size()} 只 / {workers} worker")
+    args = [(dsn, tuple(c), min_span_days, cutoff_iso, computed_at,
+             str(end_ts) if end_ts else None) for c in chunks]
+    results = _run_chunk_tasks(args, workers)
+    tp_rows: list[dict] = []
+    tp_rounds: list[tuple] = []
+    old_rows: list[dict] = []
+    old_rounds: list[tuple] = []
+    timing_rows: list[tuple] = []
+    risk_rows: list[tuple] = []
+    for c_old, c_old_rounds, c_tp, c_tp_rounds, c_timing, c_risk in results:
+        tp_rows.extend(c_tp)
+        tp_rounds.extend(c_tp_rounds)
+        old_rows.extend(c_old)
+        old_rounds.extend(c_old_rounds)
+        timing_rows.extend(c_timing)
+        risk_rows.extend(c_risk)
+    # alive 统一重盖（worker 已按同谓词标过，父进程再盖一次保证与顺序版
+    # 逐位一致；跳过基金的 alive 由 merge 后的全表刷新 SQL 统一翻转）
     cutoff = (pd.Timestamp(all_end) - pd.Timedelta(days=_ALIVE_WINDOW_DAYS)) \
         if all_end else None
     alive_by_code = {}
@@ -1009,17 +1112,15 @@ def run_full_backtest_tp_dirty(dsn: str, *, log=print) -> tuple[
         alive_by_code[r["code"]] = r["alive"]
     for r in tp_rows:
         r["alive"] = alive_by_code.get(r["code"], False)
-    timing_rows, risk_rows = _timing_risk_rows(nav, alive_by_code, all_end)
     stats.update({"fund_count": total, "round_count": len(old_rounds),
                   "tp_round_count": len(tp_rounds),
                   "timing_count": len(timing_rows),
-                  "risk_count": len(risk_rows)})
-    log(f"重算完成：{len(dirty):,} 只 / 旧口径轮次 {len(old_rounds):,} 行 / "
+                  "risk_count": len(risk_rows),
+                  "workers": workers, "chunks": len(chunks)})
+    log(f"重算完成：{len(dirty):,} 只 / {workers} worker × {len(chunks)} 块 / "
+        f"旧口径轮次 {len(old_rounds):,} 行 / "
         f"多阈值轮次 {len(tp_rounds):,} 行 / 时机行 {len(timing_rows):,} / "
         f"风险行 {len(risk_rows):,}，窗口截至 {all_end}")
-    # 结果组装完即释放 NAV 大头（同 run_full_backtest_tp 的内存悬崖防御）
-    del nav
-    gc.collect()
     return (old_rows, old_rounds, tp_rows, tp_rounds, timing_rows, risk_rows,
             stats, cur_fps)
 

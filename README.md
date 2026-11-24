@@ -28,7 +28,13 @@ backend/            Python 后端（FastAPI）
                       指纹（nav 聚合+basic+scale）比对，只重算有变基金，
                       周末/节假日零更新夜仅刷派生列；引擎版本串 =
                       ENGINE_VERSION_BASE+常量哈希（改方法/阈值/费率/
-                      设置页口径自动全量），BACKTEST_FORCE_FULL=1 强制全量）
+                      设置页口径自动全量），BACKTEST_FORCE_FULL=1 强制
+                      全量；重算单机并行：脏基金按 BACKTEST_CHUNK_SIZE
+                      （缺省 250）切块 × BACKTEST_WORKERS（缺省 min(4,cpu)，
+                      =1 串行）个 spawn worker 按空闲领取，worker 只加载
+                      本分片净值、end_ts 等全局锚由父进程从指纹下发；
+                      真机 400 只实测 4.1×（401.9s→97.2s），NAS 内存吃紧
+                      时 BACKTEST_WORKERS=2 BACKTEST_CHUNK_SIZE=100）
   app/risk_metrics.py 基金风险/波动指标纯函数（年化/下行波动率、最大回撤、
                       夏普、60 日滚动波动率及历史分位；复权口径 √252 年化；
                       定投日更顺带全量重算落 fund_risk_metrics）

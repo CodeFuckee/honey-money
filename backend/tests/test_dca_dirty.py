@@ -322,6 +322,9 @@ def _basic_scale():
 class TestRunFullBacktestTpDirty:
     def _run(self, monkeypatch, cur_fps, prev_fps, prev_engine):
         from app import dca_backtest as mod
+        # 锁串行内联（monkeypatch 只在本进程生效，真拉池会让子进程
+        # 脱桩连真库）；并行派发缝另有专测
+        monkeypatch.setenv("BACKTEST_WORKERS", "1")
         nav = _synthetic_nav()
         basic, scale_map = _basic_scale()
         calls = {"basic": [], "nav": []}
@@ -405,3 +408,207 @@ class TestRunFullBacktestTpDirty:
             monkeypatch, fps, fps, "vTEST")
         assert stats["full_run"] is True
         assert sorted(calls["nav"][0]) == ["000001", "000002"]
+
+
+# ===== 单机并行：分片 / worker 数 / 派发缝 / worker 内联一致性 =====
+
+class TestChunkCodes:
+    def test_empty(self):
+        from app import dca_backtest as mod
+        assert mod._chunk_codes([], 250) == []
+
+    def test_exact_division(self):
+        from app import dca_backtest as mod
+        chunks = mod._chunk_codes(["a", "b", "c", "d"], 2)
+        assert chunks == [["a", "b"], ["c", "d"]]
+
+    def test_remainder(self):
+        from app import dca_backtest as mod
+        assert mod._chunk_codes(["a", "b", "c"], 2) == [["a", "b"], ["c"]]
+
+    def test_size_over_len_single_chunk(self):
+        from app import dca_backtest as mod
+        assert mod._chunk_codes(["a"], 250) == [["a"]]
+
+    def test_bad_size_falls_back_to_default(self):
+        from app import dca_backtest as mod
+        assert mod._chunk_codes(["a", "b"], 0) == [["a", "b"]]
+
+    def test_order_preserved_and_concat_roundtrip(self):
+        from app import dca_backtest as mod
+        codes = [f"{i:06d}" for i in range(501)]
+        chunks = mod._chunk_codes(codes, 250)
+        assert sum(len(c) for c in chunks) == 501
+        assert [c for ch in chunks for c in ch] == codes   # 无重无漏有序
+
+
+class TestWorkerCountAndChunkSize:
+    def test_default_is_min_four_cpu(self):
+        import os
+        from app import dca_backtest as mod
+        monkey_free = max(1, min(4, os.cpu_count() or 1))
+        assert mod._worker_count() == monkey_free
+
+    def test_env_override(self, monkeypatch):
+        from app import dca_backtest as mod
+        monkeypatch.setenv("BACKTEST_WORKERS", "8")
+        assert mod._worker_count() == 8
+        monkeypatch.setenv("BACKTEST_WORKERS", "1")
+        assert mod._worker_count() == 1
+
+    def test_env_invalid_falls_back(self, monkeypatch):
+        from app import dca_backtest as mod
+        for bad in ("abc", "0", "-3", ""):
+            monkeypatch.setenv("BACKTEST_WORKERS", bad)
+            assert mod._worker_count() >= 1
+
+    def test_chunk_size_env(self, monkeypatch):
+        from app import dca_backtest as mod
+        assert mod._chunk_size() == 250
+        monkeypatch.setenv("BACKTEST_CHUNK_SIZE", "100")
+        assert mod._chunk_size() == 100
+        monkeypatch.setenv("BACKTEST_CHUNK_SIZE", "bad")
+        assert mod._chunk_size() == 250
+
+
+class TestParallelDispatch:
+    def _run_parallel(self, monkeypatch, chunk_results):
+        """patch 派发缝为 fake（不真拉池），验证切块数/合并完整性/全局锚。
+        chunk_results 按 (首代码 → 6 元组) 索引，fake 严格按 args 逐块返回。"""
+        from app import dca_backtest as mod
+        monkeypatch.setenv("BACKTEST_WORKERS", "4")
+        monkeypatch.setenv("BACKTEST_CHUNK_SIZE", "1")   # 每块一基金 → 2 块
+        fps = {"000001": _fp(max_date="2024-02-24"),
+               "000002": _fp(max_date="2024-02-24", s_unit="3.2")}
+        recorded = {}
+        by_first = {chunk_result_codes: res for chunk_result_codes, res
+                    in chunk_results.items()}
+
+        def fake_dispatch(args, workers):
+            recorded["workers"] = workers
+            recorded["args"] = args
+            return [by_first[tuple(a[1])] for a in args]
+
+        monkeypatch.setattr(mod, "_run_chunk_tasks", fake_dispatch)
+        monkeypatch.setattr(mod, "engine_version", lambda *a: "vTEST")
+        monkeypatch.setattr(mod, "load_input_fingerprints",
+                            lambda conn: fps)
+        # prev 引擎版本不同 → 全量重算（保证走进并行派发分支）
+        monkeypatch.setattr(dca_store, "load_fingerprints",
+                            lambda conn: (fps, "vOLD"))
+        _patch_connect(monkeypatch, mod, FakeConn())
+        out = mod.run_full_backtest_tp_dirty("postgresql://fake")
+        return out, recorded
+
+    def test_merge_and_stats(self, monkeypatch):
+        from app import dca_backtest as mod
+        r1 = ([{"code": "000001", "full_end": "2023-11-01"}],   # 早于 cutoff → 死
+              [], [{"code": "000001", "tp": 0.2, "method": "amount"}], [], [], [])
+        r2 = ([{"code": "000002", "full_end": "2024-02-24"}],
+              [], [{"code": "000002", "tp": 0.2, "method": "amount"}], [], [], [])
+        (old_rows, old_rounds, tp_rows, tp_rounds, timing_rows, risk_rows,
+         stats, _fps), recorded = self._run_parallel(
+            monkeypatch, {("000001",): r1, ("000002",): r2})
+        assert {r["code"] for r in old_rows} == {"000001", "000002"}
+        alive = {r["code"]: r["alive"] for r in old_rows}
+        # cutoff = window_end 2024-02-24 - 45d = 2024-01-10
+        assert alive == {"000001": False, "000002": True}
+        # worker 数被块数截断：min(env 4, 2 块) = 2
+        assert stats["chunks"] == 2 and stats["workers"] == 2
+        assert stats["round_count"] == 0
+        # 全局锚点下传：两块同 end_ts/computed_at/cutoff
+        for (dsn, codes, span, cutoff_iso, computed_at, end_ts) \
+                in recorded["args"]:
+            assert end_ts == "2024-02-24" and computed_at == "2024-02-24"
+            assert cutoff_iso == "2024-01-10"
+            assert span == 90 and dsn == "postgresql://fake"
+        assert [tuple(a[1]) for a in recorded["args"]] == \
+            [("000001",), ("000002",)]   # 每块一基金（250>2）
+
+    def test_worker_capped_by_chunks(self, monkeypatch):
+        """worker 数被块数截断（2 只基金 1 块 → workers=1）。"""
+        from app import dca_backtest as mod
+        monkeypatch.setenv("BACKTEST_WORKERS", "8")
+        monkeypatch.setenv("BACKTEST_CHUNK_SIZE", "250")
+        fps = {"000001": _fp()}
+        captured = {}
+
+        def fake_dispatch(args, workers):
+            captured["workers"] = workers
+            return [([{"code": "000001", "full_end": "2024-02-24"}], [],
+                     [{"code": "000001", "tp": 0.2, "method": "amount"}],
+                     [], [], [])]
+
+        monkeypatch.setattr(mod, "_run_chunk_tasks", fake_dispatch)
+        monkeypatch.setattr(mod, "engine_version", lambda *a: "vTEST")
+        monkeypatch.setattr(mod, "load_input_fingerprints",
+                            lambda conn: fps)
+        monkeypatch.setattr(dca_store, "load_fingerprints",
+                            lambda conn: (fps, "vOLD"))
+        _patch_connect(monkeypatch, mod, FakeConn())
+        out = mod.run_full_backtest_tp_dirty("postgresql://fake")
+        assert captured["workers"] == 1 and out[6]["workers"] == 1
+
+
+class TestChunkWorkerInline:
+    """worker 函数内联真跑（串行路径），与顺序版逐字段对照。"""
+
+    def _patch_loaders(self, monkeypatch):
+        from app import dca_backtest as mod
+        nav = _synthetic_nav()
+        basic, scale_map = _basic_scale()
+        monkeypatch.setattr(mod, "_load_basic",
+                            lambda conn, codes: basic.loc[list(codes)])
+        monkeypatch.setattr(mod, "_load_scale", lambda conn: scale_map)
+        monkeypatch.setattr(
+            mod, "_load_nav",
+            lambda conn, codes: nav[nav["code"].isin(list(codes))]
+            .reset_index(drop=True))
+        _patch_connect(monkeypatch, mod, FakeConn())
+        return nav, basic, scale_map
+
+    def test_shape_and_alive_no_cutoff(self, monkeypatch):
+        from app import dca_backtest as mod
+        self._patch_loaders(monkeypatch)
+        out = mod._backtest_chunk_worker("postgresql://fake",
+                                         ("000001", "000002"), 90,
+                                         None, None, None)
+        old_rows, old_rounds, tp_rows, tp_rounds, timing_rows, risk_rows = out
+        assert len(tp_rows) == 2 * 5 * len(mod.TP_THRESHOLDS)
+        assert {r["code"] for r in old_rows} == {"000001", "000002"}
+        assert all(r["alive"] is False for r in old_rows)   # cutoff None → 全死
+        assert timing_rows == []                            # alive 门控
+        assert {r[0] for r in risk_rows} == {"000001", "000002"}
+
+    def test_rows_match_sequential_per_method(self, monkeypatch):
+        """worker 产出行与顺序版 run_backtest_tp 逐字段一致（alive 除外）。"""
+        from app import dca_backtest as mod
+        nav, basic, scale_map = self._patch_loaders(monkeypatch)
+        out = mod._backtest_chunk_worker("postgresql://fake",
+                                         ("000001", "000002"), 90,
+                                         None, None, None)
+        _, _, tp_rows, tp_rounds, _t, _r = out
+        for method in mod.DCA_METHODS:
+            seq_rows, seq_rounds = mod.run_backtest_tp(
+                nav, basic, scale_map, mod.TP_THRESHOLDS, method=method)
+            w_rows = [r for r in tp_rows if r["method"] == method]
+            key = lambda r: (r["code"], r["tp"])
+            assert sorted(map(key, w_rows)) == sorted(map(key, seq_rows))
+            for wr, sr in zip(sorted(w_rows, key=key),
+                              sorted(seq_rows, key=key)):
+                assert {k: v for k, v in wr.items() if k != "alive"} == sr
+            w_rounds_m = [t for t in tp_rounds if t[1] == method]
+            assert sorted(w_rounds_m) == sorted(seq_rounds)
+
+    def test_alive_cutoff_gates_timing(self, monkeypatch):
+        """cutoff 在末净值日之前 → 两基金 alive → 时机行产出且时间戳正确。"""
+        from app import dca_backtest as mod
+        self._patch_loaders(monkeypatch)
+        out = mod._backtest_chunk_worker("postgresql://fake",
+                                         ("000001", "000002"), 90,
+                                         "2025-01-01", "2025-02-23",
+                                         "2025-02-23")
+        old_rows, _o, _tp, _tpr, timing_rows, _r = out
+        assert all(r["alive"] is True for r in old_rows)
+        assert {t[0] for t in timing_rows} == {"000001", "000002"}
+        assert all(t[4] == "2025-02-23" for t in timing_rows)

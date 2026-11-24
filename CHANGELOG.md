@@ -19,10 +19,11 @@
   的最大日，分片后各块窗口右端会漂移）、computed_at/alive cutoff 按
   nav_count≥2 过滤同旧口径；②alive 由 worker 预标 + 父进程统一重盖双保
   险；③worker 产出行与顺序版逐字段一致（单测对照锚 + 真机 diff）。
-  真机实测：随机 400 只串行 vs 8-worker（50 只×8 块）加速 ~5.7×
-  （322s→56s，48 核线程桌面机），推算全市场重算 5.5h→~1h；NAS 4 核
-  ~1/4。内存提示：NAS 8GB 如吃紧可 `BACKTEST_WORKERS=2
-  BACKTEST_CHUNK_SIZE=100`。预期外推 2.6 万只全量：~46 分钟（8 worker）。
+  真机实测（随机 400 只，同锚参数两路对跑）：串行 401.9s → 8-worker
+  （50 只 × 8 块）97.2s = **4.1×**（带背景负载的保守值，空载应更高），
+  外推全市场脏重算（~2.4 万只）：本机 ~5.5h → **~1.2h**（8 worker）；
+  NAS 4 worker ≈ 1/4。内存提示：NAS 8GB 如吃紧可 `BACKTEST_WORKERS=2
+  BACKTEST_CHUNK_SIZE=100`。
   ④ 测试：+21（分片边界 6/worker 数与块大小 env 解析 7/派发缝合并与
   全局锚下传 2/worker 内联与顺序版逐字段一致 3/alive cutoff 门控 1/
   存量编排器用例锁串行）+ 后端 891 全绿 + E2E 全量无回归；真机冒烟
