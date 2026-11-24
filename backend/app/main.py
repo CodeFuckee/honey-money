@@ -90,6 +90,18 @@ def create_app(*, scheduler: TaskScheduler | None = None,
     app = FastAPI(title="honey-money backend", version=config.SERVICE_VERSION,
                   lifespan=lifespan)
     app.add_middleware(GZipMiddleware, minimum_size=1000)   # 全量曲线 ~10MB 压缩传输
+
+    # API 响应禁缓存（2026-11-24）：回测快照每次部署/回填后立即生效——
+    # 公网入口雷池 SafeLine 会缓存无 Cache-Control 的 GET 响应，曾致
+    # 数据更新后公网入口仍吐旧 JSON（内网入口正常，公网口径落后）。
+    # 静态前端资源（/ 非 /api）不带此头，继续吃浏览器长缓存。
+    @app.middleware("http")
+    async def _no_store_api(request, call_next):
+        response = await call_next(request)
+        if request.url.path.startswith("/api/") or request.url.path == "/api":
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
     app.state.scheduler = scheduler
 
     @app.get("/healthz")

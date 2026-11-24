@@ -1221,6 +1221,17 @@
     （backend/tests/test_crawler_*.py，MockTransport/假时钟全离线）。
 
 ### Fixed
+- **公网入口 API 响应缺 Cache-Control 致数据更新后口径落后（2026-11-24
+  用户实测）**：用户经公网入口 `honey-money.home.chenkaidi.top:444`（阿里云
+  SafeLine → 穿透 → NAS 生产）看到回撤加码 15,001 / 深回撤加码 15,002，
+  而内网入口与 DB 已是 15,003——无痕浏览器复现排除浏览器侧，逐层实测
+  （DB → backend → frontend nginx → 雷池内部分发层 8765）全部 15,003，
+  唯一能持有旧响应的位置是**云 SafeLine 对无 Cache-Control 头的 GET
+  响应的缓存**。修复：后端对 `/api/*` 全部响应加
+  `Cache-Control: no-store`（中间件）；healthz 与静态资源不受影响
+  （页面资源继续吃浏览器长缓存）。+2 单测（741 总：/api 带 no-store、
+  healthz 不带）。存量已缓存条目需清一次（重启云 SafeLine 转发层或
+  管理端清缓存）方对新请求生效。
 - **XIRR 亏损栅格右端 -0.95 → -0.99（2026-11-24 用户定案）**：超深亏
   定投（如回撤加码下的 027757/028537，年化根落在 -0.95~-0.99）此前因
   求解栅格右端截断返回空值——统计卡把这两只从「年化非空」口径中剔除，

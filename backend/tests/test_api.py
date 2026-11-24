@@ -223,3 +223,24 @@ class TestLifespanSchemaInit:
         assert ("CREATE TABLE IF NOT EXISTS fund_dca_tp_result" in ddl)
         assert ("ALTER TABLE fund_dca_tp_result "
                 "ADD COLUMN IF NOT EXISTS full_cur_xirr" in ddl)
+
+
+class TestNoStoreApiCacheHeader:
+    """API 响应禁缓存头守护（2026-11-24）：公网入口雷池会缓存无
+    Cache-Control 的 GET 响应，曾致数据更新后公网口径落后于内网——
+    /api/* 一律 no-store；healthz 与页面路由不受影响（静态资源继续
+    吃浏览器长缓存）。"""
+
+    def test_api_responses_carry_no_store(self, client, monkeypatch):
+        monkeypatch.setattr(
+            "app.config.DATABASE_URL",
+            "postgresql://nobody:x@127.0.0.1:59999/none",
+        )
+        resp = client.get("/api/infra")
+        assert resp.status_code == 200
+        assert resp.headers.get("cache-control") == "no-store"
+
+    def test_healthz_stays_cacheable(self, client):
+        resp = client.get("/healthz")
+        assert resp.status_code == 200
+        assert resp.headers.get("cache-control") != "no-store"
