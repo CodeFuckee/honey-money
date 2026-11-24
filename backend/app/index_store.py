@@ -19,7 +19,12 @@ CREATE TABLE IF NOT EXISTS index_daily (
 """
 
 # 东财 secid：1=沪。指数免 Cookie（公开 ut 即可，个股清单接口才要）。
-INDEX_SYMBOLS = {"sh000001": {"market": 1, "code": "000001", "name": "上证指数"}}
+# 沪深300（金融危机史页双口径）随上证一起由指数日更任务写入；SYMBOL
+# 恒为主口径上证（519-924 对比页依赖，不改）。
+INDEX_SYMBOLS = {
+    "sh000001": {"market": 1, "code": "000001", "name": "上证指数"},
+    "sh000300": {"market": 1, "code": "000300", "name": "沪深300"},
+}
 SYMBOL = "sh000001"
 
 _COLS = "(symbol, trade_date, open, high, low, close, volume, amount)"

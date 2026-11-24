@@ -54,6 +54,7 @@ const ROUTE_BY_NAV = {
   dash: '/', data: '/data', 'src-sina': '/data/sina',
   'src-ef': '/data/eastmoney', funds: '/data/funds', tasks: '/tasks',
   fundDca: '/data/fund-dca', market: '/data/market-compare',
+  crises: '/data/crises',
   backtest: '/backtest', learn: '/learn', stock: '/stock', fund: '/fund',
 }
 const NAV_BY_PATH = Object.fromEntries(
@@ -107,6 +108,8 @@ function buildQuery() {
     if (dcaMode.value !== 'amount') q.set('mode', dcaMode.value)
     if (dcaSort.value !== 'w10_xirr') q.set('sort', dcaSort.value)
     if (dcaOrder.value !== 'desc') q.set('order', dcaOrder.value)
+  } else if (nav === 'crises') {
+    if (crisesKey.value) q.set('c', crisesKey.value)
   }
   return q
 }
@@ -227,6 +230,9 @@ function applyUrl() {
     if (['asc', 'desc'].includes(q.get('order'))) dcaOrder.value = q.get('order')
     loadDca()
   }
+  // 金融危机史：?c= 深链接指定危机（合法性在 loadMarketCrises 内校验回落）
+  if (NAV_BY_PATH[u.pathname] === 'crises' && q.get('c'))
+    crisesKey.value = q.get('c')
 }
 
 
@@ -1494,10 +1500,119 @@ const marketKpis = computed(() => {
 onMounted(() => window.addEventListener('resize', _onMarketResize))
 const _onFundResize = () => fundChartInstance && fundChartInstance.resize()
 
+// ===== 金融危机史（数据子页：/api/market/crises，指数日更任务供数；
+// 七次危机区间与事件为人工知识（生产库真实数据核实锚点），基线=危机
+// 起点日收盘、见底=窗口内最低收盘、恢复=见底后首次收复基线；
+// 2005 年后危机叠加沪深300 双线，1997/2001 仅上证） =====
+const marketCrises = ref({ status: 'idle', detail: '', body: null })
+const crisesKey = ref('')
+const crisesChartEl = ref(null)
+let crisesChartInstance = null
+
+async function loadMarketCrises() {
+  marketCrises.value = { status: 'loading', detail: '', body: null }
+  try {
+    const r = await fetch('/api/market/crises')
+    const body = await r.json()
+    marketCrises.value = { status: body.status === 'up' ? 'up' : 'down',
+                           detail: body.detail || '', body }
+    // ?c= 深链接指定危机；非法/缺失回落第一次（数据进来后再校验）
+    const want = crisesKey.value ||
+      new URL(window.location.href).searchParams.get('c')
+    const keys = (body.crises || []).map(c => c.key)
+    crisesKey.value = keys.includes(want) ? want : (keys[0] || '')
+    await nextTick()
+    renderCrisesChart()
+  } catch (e) {
+    marketCrises.value = { status: 'down', detail: String(e), body: null }
+  }
+}
+
+function selectCrises(key) {
+  crisesKey.value = key
+  scheduleSync()
+  nextTick(renderCrisesChart)
+}
+
+const crisesSel = computed(() => {
+  const body = marketCrises.value.body
+  if (!body || body.status !== 'up') return null
+  return (body.crises || []).find(c => c.key === crisesKey.value) || null
+})
+
+function renderCrisesChart() {
+  if (crisesChartInstance) { crisesChartInstance.dispose(); crisesChartInstance = null }
+  const c = crisesSel.value
+  if (!crisesChartEl.value || !c || !c.points.length) return
+  crisesChartInstance = echarts.init(crisesChartEl.value)
+  const dates = c.points.map(p => p.date)
+  const idxOf = new Map(dates.map((d, i) => [d, i]))
+  const cf = v => (v * 100).toFixed(1) + '%'
+  const stats = c.stats
+  // 事件竖线（只画落在数据范围内的日期，虚线灰、末端斜排标签）
+  const evLines = (c.events || []).filter(ev => idxOf.has(ev.date)).map(ev => ({
+    xAxis: idxOf.get(ev.date),
+    lineStyle: { type: 'dashed', color: '#b0b0b0', width: 1 },
+    label: { show: true, formatter: ev.label, position: 'end', rotate: 25,
+             fontSize: 10, color: '#666' },
+  }))
+  const series = [{
+    name: '上证指数', type: 'line', showSymbol: false, z: 3,
+    data: c.points.map((p, i) => [i, p.sse]),
+    lineStyle: { width: 1.6, color: '#c9313d' }, itemStyle: { color: '#c9313d' },
+    markLine: { silent: true, symbol: 'none', data: [
+      { yAxis: 0, lineStyle: { type: 'dashed', color: '#666' },
+        label: { show: false } },
+      ...evLines,
+      { xAxis: idxOf.get(stats.trough_date),
+        lineStyle: { type: 'dotted', color: '#c9313d', width: 1.4 },
+        label: { show: true, formatter: `见底 ${cf(stats.trough_ret)}`,
+                 position: 'insideEndTop', fontSize: 10, color: '#c9313d' } },
+      ...(stats.recover_date && idxOf.has(stats.recover_date) ? [{
+        xAxis: idxOf.get(stats.recover_date),
+        lineStyle: { type: 'dotted', color: '#2e7d32', width: 1.4 },
+        label: { show: true, formatter: '收复前高', position: 'insideEndTop',
+                 fontSize: 10, color: '#2e7d32' } }] : []),
+    ] },
+  }]
+  if (c.hs300_available && c.points.some(p => p.hs300 != null))
+    series.push({
+      name: '沪深300', type: 'line', showSymbol: false, z: 2,
+      data: c.points.map((p, i) => [i, p.hs300]),
+      lineStyle: { width: 1.3, color: '#4e79a7' }, itemStyle: { color: '#4e79a7' },
+    })
+  crisesChartInstance.setOption({
+    animation: false,
+    tooltip: { trigger: 'axis', confine: true, formatter: ps => {
+      const p = c.points[ps && ps[0] ? ps[0].dataIndex : -1]
+      if (!p) return ''
+      const row = (k, v) => v == null ? '' :
+        `<div>${k}：<span style="font-weight:600;color:${v >= 0 ? '#c9313d' : '#1e7b34'}">${cf(v)}</span></div>`
+      return `<b>${p.date}</b>${row('上证指数', p.sse)}${row('沪深300', p.hs300)}`
+    } },
+    grid: { left: 52, right: 16, top: 80, bottom: 40 },
+    xAxis: { type: 'category', data: dates, boundaryGap: false,
+      axisLabel: { fontSize: 10,
+        formatter: v => v.slice(2, 4) + '/' + v.slice(5, 7) } },
+    yAxis: { type: 'value',
+      axisLabel: { fontSize: 10, formatter: v => (v * 100).toFixed(0) + '%' },
+      splitLine: { lineStyle: { color: '#eee' } } },
+    series,
+  })
+}
+
+function disposeCrisesChart() {
+  if (crisesChartInstance) { crisesChartInstance.dispose(); crisesChartInstance = null }
+}
+const _onCrisesResize = () => crisesChartInstance && crisesChartInstance.resize()
+
+const crisesDays = (n) => n == null ? '—' : `${n} 个交易日`
+
 watch(activeNav, (nav, prev) => {
   if (nav === 'funds') loadFunds()
   if (nav === 'fundDca') { loadDca(); loadDcaScatter(); loadDcaTpCompare(); loadDcaDipReport(); loadDcaPauseExperiment() }
   if (nav === 'market') loadMarketCompare()
+  if (nav === 'crises') loadMarketCrises()
   if (nav === 'fund' && fund.value) {
     loadFundChart()
     loadFundDetail()
@@ -1505,7 +1620,9 @@ watch(activeNav, (nav, prev) => {
   if (prev === 'fund' && nav !== 'fund') disposeFundChart()
   if (prev === 'fundDca' && nav !== 'fundDca') disposeDcaScatterChart()
   if (prev === 'market' && nav !== 'market') disposeMarketChart()
+  if (prev === 'crises' && nav !== 'crises') disposeCrisesChart()
 })
+onMounted(() => window.addEventListener('resize', _onCrisesResize))
 
 // ===== 东财 Cookie：状态 / 粘贴保存 / 验证 =====
 const emCookie = ref({ configured: false, valid: false, masked: '', reason: '' })
@@ -2681,7 +2798,7 @@ watch(
               { id: 'tasks', label: '任务' },
               { id: 'backtest', label: '回测' }, { id: 'learn', label: '教学' }])"
             :key="n.id" class="nav-item"
-            :class="{ active: activeNav === n.id, 'sub-active': (activeNav.startsWith('src-') || activeNav === 'stock' || activeNav === 'funds' || activeNav === 'fund' || activeNav === 'fundDca' || activeNav === 'market') && n.id === 'data' }"
+            :class="{ active: activeNav === n.id, 'sub-active': (activeNav.startsWith('src-') || activeNav === 'stock' || activeNav === 'funds' || activeNav === 'fund' || activeNav === 'fundDca' || activeNav === 'market' || activeNav === 'crises') && n.id === 'data' }"
             :title="sidebarCollapsed ? n.label : null"
             @click="setNav(n.id)">
             <svg v-if="n.id === 'dash'" class="nav-icon" viewBox="0 0 20 20" fill="none">
@@ -2744,6 +2861,13 @@ watch(
                 <path d="M3 16.5V9.5m4.7 7V4.5m4.6 12V8m4.7 8.5v-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
               </svg>
               519 vs 924 行情</button>
+            <button class="src-item" :class="{ active: activeNav === 'crises' }"
+              :title="sidebarCollapsed ? '金融危机史' : null" @click="setNav('crises')">
+              <svg class="src-icon" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                <path d="M3.5 4.5c2.2 2 4.4 2 6.5 0s4.3-2 6.5 0v8c-2.2-2-4.4-2-6.5 0s-4.3 2-6.5 0z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" transform="rotate(90 10 10)"/>
+                <path d="M10 17v-2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+              </svg>
+              金融危机史</button>
           </template>
           <div class="sidebar-foot">v0.1.0 · 工程骨架</div>
         </aside>
@@ -3914,6 +4038,86 @@ watch(
                 <div ref="marketChartEl" data-market-chart style="width: 100%; height: 560px"></div>
               </div>
               <p class="note" style="margin: 8px 0 0">口径：累计涨幅 = 各 T 日后第 n 个交易日收盘 ÷ T 日收盘 − 1（T 日 = 0%）；横轴为交易日序偏移，两线各自交易日历独立（1999 与 2024 日历不同）；<b>双 y 轴读数：左轴（红）= 5·19、右轴（蓝）= 9·24，各自量纲贴近满幅、0% 刻度对齐同高（研报原图同款）</b>，两线的纵向形态比例不可跨轴直接比较，读数以各自轴为准；细线为历史上其他 10 次 5 日爆发 ≥12% 的脉冲行情（T 后 120 个交易日，右轴读数，事件标注为人工知识；点图例可显隐）· 虚线为 T 日与 0% 基准 · 924 线止于最近已入库交易日，随「指数日更」自动延长 · 历史复盘仅供参考，不构成投资建议</p>
+            </template>
+            <div class="card" v-else style="padding: 28px 16px">
+              <div class="browse-empty">暂无数据</div>
+            </div>
+          </template>
+
+          <!-- ===== 金融危机史（数据子页：/api/market/crises；
+               七次危机总览表 + 单危机详情：KPI 卡 + 双口径走势图 +
+               事件时间线；区间与事件为人工知识，KPI 由指数数据计算） ===== -->
+          <template v-else-if="activeNav === 'crises'">
+            <div class="toolbar">
+              <div>
+                <h2 class="h1">金融危机史：七次危机中的 A 股</h2>
+                <p class="sub">上证指数收盘口径 · 2005 年后危机叠加沪深300 双线 · 危机区间与事件标注为人工知识，KPI 由指数日更数据计算 ·「指数日更」任务每日 17:30 供数</p>
+              </div>
+              <div class="toolbar-right">
+                <button class="btn" data-crises-refresh
+                  :disabled="marketCrises.status === 'loading'" @click="loadMarketCrises">
+                  {{ marketCrises.status === 'loading' ? '加载中…' : '刷新' }}
+                </button>
+              </div>
+            </div>
+            <div class="card" v-if="marketCrises.status === 'loading'"
+              style="padding: 28px 16px; text-align: center">
+              <p class="note" style="margin: 0">正在加载危机数据…</p>
+            </div>
+            <div class="card" v-else-if="marketCrises.status === 'down'" style="padding: 28px 16px">
+              <div class="browse-empty">危机数据不可用：{{ marketCrises.detail || '指数表暂无数据' }}</div>
+            </div>
+            <template v-else-if="marketCrises.body && marketCrises.body.crises.length">
+              <div class="card" style="padding: 12px 16px">
+                <div class="risk-table-wrap">
+                  <table class="risk-table crises-table" data-crises-table>
+                    <thead>
+                      <tr><th>危机</th><th>区间</th><th>最大跌幅</th><th>见底日</th><th>见底耗时</th><th>恢复</th><th>事件</th></tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="c in marketCrises.body.crises" :key="c.key"
+                        :class="{ active: c.key === crisesKey }" @click="selectCrises(c.key)">
+                        <td class="mono">{{ c.name }}</td>
+                        <td class="mono">{{ c.start.slice(0, 7) }} ~ {{ c.end.slice(0, 7) }}</td>
+                        <td><span class="chg-down">{{ pct1(c.stats.trough_ret) }}</span></td>
+                        <td class="mono">{{ c.stats.trough_date }}</td>
+                        <td>{{ crisesDays(c.stats.trough_days) }}</td>
+                        <td v-if="c.stats.recover_date">
+                          <span class="mono">{{ c.stats.recover_date }}</span>
+                          <span class="note">（{{ crisesDays(c.stats.recover_days) }}）</span>
+                        </td>
+                        <td v-else><span class="crises-norecover">窗口内未收复</span></td>
+                        <td>{{ c.events.length }} 个</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <template v-if="crisesSel">
+                <p class="note" style="margin: 10px 2px 0">{{ crisesSel.summary }}</p>
+                <div class="learn-metrics" data-crises-kpis style="grid-template-columns: repeat(4, 1fr); margin: 12px 0">
+                  <div class="card lm"><div class="lm-k">危机基线<br><span class="dc-hint">{{ crisesSel.stats.base_date }} 收盘</span></div><div class="lm-v">{{ crisesSel.stats.base.toFixed(2) }} <span style="font-size: 13px">点</span></div></div>
+                  <div class="card lm"><div class="lm-k">最大跌幅<br><span class="dc-hint">{{ crisesSel.stats.trough_date }} 见底</span></div><div class="lm-v"><span class="chg-down">{{ pct1(crisesSel.stats.trough_ret) }}</span></div></div>
+                  <div class="card lm"><div class="lm-k">见底耗时<br><span class="dc-hint">起点 → 见底</span></div><div class="lm-v">{{ crisesDays(crisesSel.stats.trough_days) }}</div></div>
+                  <div class="card lm">
+                    <div class="lm-k">收复前高<br><span class="dc-hint">{{ crisesSel.stats.recover_date || '窗口内未收复' }}</span></div>
+                    <div class="lm-v" v-if="crisesSel.stats.recover_date"><span class="chg-up">{{ crisesSel.stats.recover_days }} 个交易日</span></div>
+                    <div class="lm-v" v-else><span class="crises-norecover">未收复</span></div>
+                  </div>
+                </div>
+                <div class="card" style="padding: 12px 16px 8px">
+                  <div ref="crisesChartEl" data-crises-chart style="width: 100%; height: 520px"></div>
+                </div>
+                <p class="note" style="margin: 8px 0 0">口径：累计涨幅 = 各日收盘 ÷ 危机起点日收盘 − 1（起点 = 0%，起点为人工锚定的收盘高点）；见底 = 观察窗口内最低收盘，恢复 = 见底后首个收盘 ≥ 基线，耗时按交易日计；<template v-if="crisesSel.hs300_available">双线 = 上证指数（红）+ 沪深300（蓝，各自以窗口首根归零）</template><template v-else>沪深300 基日 2004-12-31、2005-04-08 发布，本危机仅上证口径</template> · 灰色虚线为关键事件（人工知识）· 观察窗口 {{ crisesSel.start }} ~ {{ crisesSel.end }} · 历史复盘仅供参考，不构成投资建议</p>
+                <div class="card" style="padding: 12px 16px; margin-top: 10px">
+                  <div class="h1" style="font-size: 15px; margin: 0 0 8px">关键事件时间线</div>
+                  <ol class="crises-events" data-crises-events>
+                    <li v-for="ev in crisesSel.events" :key="ev.date">
+                      <span class="mono">{{ ev.date }}</span> — {{ ev.label }}
+                    </li>
+                  </ol>
+                </div>
+              </template>
             </template>
             <div class="card" v-else style="padding: 28px 16px">
               <div class="browse-empty">暂无数据</div>
@@ -5389,6 +5593,14 @@ body {
   text-align: center; white-space: nowrap; }
 .risk-table th { background: #f4f4f4; font-weight: 600; }
 .risk-table tbody td.mono { font-weight: 600; }
+/* 金融危机史：总览表行可点选 + 未收复态 + 事件时间线 */
+.crises-table tbody tr { cursor: pointer; }
+.crises-table tbody tr:hover { background: #edf5ff; }
+.crises-table tbody tr.active { background: #e8f1fb; }
+.crises-table tbody tr.active td.mono { color: #0f62fe; }
+.crises-norecover { color: #8d208a; }
+.crises-events { margin: 0; padding-left: 20px; font-size: 13px; line-height: 1.9; }
+.crises-events .mono { margin-right: 6px; }
 .risk-card .note { color: #6b7a93; }
 .dca-cell-link { cursor: pointer; }
 .dca-cell-link:hover { background: #eef4fc; }

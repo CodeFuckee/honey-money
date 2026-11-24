@@ -220,7 +220,9 @@ async def _run_index_job(dsn: str, proxy_pool_url: str, task: dict, *,
 
     指数接口免 Cookie（公开 ut 即可，与个股清单接口不同子系统）、
     家宽直连即可（proxy_mode="direct"，与东财个股同站低 QPS 无封禁史）；
-    增量 beg=最近日期-10 自然日（重叠容错），空表全史。client/store/
+    增量 beg=最近日期-10 自然日（重叠容错），空表全史。遍历全部注册
+    指数（2026-11-24 起上证+沪深300，金融危机史页双口径），逐指数
+    提交——单个指数失败回滚其事务并记录，不影响其他指数。client/store/
     connect 注入参数供离线测试；失败任务内消化（failures 记录），
     run 正常收尾不抛出，次日计划照常。
     """
@@ -247,35 +249,38 @@ async def _run_index_job(dsn: str, proxy_pool_url: str, task: dict, *,
         with connect(dsn) as conn:
             finish(conn, bars_n=0, failures=[])
         return summary
-    progress(0, 1)
+    spec_all = index_store.INDEX_SYMBOLS
+    total = len(spec_all)
+    progress(0, total)
     if client is None:
         rate = RateLimiter(initial_qps=0.5, min_qps=0.1, max_qps=1.0, jitter=0.3)
         direct = httpx_async_client(timeout=30.0)
         pool = httpx_async_client(base_url=proxy_pool_url, timeout=5.0)
         client = EastmoneyClient(rate=rate, proxy_broker=ProxyBroker(http=pool),
                                  http=direct, proxy_mode="direct")
-    spec = index_store.INDEX_SYMBOLS[index_store.SYMBOL]
     failures, bars_n = [], 0
-    try:
-        with connect(dsn) as conn:
-            last = index_store.last_date(conn, index_store.SYMBOL)
-            beg = ((last - dt.timedelta(days=10)).strftime("%Y%m%d")
-                   if last else "0")
-            data = await client.fetch_daily_bars(spec["market"], spec["code"],
-                                                 beg=beg)
-            index_store.upsert_bars(conn, index_store.SYMBOL, data.rows)
-            conn.commit()
-            bars_n = len(data.rows)
-    except Exception as exc:                    # noqa: BLE001 任务内消化
-        failures.append(f"{type(exc).__name__}: {str(exc)[:180]}")
     with connect(dsn) as conn:
+        for done, (symbol, spec) in enumerate(spec_all.items(), start=1):
+            try:
+                last = index_store.last_date(conn, symbol)
+                beg = ((last - dt.timedelta(days=10)).strftime("%Y%m%d")
+                       if last else "0")
+                data = await client.fetch_daily_bars(spec["market"],
+                                                     spec["code"], beg=beg)
+                index_store.upsert_bars(conn, symbol, data.rows)
+                conn.commit()
+                bars_n += len(data.rows)
+            except Exception as exc:            # noqa: BLE001 任务内消化
+                conn.rollback()                 # 带毒事务不过夜，下一指数照常
+                failures.append(f"{symbol} {type(exc).__name__}: "
+                                f"{str(exc)[:180]}")
+            progress(done, total)
         finish(conn, bars_n=bars_n, failures=failures)
         conn.commit()
     await client.aclose()
-    progress(1, 1)
     summary.update(ok=0 if failures else 1, failed=len(failures),
                    bars=bars_n, failures=failures, aborted=bool(failures))
-    print(f"[index] 指数日更：{index_store.SYMBOL} +{bars_n} 根"
+    print(f"[index] 指数日更：{'/'.join(spec_all)} +{bars_n} 根"
           + (f" / 失败 {failures[0]}" if failures else ""))
     return summary
 

@@ -223,6 +223,9 @@ class _JobConn:
     def commit(self):
         pass
 
+    def rollback(self):
+        pass
+
 
 class _FakeStore:
     def __init__(self):
@@ -272,12 +275,14 @@ def _run_job(fake_client, fake_store, last_date_row=(None,)):
 
 class TestIndexJob:
     def test_incremental_beg_from_last_date(self):
-        """有历史：增量 beg=最近日期-10 自然日（重叠容错，YYYYMMDD）。"""
+        """有历史：增量 beg=最近日期-10 自然日（重叠容错，YYYYMMDD）。
+        2026-11-24 起任务遍历双指数（上证+沪深300），假连接对两个 symbol
+        返回同一 last_date、假客户端对两个 code 返回同一批行 → bars=4。"""
         client = _FakeClient(rows=[_krow("2026-11-19", 3800.0),
                                    _krow("2026-11-20", 3810.0)])
         summary, conn = _run_job(client, _FakeStore(),
                                  last_date_row=(dt.date(2026, 11, 20),))
-        assert summary["aborted"] is False and summary["bars"] == 2
+        assert summary["aborted"] is False and summary["bars"] == 4
         assert client.calls[0]["beg"] == "20261110"
         assert any(q.lstrip().startswith("INSERT INTO index_daily")
                    for q, _ in conn.executed)
