@@ -27,6 +27,38 @@ def client():
 DEAD_DSN = "postgresql://nobody:x@127.0.0.1:59999/none"
 
 
+class TestXirrSolver:
+    """XIRR 求解器栅格域锚（2026-11-24 用户定案：极端个例也有参考价值）。
+
+    亏损现金流在 (-1,0) 扫变号区间做 brentq；栅格右端原 -0.95 会漏掉
+    根在 -0.95~-0.99 的超深亏个例（加码定投的极端年化正是选股要避开的
+    信号），延伸到 -0.99；NPV 全程不变号（数学无根）仍返回 None。
+    """
+
+    def test_xirr_loss_grid_extends_beyond_negative_95(self):
+        """IRR ≈ -97% 的现金流（1000@t0 投入、30@t1y 回收，实根 30/(1+r)^t
+        =1000；2024 闰年 t=1.00164 → 根 ≈-0.9698）：旧栅格（右端 -0.95，
+        NPV(-0.95)=-400<0 且全负）返回 None，新栅格（-0.98 档 NPV=+500）
+        解出根落在 -0.98~-0.95 区间。"""
+        import pandas as pd
+
+        from app.dca_backtest import xirr
+        flows = [(pd.Timestamp("2024-01-01"), -1000.0),
+                 (pd.Timestamp("2025-01-01"), 30.0)]
+        r = xirr(flows)
+        assert r is not None
+        assert -0.98 < r < -0.96
+
+    def test_xirr_unsolvable_no_positive_flow_returns_none(self):
+        """数学无根（无任何正回收，NPV 处处 <0）→ None（保守域语义保留）。"""
+        import pandas as pd
+
+        from app.dca_backtest import xirr
+        flows = [(pd.Timestamp("2024-01-01"), -1000.0),
+                 (pd.Timestamp("2024-07-01"), -500.0)]
+        assert xirr(flows) is None
+
+
 class TestDcaRoutes:
     def test_list_down_degrades_gracefully(self, client, monkeypatch):
         """PG 不可达：仍 200，status=down 且 rows/total 空形状（不允许 5xx）。"""

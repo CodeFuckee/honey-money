@@ -145,6 +145,9 @@ def xirr(flows: list[tuple[pd.Timestamp, float]]) -> float | None:
     定投现金流符号非常规（-…-++…-…+），IRR 可能多根：盈利（cf.sum>0）时
     f(0)>0 且 f(∞)→首笔负现金流<0，正根必存在于 (0,∞)；亏损时同理在
     (-1,0) 找负根。只扫对应半边，取第一个变号区间做 brentq。
+    亏损栅格延伸到 -0.99（2026-11-24 用户定案）：根在 -0.95~-0.99 的超深
+    亏个例也解出——极端年化正是选股要避开的信号，空值反而掩盖风险；
+    NPV 全程不变号（数学无根，如末笔正回收相对投入过小）仍返回 None。
     """
     if len(flows) < 2:
         return None
@@ -163,7 +166,7 @@ def xirr(flows: list[tuple[pd.Timestamp, float]]) -> float | None:
                 3.0, 5.0, 10.0, 100.0, 1000.0, 1e4, 1e5, 1e6]
     else:
         grid = [0.0, -0.05, -0.1, -0.2, -0.3, -0.4, -0.5, -0.6, -0.7,
-                -0.8, -0.9, -0.95]
+                -0.8, -0.9, -0.95, -0.98, -0.99]
     f_prev = npv(grid[0])
     for i in range(1, len(grid)):
         f_cur = npv(grid[i])
