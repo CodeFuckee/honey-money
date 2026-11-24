@@ -83,6 +83,17 @@ def create_app(*, scheduler: TaskScheduler | None = None,
             backtest_full.mark_interrupted_on_startup()
         except Exception as exc:
             print(f"[startup] 全量回测中断标记失败（表未建好时跳过）: {exc}")
+        try:
+            # 同款兜底：爬虫/回测运行行遗留未收尾标记 aborted（重启杀掉
+            # 进程内运行与 spawn 子进程，行会永远停在 finished_at IS NULL，
+            # 任务状态与回测进度判定会被陈旧行污染——2026-11-24）
+            with connect(config.DATABASE_URL) as conn:
+                n = Store().mark_interrupted_on_startup(conn)
+                conn.commit()
+            if n:
+                print(f"[startup] 遗留运行标记 interrupted：{n} 行")
+        except Exception as exc:
+            print(f"[startup] 遗留运行标记失败（跳过）: {exc}")
         if config.SCHEDULER_ENABLED:
             await scheduler.start()
         # vectorbt numba 编译预热（后台）：部署后首次用户回测从数十秒降到秒级

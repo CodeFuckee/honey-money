@@ -186,6 +186,17 @@ class Store:
                         (mode, source, task_id, trigger))
             return cur.fetchone()[0]
 
+    def mark_interrupted_on_startup(self, conn) -> int:
+        """启动兜底：遗留未收尾的运行标记 aborted（容器重启杀掉进程内
+        运行与 spawn 子进程，行永远停在 finished_at IS NULL——不标记
+        会让任务状态/回测进度判定永远显示运行中，先例
+        backtest_full.mark_interrupted_on_startup）。返回标记行数。"""
+        with conn.cursor() as cur:
+            cur.execute("UPDATE crawl_run SET finished_at = now(), "
+                        "aborted = true WHERE finished_at IS NULL")
+            return cur.rowcount
+
+
     def finish_run(self, conn, run_id: int, *, total_stocks: int, ok_stocks: int,
                    failed_stocks: int, bars_upserted: int, failures: list[str],
                    aborted: bool = False) -> None:

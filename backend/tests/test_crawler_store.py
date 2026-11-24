@@ -12,6 +12,7 @@ from app.crawler import store as store_mod  # noqa: E402
 
 
 class FakeCursor:
+    rowcount = 3
     def __init__(self, conn):
         self.conn = conn
         self.executed: list[str] = []
@@ -196,3 +197,17 @@ class TestUpsertDailyBarsPriceClean:
                                             source="sina")
         _, params = fake_conn.cursor_obj.executemany_calls[0]
         assert params[0][2:6] == (None, None, None, None)
+
+
+class TestMarkInterruptedOnStartup:
+    def test_marks_only_open_runs_and_counts(self, fake_conn):
+        n = store_mod.Store().mark_interrupted_on_startup(fake_conn)
+        sql = fake_conn.cursor_obj.executed[-1]
+        assert "UPDATE crawl_run" in sql
+        assert "finished_at IS NULL" in sql
+        assert "aborted = true" in sql
+        assert n == fake_conn.cursor_obj.rowcount
+
+    def test_returns_zero_when_no_open_runs(self, fake_conn):
+        fake_conn.cursor_obj.rowcount = 0
+        assert store_mod.Store().mark_interrupted_on_startup(fake_conn) == 0

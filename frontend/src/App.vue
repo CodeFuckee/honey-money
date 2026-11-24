@@ -1630,6 +1630,72 @@ const runConfirmShow = ref(false)
 const runStarting = ref(false)
 const runBacktestMsg = ref('')
 const runBacktestError = ref('')
+// 进度推算（2026-11-24）：引擎在 spawn 子进程内计算、期间无库上进度信号，
+// 进度条按「已运行时长 / 预估耗时」推算渲染（时间基准用服务端 server_now
+// 校正客户端时钟偏差；full 按 8 小时、dirty 按 10 分钟），每秒走表、
+// 停留在设置页时每 30 秒拉一次设置刷新真实状态
+const nowTick = ref(Date.now())
+const serverSkew = ref(0)
+let progressTimer = null
+
+const _EXPECTED_MS = { full: 8 * 3600e3, dirty: 10 * 60e3 }
+const backtestExpectedMs = computed(() =>
+  _EXPECTED_MS[backtestTask.value.estimate] || _EXPECTED_MS.full)
+const backtestExpectedText = computed(() =>
+  backtestTask.value.estimate === 'dirty' ? '10 分钟' : '8 小时')
+const backtestElapsedMs = computed(() => {
+  const started = backtestTask.value.last_started_at
+  if (!started) return null
+  return Math.max(0, nowTick.value - Date.parse(started) - serverSkew.value)
+})
+const backtestProgressPercent = computed(() => {
+  const e = backtestElapsedMs.value
+  if (e === null) return null
+  return Math.min(100, Math.round(e / backtestExpectedMs.value * 1000) / 10)
+})
+const backtestElapsedText = computed(() => fmtDuration(backtestElapsedMs.value))
+const backtestLastDurationText = computed(() => {
+  const s = backtestTask.value.last_started_at
+  const f = backtestTask.value.last_finished_at
+  if (!s || !f) return '—'
+  return fmtDuration(Date.parse(f) - Date.parse(s))
+})
+
+function fmtDuration(ms) {
+  if (ms == null) return '—'
+  const total = Math.floor(ms / 1000)
+  if (total < 60) return `${total} 秒`
+  const m = Math.floor(total / 60)
+  if (m < 60) return `${m} 分钟`
+  const h = Math.floor(m / 60)
+  const mm = m % 60
+  return mm ? `${h} 小时 ${mm} 分` : `${h} 小时`
+}
+
+function fmtDateTime(iso) {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  const p = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
+    `${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
+let progressTicks = 0
+
+function startProgressTimer() {
+  if (progressTimer) return
+  nowTick.value = Date.now()
+  progressTicks = 0
+  progressTimer = setInterval(() => {
+    nowTick.value = Date.now()
+    progressTicks += 1
+    if (progressTicks % 30 === 0) loadSettings()   // ~30 秒刷新真实状态
+  }, 1000)
+}
+
+function stopProgressTimer() {
+  if (progressTimer) { clearInterval(progressTimer); progressTimer = null }
+}
 
 async function loadSettings() {
   settingsStatus.value = 'loading'
@@ -1644,7 +1710,16 @@ async function loadSettings() {
       settingsStatus.value = 'up'
       minSpanInput.value = body.settings.backtest_min_span_days
       backtestMinSpan.value = body.settings.backtest_min_span_days
-      if (body.backtest_task) backtestTask.value = body.backtest_task
+      if (body.backtest_task) {
+        backtestTask.value = body.backtest_task
+        // 服务端时刻 vs 本机时刻的偏差：进度推算扣掉时钟漂移
+        if (body.backtest_task.server_now) {
+          serverSkew.value = Date.parse(body.backtest_task.server_now) -
+            Date.now()
+        }
+        if (backtestTask.value.running) startProgressTimer()
+        else stopProgressTimer()
+      }
     } else {
       settingsStatus.value = 'down'
       settingsDetail.value = body.detail || '设置服务不可用'
@@ -1738,6 +1813,7 @@ watch(activeNav, (nav, prev) => {
   }
   if (prev === 'fund' && nav !== 'fund') disposeFundChart()
   if (prev === 'fundDca' && nav !== 'fundDca') disposeDcaScatterChart()
+  if (prev === 'settings' && nav !== 'settings') stopProgressTimer()
   if (prev === 'market' && nav !== 'market') disposeMarketChart()
   if (prev === 'crises' && nav !== 'crises') disposeCrisesChart()
 })
@@ -4292,7 +4368,21 @@ watch(
                 </div>
               </div>
               <p v-if="backtestTask.running" class="note" data-run-backtest-running
-                style="margin: 8px 0 0; color: #0f62fe">回测运行中<span v-if="backtestTask.last_started_at">（{{ backtestTask.last_started_at.replace('T', ' ') }} 起）</span>——完成后定投回测页数据自动更新，本页重新进入可刷新状态</p>
+                style="margin: 8px 0 0; color: #0f62fe">回测运行中<span v-if="backtestTask.last_started_at">（{{ fmtDateTime(backtestTask.last_started_at) }} 起）</span>——完成后定投回测页数据自动更新</p>
+              <div v-if="backtestTask.running && backtestProgressPercent !== null"
+                data-run-progress style="margin: 8px 0 0">
+                <div class="progress-track">
+                  <div class="progress-fill" data-run-progress-fill
+                    :style="{ width: backtestProgressPercent + '%' }"></div>
+                </div>
+                <p class="note" data-run-progress-text style="margin: 4px 0 0">
+                  已运行 {{ backtestElapsedText }} / 预计约 {{ backtestExpectedText }}（按预估耗时推算{{ backtestTask.estimate === 'dirty' ? '；刚修改过设置或引擎变更将自动转全量' : '，完成度以实际为准' }}）· 本页停留时每 30 秒自动刷新
+                </p>
+              </div>
+              <p v-else-if="backtestTask.last_started_at && backtestTask.last_finished_at"
+                class="note" data-run-backtest-last style="margin: 8px 0 0">
+                上次回测：{{ fmtDateTime(backtestTask.last_started_at) }} ~ {{ fmtDateTime(backtestTask.last_finished_at) }}（用时 {{ backtestLastDurationText }}）
+              </p>
               <p v-if="runBacktestMsg" class="note" data-run-backtest-triggered
                 style="margin: 6px 0 0; color: #1a7f37">{{ runBacktestMsg }}</p>
               <p v-if="runBacktestError" class="note" data-run-backtest-error
@@ -5737,6 +5827,11 @@ body {
   box-shadow: 0 8px 24px rgba(0,0,0,.22); font-size: 13px; }
 .confirm-card .note { line-height: 1.6; }
 .confirm-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 14px; }
+/* 回测进度条（按预估耗时推算）：细轨道 + 主题色填充 */
+.progress-track { height: 8px; background: #e0e0e0; border-radius: 4px;
+  overflow: hidden; }
+.progress-fill { height: 100%; background: #0f62fe; border-radius: 4px;
+  transition: width .6s ease; }
 /* 列显示过滤（MultiSelect）：与搜索行 small 控件同高，窄屏可收缩 */
 .funds-search .dca-col-select { min-width: 118px; max-width: 160px; }
 .funds-search .dca-col-select .p-multiselect-label { font-size: 12px; padding: 5px 8px; }

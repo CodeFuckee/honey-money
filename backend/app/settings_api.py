@@ -2,6 +2,8 @@
 backtest_min_span_days）。降级约定同全站：PG 不可达仍 200，status=down。
 """
 
+import datetime as dt
+
 from fastapi import HTTPException
 
 from . import dca_backtest, settings_store
@@ -81,7 +83,10 @@ def _backtest_task_state(conn, min_span_days: int) -> dict:
             "running": running,
             "estimate": ("dirty" if fp_n and fp_matched else "full"),
             "last_started_at": _iso(run[2] if run else None),
-            "last_finished_at": _iso(run[3] if run else None)}
+            "last_finished_at": _iso(run[3] if run else None),
+            # 进度推算时间基准：已运行时长/进度条按服务端时刻差渲染
+            # （客户端时钟不可信；含时区偏移的 ISO 串）
+            "server_now": _iso(dt.datetime.now(dt.timezone.utc))}
 
 
 def _iso(value):

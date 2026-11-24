@@ -411,3 +411,29 @@ class TestSettingsBacktestTask:
         task = client.get("/api/settings").json()["backtest_task"]
         assert task["task_id"] is None
         assert task["running"] is False
+
+
+class TestBacktestTaskServerNow:
+    """backtest_task.server_now：进度推算的时间基准（客户端时钟不可信，
+    进度条按服务端时刻差渲染）。"""
+
+    def _routes(self):
+        return [("FROM crawl_task", (7,)),
+                ("FROM crawl_run", (False, False,
+                                    datetime(2026, 11, 24, 9),
+                                    datetime(2026, 11, 24, 9, 30))),
+                ("fund_dca_fp", (26548, True))]
+
+    def test_server_now_present_and_iso(self):
+        from app import settings_api
+
+        def fake_connect(*a, **k):
+            return _RoutedConn(self._routes())
+
+        app = FastAPI()
+        settings_api.register_settings_routes(app, connect=fake_connect)
+        task = TestClient(app).get("/api/settings").json()["backtest_task"]
+        assert "server_now" in task
+        # ISO 串含 T 且带时区偏移（+00:00），前端可直接 Date 解析
+        assert "T" in task["server_now"]
+        assert task["server_now"][-6] in "+-"

@@ -159,3 +159,66 @@ class TestRunBacktestButton:
         expect(page.locator("[data-run-backtest]")).to_be_disabled()
         expect(page.locator("[data-run-backtest-running]")
               ).to_contain_text("回测运行中", timeout=10_000)
+
+
+class TestBacktestProgress:
+    def _running_mock(self, estimate="full", elapsed_hours=2.0):
+        """构造 running 态 mock：started_at = server_now − elapsed_hours。"""
+        import copy
+        task = copy.deepcopy(MOCK_SETTINGS)
+        now = new_date = __import__("datetime").datetime.now(
+            __import__("datetime").timezone.utc)
+        started = now - __import__("datetime").timedelta(hours=elapsed_hours)
+        task["backtest_task"].update({
+            "running": True, "estimate": estimate,
+            "last_started_at": started.isoformat(),
+            "last_finished_at": None,
+            "server_now": now.isoformat()})
+        return task
+
+    def test_progress_bar_rendering(self, servers, page):
+        """E2E-477：运行中 → 进度条/已运行时长/预计耗时渲染（full 2h≈25%）。"""
+        _install_mock(page, task=self._running_mock("full", 2.0))
+        _, frontend_port = servers
+        page.goto(f"http://127.0.0.1:{frontend_port}/settings")
+        expect(page.locator("[data-run-progress]")).to_be_visible()
+        expect(page.locator("[data-run-progress-text]")
+              ).to_contain_text("已运行", timeout=10_000)
+        expect(page.locator("[data-run-progress-text]")
+              ).to_contain_text("预计约 8 小时")
+        width = page.locator("[data-run-progress-fill]").evaluate(
+            "el => parseFloat(el.style.width)")
+        assert 15 <= width <= 35, f"2h/8h 进度应约 25%：{width}"
+
+    def test_completed_state_and_dirty_confirm(self, servers, page):
+        """E2E-478：完成态进度块消失 + 上次回测用时；dirty 确认框文案
+        含「约 10 分钟」。"""
+        import copy
+        import datetime as dt
+        task = copy.deepcopy(MOCK_SETTINGS)
+        now = dt.datetime.now(dt.timezone.utc)
+        task["backtest_task"].update({
+            "running": False, "estimate": "full",
+            "last_started_at": (now - dt.timedelta(hours=3)).isoformat(),
+            "last_finished_at": (now - dt.timedelta(hours=1)).isoformat(),
+            "server_now": now.isoformat()})
+        _install_mock(page, task=task)
+        _, frontend_port = servers
+        page.goto(f"http://127.0.0.1:{frontend_port}/settings")
+        expect(page.locator("[data-run-progress]")).to_have_count(0)
+        expect(page.locator("[data-run-backtest-last]")
+              ).to_contain_text("用时", timeout=10_000)
+        expect(page.locator("[data-run-backtest-last]")
+              ).to_contain_text("2 小时")
+        # dirty 预估：确认框时间文案为增量语义（未运行时按钮才可点）
+        task2 = copy.deepcopy(MOCK_SETTINGS)
+        task2["backtest_task"].update({
+            "running": False, "estimate": "dirty",
+            "last_started_at": (now - dt.timedelta(hours=1)).isoformat(),
+            "last_finished_at": (now - dt.timedelta(minutes=30)).isoformat(),
+            "server_now": now.isoformat()})
+        _install_mock(page, task=task2)
+        page.reload()
+        page.locator("[data-run-backtest]").click()
+        expect(page.locator("[data-run-confirm-time]")
+              ).to_contain_text("约 10 分钟", timeout=10_000)

@@ -84,8 +84,9 @@ backend/            Python 后端（FastAPI）
                       任务状态快照：预置「定投回测日更」任务 id/运行中判定
                       （crawl_run 末行 finished_at IS NULL）/增量-全量预估
                       （fund_dca_fp 指纹 engine 串 vs engine_version
-                      (min_span_days)，fp 表缺失兜底全量）供设置页按钮确认
-                      框时间提示；PG 不可达降级 status=down）+ PUT
+                      (min_span_days)，fp 表缺失兜底全量；server_now 供
+                      进度推算校时）供设置页按钮确认框时间提示与进度显示；
+                      PG 不可达降级 status=down）+ PUT
                       /api/settings/backtest-min-span（非法值 400 带 detail；
                       库不可达降级 200/down）；「立即运行全市场回测」按钮
                       复用任务系统触发端点 POST /api/tasks/{id}/run
@@ -230,7 +231,9 @@ frontend/           Vue3 + Vite 前端
                       前端拦截/后端 400、保存成功提示「下一次回测生效」；
                       「立即运行全市场定投回测」按钮：确认对话框按指纹
                       状态动态提示运行时间（增量约 10 分钟/全量 6~10 小时），
-                      触发「定投回测日更」任务、运行中禁用 + 状态提示；
+                      触发「定投回测日更」任务、运行中禁用 + 状态提示 + 进度
+                      显示（已运行时长/预估耗时推算进度条，server_now 校正
+                      时钟偏差，停留页面每 30 秒自动刷新）+ 上次回测用时；
                       定投回测页口径文案（回测窗口/轮次不足 N 天年化留空）
                       动态绑定该设置值）；
                       教学页六大经典回测策略（vectorbt 引擎，撮合模式可切换
