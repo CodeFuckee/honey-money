@@ -7,6 +7,7 @@
 """
 
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -249,10 +250,23 @@ class TestSettingsRoutes:
         return TestClient(app)
 
     def test_get_up(self):
-        client = self._client(one=("120",))
-        body = client.get("/api/settings").json()
+        from datetime import datetime as _dt
+        from app import settings_api
+
+        def fake_connect(*a, **k):
+            return _RoutedConn([
+                ("app_settings", ("120",)),
+                ("FROM crawl_task", (7,)),
+                ("FROM crawl_run", (False, False, _dt(2026, 11, 24, 9),
+                                    _dt(2026, 11, 24, 9, 30))),
+                ("fund_dca_fp", (26548, True))])
+
+        app = FastAPI()
+        settings_api.register_settings_routes(app, connect=fake_connect)
+        body = TestClient(app).get("/api/settings").json()
         assert body["status"] == "up"
         assert body["settings"]["backtest_min_span_days"] == 120
+        assert body["backtest_task"]["task_id"] == 7
 
     def test_get_down_degrades_200(self):
         client = self._client(raises=True)
@@ -295,3 +309,105 @@ class TestSettingsRoutes:
         resp = client.put("/api/settings/backtest-min-span", json={"value": 120})
         assert resp.status_code == 200
         assert resp.json()["status"] == "down"
+
+
+class _RoutedConn:
+    """按 SQL 关键词分发的假连接（GET /api/settings 多查询编排场景）。"""
+
+    def __init__(self, routes):
+        self.routes = routes      # [(SQL 关键词, fetchone 结果 | Exception)]
+        self.executed: list = []
+        self.committed = False
+        self._last = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def commit(self):
+        self.committed = True
+
+    def cursor(self):
+        return self
+
+    def execute(self, query, params=None):
+        self.executed.append(query)
+        self._last = None
+        for keyword, value in self.routes:
+            if keyword in query:
+                if isinstance(value, Exception):
+                    raise value
+                self._last = value
+                return
+
+    def fetchone(self):
+        return self._last
+
+    def fetchall(self):
+        return self._last or []
+
+
+class TestSettingsBacktestTask:
+    """GET /api/settings 的 backtest_task 字段：任务定位/运行中判定/
+    增量-全量预估（指纹表 vs 引擎版本串）。"""
+
+    def _client(self, routes):
+        from app import settings_api
+
+        def fake_connect(*a, **k):
+            return _RoutedConn(routes)
+
+        app = FastAPI()
+        settings_api.register_settings_routes(app, connect=fake_connect)
+        return TestClient(app)
+
+    BASE = [("FROM crawl_task", (7,)),
+            ("FROM crawl_run", (True, False, datetime(2026, 11, 24, 10),
+                                None))]
+
+    def test_running_and_task_found(self):
+        client = self._client(list(self.BASE)
+                              + [("fund_dca_fp", (12, True))])
+        body = client.get("/api/settings").json()
+        task = body["backtest_task"]
+        assert task["task_id"] == 7
+        assert task["running"] is True
+        assert body["settings"]["backtest_min_span_days"] == 90
+
+    def test_estimate_dirty_when_fp_matches_engine(self):
+        client = self._client([("FROM crawl_task", (7,)),
+                               ("FROM crawl_run", (False, False,
+                                                   datetime(2026, 11, 24, 9),
+                                                   datetime(2026, 11, 24, 9, 30))),
+                               ("fund_dca_fp", (26548, True))])
+        assert client.get("/api/settings").json()["backtest_task"]["estimate"] \
+            == "dirty"
+
+    def test_estimate_full_when_fp_empty(self):
+        client = self._client(list(self.BASE) + [("fund_dca_fp", (0, False))])
+        assert client.get("/api/settings").json()["backtest_task"]["estimate"] \
+            == "full"
+
+    def test_estimate_full_when_engine_mismatch(self):
+        """指纹在但引擎串不匹配（如刚改过运作期限设置）→ 全量预估。"""
+        client = self._client(list(self.BASE) + [("fund_dca_fp", (26548, False))])
+        assert client.get("/api/settings").json()["backtest_task"]["estimate"] \
+            == "full"
+
+    def test_estimate_full_when_fp_table_missing(self):
+        """fp 表不存在（旧库未升级）→ 兜底全量预估不炸端点。"""
+        client = self._client(list(self.BASE)
+                              + [("fund_dca_fp", RuntimeError("no table"))])
+        body = client.get("/api/settings").json()
+        assert body["status"] == "up"
+        assert body["backtest_task"]["estimate"] == "full"
+
+    def test_task_missing_when_not_seeded(self):
+        client = self._client([("FROM crawl_task", None),
+                               ("FROM crawl_run", None),
+                               ("fund_dca_fp", (12, True))])
+        task = client.get("/api/settings").json()["backtest_task"]
+        assert task["task_id"] is None
+        assert task["running"] is False

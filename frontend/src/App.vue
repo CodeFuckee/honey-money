@@ -1620,11 +1620,23 @@ const minSpanSaving = ref(false)
 const minSpanMsg = ref('')
 const settingsError = ref('')
 const backtestMinSpan = ref(90)
+// 立即运行全市场回测（2026-11-24）：触发既有「定投回测日更」任务
+// （POST /api/tasks/{id}/run，任务系统 advisory lock + 409 防重）；
+// estimate 由后端按指纹表 vs 引擎版本串判定（dirty=增量分钟级/full=全量
+// 6~10 小时），确认对话框的时间提示据此渲染
+const backtestTask = ref({ task_id: null, running: false, estimate: 'full',
+  last_started_at: null, last_finished_at: null })
+const runConfirmShow = ref(false)
+const runStarting = ref(false)
+const runBacktestMsg = ref('')
+const runBacktestError = ref('')
 
 async function loadSettings() {
   settingsStatus.value = 'loading'
   settingsError.value = ''
   minSpanMsg.value = ''
+  runBacktestMsg.value = ''
+  runBacktestError.value = ''
   try {
     const resp = await fetch('/api/settings')
     const body = await resp.json()
@@ -1632,6 +1644,7 @@ async function loadSettings() {
       settingsStatus.value = 'up'
       minSpanInput.value = body.settings.backtest_min_span_days
       backtestMinSpan.value = body.settings.backtest_min_span_days
+      if (body.backtest_task) backtestTask.value = body.backtest_task
     } else {
       settingsStatus.value = 'down'
       settingsDetail.value = body.detail || '设置服务不可用'
@@ -1639,6 +1652,32 @@ async function loadSettings() {
   } catch (e) {
     settingsStatus.value = 'down'
     settingsDetail.value = String(e)
+  }
+}
+
+async function confirmRunBacktest() {
+  runBacktestError.value = ''
+  runStarting.value = true
+  try {
+    const resp = await fetch(
+      `/api/tasks/${backtestTask.value.task_id}/run`, { method: 'POST' })
+    if (resp.status === 409) {
+      runBacktestError.value = '已有回测在排队/运行中，请等待完成后再触发'
+      runConfirmShow.value = false
+      return
+    }
+    const body = await resp.json().catch(() => ({}))
+    if (!resp.ok) {
+      runBacktestError.value = body.detail || '触发失败'
+      return
+    }
+    runConfirmShow.value = false
+    backtestTask.value.running = true
+    runBacktestMsg.value = '已触发：全市场回测运行中（后台约数分钟~10 小时），完成后定投回测页数据自动更新'
+  } catch (e) {
+    runBacktestError.value = String(e)
+  } finally {
+    runStarting.value = false
   }
 }
 
@@ -4241,6 +4280,41 @@ watch(
               <p class="note" style="margin: 10px 0 0">取值 90~3650 天，默认 90；下一次回测（当晚日更 / scripts/dca_share_sample.py 手动回放）起按新值计算。</p>
               <p v-if="minSpanMsg" class="note" data-settings-saved style="margin: 6px 0 0; color: #1a7f37">{{ minSpanMsg }}</p>
               <p v-if="settingsError" class="note" data-settings-error style="margin: 6px 0 0; color: #c9313d">{{ settingsError }}</p>
+              <div class="settings-row" data-run-backtest-row
+                style="margin-top: 14px; padding-top: 14px; border-top: 1px solid #e0e0e0">
+                <label class="settings-label"><b>立即运行全市场定投回测</b>
+                  <span class="settings-hint">对全市场基金按当前设置重跑五种定投方式 × 8 档止盈回测并入库（等价于手动触发夜窗「定投回测日更」任务；后台运行，期间可关闭页面）</span>
+                </label>
+                <div class="settings-input">
+                  <button class="btn" data-run-backtest
+                    :disabled="backtestTask.running || backtestTask.task_id == null"
+                    @click="runConfirmShow = true">立即运行…</button>
+                </div>
+              </div>
+              <p v-if="backtestTask.running" class="note" data-run-backtest-running
+                style="margin: 8px 0 0; color: #0f62fe">回测运行中<span v-if="backtestTask.last_started_at">（{{ backtestTask.last_started_at.replace('T', ' ') }} 起）</span>——完成后定投回测页数据自动更新，本页重新进入可刷新状态</p>
+              <p v-if="runBacktestMsg" class="note" data-run-backtest-triggered
+                style="margin: 6px 0 0; color: #1a7f37">{{ runBacktestMsg }}</p>
+              <p v-if="runBacktestError" class="note" data-run-backtest-error
+                style="margin: 6px 0 0; color: #c9313d">{{ runBacktestError }}</p>
+            </div>
+            <!-- 确认对话框：运行时间提示按脏检测增量/全量动态渲染 -->
+            <div v-if="runConfirmShow" class="confirm-mask" data-run-confirm
+              @click.self="runConfirmShow = false">
+              <div class="confirm-card">
+                <b>确认立即运行全市场定投回测？</b>
+                <p class="note" data-run-confirm-time style="margin: 8px 0 0">
+                  <template v-if="backtestTask.estimate === 'dirty'">脏检测增量回测：仅重算有变化的基金，通常约 10 分钟；若刚修改过运作期限设置或引擎有升级，将自动转为全量（约 6~10 小时）。</template>
+                  <template v-else>本次为<b>全量回测</b>：全市场基金 × 五种定投方式 × 8 档止盈，预计约 <b>6~10 小时</b>。</template>
+                  后台运行，期间可关闭页面；已有回测在排队/运行时会拒绝重复触发。
+                </p>
+                <div class="confirm-actions">
+                  <button class="btn" data-run-confirm-cancel
+                    @click="runConfirmShow = false">取消</button>
+                  <button class="btn" data-run-confirm-ok :disabled="runStarting"
+                    @click="confirmRunBacktest">{{ runStarting ? '触发中…' : '立即运行' }}</button>
+                </div>
+              </div>
             </div>
           </template>
 
@@ -5655,6 +5729,14 @@ body {
 .settings-input-num { width: 110px; padding: 6px 10px; font-size: 14px;
   border: 1px solid var(--card-border-color, #e0e0e0); border-radius: 6px; }
 .settings-unit { font-size: 12px; color: #525252; white-space: nowrap; }
+/* 确认对话框（设置页「立即运行全市场回测」）：居中卡片 + 半透明遮罩 */
+.confirm-mask { position: fixed; inset: 0; z-index: 60; background: rgba(0,0,0,.42);
+  display: flex; align-items: center; justify-content: center; }
+.confirm-card { background: #fff; border-radius: 8px; max-width: 520px;
+  width: calc(100vw - 48px); padding: 18px 20px;
+  box-shadow: 0 8px 24px rgba(0,0,0,.22); font-size: 13px; }
+.confirm-card .note { line-height: 1.6; }
+.confirm-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 14px; }
 /* 列显示过滤（MultiSelect）：与搜索行 small 控件同高，窄屏可收缩 */
 .funds-search .dca-col-select { min-width: 118px; max-width: 160px; }
 .funds-search .dca-col-select .p-multiselect-label { font-size: 12px; padding: 5px 8px; }

@@ -80,9 +80,16 @@ backend/            Python 后端（FastAPI）
                       修改后下一次回测生效——日更编排与样本回填脚本启动时
                       读取，参数化引擎 MIN_SPAN_DAYS 两处判定：全窗口年化与
                       止盈后当前轮年化）
-  app/settings_api.py 设置 API：GET /api/settings（设置全集，PG 不可达降级
-                      status=down）+ PUT /api/settings/backtest-min-span
-                      （非法值 400 带 detail；库不可达降级 200/down）
+  app/settings_api.py 设置 API：GET /api/settings（设置全集 + backtest_task
+                      任务状态快照：预置「定投回测日更」任务 id/运行中判定
+                      （crawl_run 末行 finished_at IS NULL）/增量-全量预估
+                      （fund_dca_fp 指纹 engine 串 vs engine_version
+                      (min_span_days)，fp 表缺失兜底全量）供设置页按钮确认
+                      框时间提示；PG 不可达降级 status=down）+ PUT
+                      /api/settings/backtest-min-span（非法值 400 带 detail；
+                      库不可达降级 200/down）；「立即运行全市场回测」按钮
+                      复用任务系统触发端点 POST /api/tasks/{id}/run
+                      （advisory lock + 409 防重）
   app/bear_pause.py   熊市断缴实验引擎（bear_state 迟滞带熊市态
                       （回撤 ≤-20% 进入 / >-10% 恢复）+ A 坚持定投/
                       B 断缴闲置/C 断缴补投/D 熊市加倍四组模拟 + 市场级
@@ -221,6 +228,9 @@ frontend/           Vue3 + Vite 前端
                       「设置」顶级页（/settings，侧栏第 6 项：应用级设置——
                       回测年化运作期限下限（天）数字输入 + 保存，非法值
                       前端拦截/后端 400、保存成功提示「下一次回测生效」；
+                      「立即运行全市场定投回测」按钮：确认对话框按指纹
+                      状态动态提示运行时间（增量约 10 分钟/全量 6~10 小时），
+                      触发「定投回测日更」任务、运行中禁用 + 状态提示；
                       定投回测页口径文案（回测窗口/轮次不足 N 天年化留空）
                       动态绑定该设置值）；
                       教学页六大经典回测策略（vectorbt 引擎，撮合模式可切换
