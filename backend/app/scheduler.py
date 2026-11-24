@@ -215,21 +215,28 @@ async def _run_backtest_job(dsn: str, task: dict, progress,
 
 async def _run_index_job(dsn: str, proxy_pool_url: str, task: dict, *,
                          progress, stop_event: asyncio.Event,
-                         client=None, store=None, connect=None) -> dict:
+                         client=None, store=None, connect=None,
+                         sina=None) -> dict:
     """指数日更：东财 K 线接口拉指数日线 → index_daily 幂等 upsert。
 
     指数接口免 Cookie（公开 ut 即可，与个股清单接口不同子系统）、
     家宽直连即可（proxy_mode="direct"，与东财个股同站低 QPS 无封禁史）；
     增量 beg=最近日期-10 自然日（重叠容错），空表全史。遍历全部注册
     指数（2026-11-24 起上证+沪深300，金融危机史页双口径），逐指数
-    提交——单个指数失败回滚其事务并记录，不影响其他指数。client/store/
-    connect 注入参数供离线测试；失败任务内消化（failures 记录），
-    run 正常收尾不抛出，次日计划照常。
+    提交——单个指数失败回滚其事务并记录，不影响其他指数。
+
+    新浪兜底（2026-11-24 生产踩坑：push2his 对家宽 IP 风控 RemoteProtocolError
+    连日，东财 kline 拉不到数 → 519-924 页 924 线停更）：东财失败后逐指数
+    落新浪指数日线（kjs 全史接口，与股票同族、新浪站独立未被封）重试同一段
+    增量；双源皆败才记 failures。client/store/connect/sina 注入参数供离线
+    测试（sina 缺省懒建——东财正常时零开销）；失败任务内消化（failures
+    记录），run 正常收尾不抛出，次日计划照常。
     """
     from . import index_store
 
     store = store or Store()
     connect = connect or psycopg.connect
+    sina_client = sina
     with connect(dsn) as conn:
         run_id = store.start_run(conn, mode=task["mode"], source="index",
                                  task_id=task["id"],
@@ -261,6 +268,7 @@ async def _run_index_job(dsn: str, proxy_pool_url: str, task: dict, *,
     failures, bars_n = [], 0
     with connect(dsn) as conn:
         for done, (symbol, spec) in enumerate(spec_all.items(), start=1):
+            beg = "0"
             try:
                 last = index_store.last_date(conn, symbol)
                 beg = ((last - dt.timedelta(days=10)).strftime("%Y%m%d")
@@ -272,12 +280,29 @@ async def _run_index_job(dsn: str, proxy_pool_url: str, task: dict, *,
                 bars_n += len(data.rows)
             except Exception as exc:            # noqa: BLE001 任务内消化
                 conn.rollback()                 # 带毒事务不过夜，下一指数照常
-                failures.append(f"{symbol} {type(exc).__name__}: "
-                                f"{str(exc)[:180]}")
+                try:                            # 东财 kline 被风控 → 新浪兜底
+                    if sina_client is None:
+                        sina_client = SinaClient(
+                            rate=RateLimiter(initial_qps=1.0, min_qps=0.2,
+                                             max_qps=5.0, jitter=0.3),
+                            http=httpx_async_client(timeout=30.0))
+                    data = await sina_client.fetch_index_daily(symbol, beg=beg)
+                    index_store.upsert_bars(conn, symbol, data.rows)
+                    conn.commit()
+                    bars_n += len(data.rows)
+                    print(f"[index] {symbol} 东财失败({type(exc).__name__})"
+                          f" → 新浪兜底 +{len(data.rows)} 根")
+                except Exception as exc2:       # noqa: BLE001 双源皆败才记失败
+                    conn.rollback()
+                    failures.append(
+                        f"{symbol} 东财 {type(exc).__name__}: {str(exc)[:100]}"
+                        f" + 新浪兜底 {type(exc2).__name__}: {str(exc2)[:120]}")
             progress(done, total)
         finish(conn, bars_n=bars_n, failures=failures)
         conn.commit()
     await client.aclose()
+    if sina_client is not None and hasattr(sina_client, "aclose"):
+        await sina_client.aclose()
     summary.update(ok=0 if failures else 1, failed=len(failures),
                    bars=bars_n, failures=failures, aborted=bool(failures))
     print(f"[index] 指数日更：{'/'.join(spec_all)} +{bars_n} 根"

@@ -393,7 +393,21 @@ def _krow(date_str: str, close: float):
     return (date_str, 0.0, close, 0.0, 0.0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, None)
 
 
-def _run_job(fake_client, fake_store, conn):
+class _FakeSinaIndex:
+    """假新浪兜底客户端：失败路径用例必须注入，防兜底懒建真客户端触网。"""
+
+    def __init__(self, exc=None):
+        self.exc, self.calls = exc, []
+
+    async def fetch_index_daily(self, symbol, *, beg="0"):
+        self.calls.append({"symbol": symbol, "beg": beg})
+        raise self.exc or RuntimeError("sina down")
+
+    async def aclose(self):
+        pass
+
+
+def _run_job(fake_client, fake_store, conn, sina=None):
     task = {"id": 9, "source": "index", "mode": "daily", "name": "指数日更",
             "schedule_time": "17:30", "enabled": True, "_trigger": "manual"}
     stop_event = type("E", (), {"is_set": lambda self: False})()
@@ -405,7 +419,7 @@ def _run_job(fake_client, fake_store, conn):
     summary = asyncio.run(_run_index_job(
         DEAD_DSN, DEAD_POOL, task, progress=progress,
         stop_event=stop_event, client=fake_client, store=fake_store,
-        connect=lambda d: conn))
+        connect=lambda d: conn, sina=sina))
     return summary, progress_log
 
 
@@ -429,13 +443,14 @@ class TestIndexJobDual:
         assert len(inserts) == 2
 
     def test_second_symbol_failure_keeps_first_and_records(self):
-        """沪深300 拉取失败：上证增量已入库不回滚，failures 记录、aborted=True，
-        run 正常收尾不抛出。"""
+        """沪深300 拉取失败（新浪兜底也失败）：上证增量已入库不回滚，
+        failures 记录、aborted=True，run 正常收尾不抛出。"""
         conn = _DualConn({"sh000001": dt.date(2026, 11, 20),
                           "sh000300": None})
         client = _FakeClient(rows_by_code={
             "000001": [_krow("2026-11-20", 3810.0)]}, fail_code="000300")
-        summary, _ = _run_job(client, _FakeStore(), conn)
+        summary, _ = _run_job(client, _FakeStore(), conn,
+                              sina=_FakeSinaIndex(exc=RuntimeError("sina down")))
         assert summary["aborted"] is True
         assert summary["bars"] == 1
         assert summary["failures"] and "000300" in summary["failures"][0]

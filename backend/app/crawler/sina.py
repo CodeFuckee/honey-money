@@ -35,6 +35,13 @@ def _default_daily_fetcher(symbol: str, *, start_date=None, end_date=None):
     return ak.stock_zh_a_daily(symbol=symbol, start_date=start_date, end_date=end_date)
 
 
+def _default_index_fetcher(symbol: str):
+    """新浪指数 kjs 全史（akshare stock_zh_index_daily，date/open/high/low/
+    close/volume 六列，无 amount/换手）——东财指数 kline 的兜底源。"""
+    import akshare as ak   # 延迟导入：重依赖
+    return ak.stock_zh_index_daily(symbol=symbol)
+
+
 START_BUFFER_DAYS = 15
 
 
@@ -86,14 +93,43 @@ def df_to_rows(df, beg: str = "0") -> list[tuple]:
     return rows
 
 
+def index_df_to_rows(df, beg: str = "0") -> list[tuple]:
+    """akshare 指数日线 DataFrame → 12 元组（布局同 df_to_rows）。
+
+    指数 kjs 无 amount/衍生字段：amount 恒 0（表列 NOT NULL，东财恢复后
+    增量重叠段会以真实值覆写，页面只读 close 不受影响）；volume 股→手
+    （//100，与东财指数口径一致——2026-11-24 对拍生产库
+    49,971,172,700 股 → 499,711,727 手逐位相等）。
+    """
+    if df is None or len(df) == 0:
+        return []
+    beg_iso = f"{beg[:4]}-{beg[4:6]}-{beg[6:8]}" if beg and beg != "0" else None
+    rows: list[tuple] = []
+    for i in range(len(df["date"])):
+        d = df["date"][i]
+        ds = d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d)
+        if beg_iso and ds < beg_iso:
+            continue
+        rows.append((
+            ds, float(df["open"][i]), float(df["close"][i]),
+            float(df["high"][i]), float(df["low"][i]),
+            int(float(df["volume"][i]) // 100),   # 股 → 手（对齐东财口径）
+            0.0, None, None, None, None, None,
+        ))
+    return rows
+
+
 class SinaClient:
-    """与 EastmoneyClient 同构：fetch_stock_list / fetch_daily_bars。"""
+    """与 EastmoneyClient 同构：fetch_stock_list / fetch_daily_bars /
+    fetch_index_daily（指数兜底）。"""
 
     def __init__(self, *, rate: RateLimiter, http: httpx.AsyncClient,
-                 daily_fetcher=None, fetch_timeout: float = 60.0):
+                 daily_fetcher=None, index_fetcher=None,
+                 fetch_timeout: float = 60.0):
         self._rate = rate
         self._http = http
         self._daily = daily_fetcher or _default_daily_fetcher
+        self._index = index_fetcher or _default_index_fetcher
         self._fetch_timeout = fetch_timeout
 
     async def _fetch_list_total(self) -> int:
@@ -183,3 +219,31 @@ class SinaClient:
         self._rate.report(SINA_CHANNEL, True)
         return DailyBars(code=code, name="", dktotal=len(rows), rows=rows,
                          source="sina")
+
+    async def fetch_index_daily(self, symbol: str, *, beg: str = "0") -> DailyBars:
+        """指数日线（新浪 kjs 全史 + beg 增量过滤）——东财指数 kline 被风控时
+        指数日更任务的兜底源（2026-11-24 生产踩坑：push2his RemoteProtocolError
+        连日）。symbol 直接用 "sh000001"/"sh000300"（index_store.INDEX_SYMBOLS
+        键即新浪指数代码，无需映射）；kjs 本就全量取回，beg 由转换器过滤。"""
+        await self._rate.acquire(SINA_CHANNEL)
+        try:
+            df = await asyncio.wait_for(
+                asyncio.to_thread(self._index, symbol),
+                timeout=self._fetch_timeout)
+            rows = index_df_to_rows(df, beg=beg)
+        except asyncio.TimeoutError as exc:
+            self._rate.report(SINA_CHANNEL, False)
+            raise SinaError(
+                f"新浪指数日线获取超时({symbol}, {self._fetch_timeout}s, "
+                "akshare 内部挂起)") from exc
+        except Exception as exc:
+            self._rate.report(SINA_CHANNEL, False)
+            raise SinaError(f"新浪指数日线获取失败({symbol}): {exc}") from exc
+        self._rate.report(SINA_CHANNEL, True)
+        return DailyBars(code=symbol, name="", dktotal=len(rows), rows=rows,
+                         source="sina")
+
+    async def aclose(self) -> None:
+        """关闭底层 httpx 客户端（调度器 finally 统一调用，兜底懒建同样受益）。"""
+        if self._http is not None:
+            await self._http.aclose()

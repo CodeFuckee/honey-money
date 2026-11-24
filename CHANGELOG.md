@@ -280,6 +280,18 @@
   子进程 RSS 峰值（背景见 Fixed 的 run 122 诊断）。
 
 ### Fixed
+- **指数日更东财被风控 → 新浪指数日线兜底（2026-11-24，519 vs 924 页 924 线
+  停更修复）**：「指数日更」任务 11-23 起 `push2his.eastmoney.com` 对 NAS
+  家宽 IP 风控（RemoteProtocolError 传输层重试用尽，与东财 Cookie 验证失败
+  同源），当日 crawl_run 失败 aborted、`index_daily` 停在 11-20，519 vs 924
+  页 924 线与金融危机史页双双停更。修复：`_run_index_job` 逐指数失败后落
+  **新浪指数日线兜底**（`SinaClient.fetch_index_daily`——akshare
+  `stock_zh_index_daily` kjs 全史接口，与股票同族、新浪站独立未被风控；
+  `index_df_to_rows` 股→手 //100 与东财口径逐位对拍相等、amount 恒 0 表列
+  兜底、衍生字段 None 占位 12 元组同布局），双源皆败才记 failures；东财
+  正常时兜底懒建零开销、行为逐位不变。增量 beg 同段复用，部署后下一次运行
+  自动补齐缺口日。+11 单测（800 总：兜底成功/双败/东财健康零调用/逐指数
+  隔离、转换器布局与股→手对拍锚、兜底通道成功/失败/限速通道）。
 - **部署空窗降级（2026-11-19 线上事故）**：多阈值表迁移 `ensure_tp_schema`
   此前只在日更回测任务里跑——「最近一次止盈后」新代码 SELECT 新列部署后、
   当日日更前生产 `/api/funds/dca*` 整页 down（UndefinedColumn，与

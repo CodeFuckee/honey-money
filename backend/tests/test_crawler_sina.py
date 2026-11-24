@@ -14,7 +14,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.crawler.sina import SinaClient, SinaError, df_to_rows  # noqa: E402
+from app.crawler.sina import (SinaClient, SinaError, df_to_rows,  # noqa: E402
+                              index_df_to_rows)
 
 
 def run(coro):
@@ -277,3 +278,77 @@ class TestDailyFetchTimeout:
         bars = run(client.fetch_daily_bars(1, "600519"))
         assert bars.source == "sina" and bars.rows
 
+
+
+def index_df():
+    """新浪指数 kjs 六列（date/open/high/low/close/volume，无 amount）。"""
+    return FakeDF(
+        ["date", "open", "high", "low", "close", "volume"],
+        [
+            [dt.date(2026, 11, 20), 3527.304, 3538.267, 3500.832, 3533.793, 49971172700],
+            [dt.date(2026, 11, 23), 3503.523, 3544.601, 3476.650, 3538.948, 51219271400],
+        ],
+    )
+
+
+class TestIndexDfToRows:
+    """指数行转换：12 元组布局对齐 upsert_bars（close 第 3 位）、股→手、amount 恒 0。"""
+
+    def test_mapping_units_and_layout(self):
+        """close 在 r[2]、volume 股→手（对拍东财生产库逐位相等）、amount=0。"""
+        rows = index_df_to_rows(index_df())
+        assert len(rows) == 2
+        r2 = rows[1]
+        assert r2[0] == "2026-11-23"
+        assert r2[1] == 3503.523 and r2[2] == 3538.948      # open, close
+        assert r2[3] == 3544.601 and r2[4] == 3476.650      # high, low
+        assert r2[5] == 512192714                           # volume: 股 // 100 → 手
+        assert r2[6] == 0.0                                  # 指数 kjs 无 amount
+        assert r2[7:] == (None, None, None, None, None)      # 衍生字段占位
+
+    def test_volume_matches_eastmoney_shou(self):
+        """对拍锚：2026-11-20 东财生产行 volume=499711727 手，新浪股数 //100 相等。"""
+        rows = index_df_to_rows(index_df())
+        assert rows[0][5] == 499711727
+
+    def test_beg_filters_old_rows(self):
+        rows = index_df_to_rows(index_df(), beg="20261123")
+        assert len(rows) == 1 and rows[0][0] == "2026-11-23"
+
+    def test_empty_df(self):
+        assert index_df_to_rows(FakeDF(["date"], [])) == []
+
+
+class TestFetchIndexDaily:
+    """指数日线兜底通道（东财 kline 被风控时指数日更任务走这里）。"""
+
+    def _client(self, index=None):
+        http = httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda req: httpx.Response(200, json=[])))
+        return SinaClient(rate=SpyRate(), http=http, index_fetcher=index), http
+
+    def test_ok_returns_daily_bars(self):
+        seen = {}
+
+        def fetcher(symbol):
+            seen["symbol"] = symbol
+            return index_df()
+
+        client, _ = self._client(fetcher)
+        bars = run(client.fetch_index_daily("sh000001", beg="20261113"))
+        assert seen["symbol"] == "sh000001"
+        assert bars.code == "sh000001" and bars.source == "sina"
+        assert len(bars.rows) == 2 and bars.rows[0][2] == 3533.793
+
+    def test_fetcher_error_raises_sina_error(self):
+        def boom(symbol):
+            raise RuntimeError("sina kjs down")
+
+        client, _ = self._client(boom)
+        with pytest.raises(SinaError, match="新浪指数日线获取失败"):
+            run(client.fetch_index_daily("sh000300"))
+
+    def test_rate_channel_used(self):
+        client, _ = self._client(lambda symbol: index_df())
+        run(client.fetch_index_daily("sh000001"))
+        assert any("sina" in k for k in client._rate.acquires)

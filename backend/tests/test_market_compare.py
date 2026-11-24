@@ -260,8 +260,8 @@ def _krow(date_str: str, close: float):
     return (date_str, 0.0, close, 0.0, 0.0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, None)
 
 
-def _run_job(fake_client, fake_store, last_date_row=(None,)):
-    """公共驱动：client/store/connect 全注入，asyncio 跑完返回 (summary, conn)。"""
+def _run_job(fake_client, fake_store, last_date_row=(None,), sina=None):
+    """公共驱动：client/store/connect/sina 全注入，asyncio 跑完返回 (summary, conn)。"""
     conn = _JobConn(last_date_row=last_date_row)
     task = {"id": 9, "source": "index", "mode": "daily", "name": "指数日更",
             "schedule_time": "17:30", "enabled": True, "_trigger": "manual"}
@@ -269,7 +269,7 @@ def _run_job(fake_client, fake_store, last_date_row=(None,)):
     summary = asyncio.run(_run_index_job(
         DEAD_DSN, DEAD_POOL, task, progress=lambda done, total: None,
         stop_event=stop_event, client=fake_client, store=fake_store,
-        connect=lambda d: conn))
+        connect=lambda d: conn, sina=sina))
     return summary, conn
 
 
@@ -295,11 +295,14 @@ class TestIndexJob:
         assert client.calls[0]["beg"] == "0"
 
     def test_fetch_failure_records_and_aborts(self):
-        """接口失败：failures 记录、aborted=True，run 正常收尾不抛出。"""
+        """东财+新浪兜底双源皆败：failures 记录含两源摘要、aborted=True，
+        run 正常收尾不抛出。"""
         client = _FakeClient(exc=RuntimeError("K线接口 rc=403"))
-        summary, _ = _run_job(client, _FakeStore())
+        summary, _ = _run_job(client, _FakeStore(),
+                              sina=_FakeSinaIndex(exc=RuntimeError("sina down")))
         assert summary["aborted"] is True
         assert summary["failures"] and "rc=403" in summary["failures"][0]
+        assert "新浪兜底" in summary["failures"][0]
 
     def test_stop_event_before_fetch(self):
         """stop_event 已置位：不发起请求，aborted=True 正常收尾。"""
@@ -313,6 +316,81 @@ class TestIndexJob:
             stop_event=stop_event, client=client, store=store,
             connect=lambda d: _JobConn()))
         assert summary["aborted"] is True and client.calls == []
+
+
+class _FakeSinaIndex:
+    """假新浪兜底客户端（fetch_index_daily 签名同 SinaClient）。"""
+
+    def __init__(self, rows=None, exc=None):
+        self.rows, self.exc, self.calls = (rows or []), exc, []
+
+    async def fetch_index_daily(self, symbol, *, beg="0"):
+        self.calls.append({"symbol": symbol, "beg": beg})
+        if self.exc:
+            raise self.exc
+        from app.crawler.eastmoney import DailyBars
+        return DailyBars(code=symbol, name="", dktotal=len(self.rows),
+                         rows=self.rows)
+
+    async def aclose(self):
+        pass
+
+
+class TestIndexJobSinaFallback:
+    """东财 kline 被风控（2026-11-23 生产 RemoteProtocolError 连日）→
+    新浪指数日线逐指数兜底；双源皆败才记 failures。"""
+
+    def test_em_failure_sina_fallback_succeeds(self):
+        """东财失败 → 新浪兜底同段增量成功：bars 计数、failures 空、
+        INSERT 落库、兜底客户端收到同一 beg 与新浪指数代码。"""
+        client = _FakeClient(exc=RuntimeError("RemoteProtocolError: x"))
+        sina = _FakeSinaIndex(rows=[_krow("2026-11-23", 3538.9)])
+        summary, conn = _run_job(client, _FakeStore(),
+                                 last_date_row=(dt.date(2026, 11, 20),),
+                                 sina=sina)
+        assert summary["aborted"] is False and summary["bars"] == 2
+        assert summary["failures"] == []
+        assert client.calls[0]["beg"] == sina.calls[0]["beg"] == "20261110"
+        assert sina.calls[0]["symbol"] == "sh000001"
+        assert any(q.lstrip().startswith("INSERT INTO index_daily")
+                   for q, _ in conn.executed)
+
+    def test_em_failure_sina_fallback_also_fails(self):
+        """双源皆败：每指数一条 failures（含东财与新浪两源摘要），不抛出。"""
+        client = _FakeClient(exc=RuntimeError("rc=403"))
+        sina = _FakeSinaIndex(exc=RuntimeError("sina down"))
+        summary, _ = _run_job(client, _FakeStore(),
+                              last_date_row=(dt.date(2026, 11, 20),), sina=sina)
+        assert summary["aborted"] is True
+        assert len(summary["failures"]) == 2          # 双指数各一条
+        assert all("东财" in f and "新浪兜底" in f for f in summary["failures"])
+        assert "sina down" in summary["failures"][0]
+
+    def test_em_success_sina_never_called(self):
+        """东财正常：兜底客户端零调用（生产懒建策略——东财健康时零开销）。"""
+        client = _FakeClient(rows=[_krow("2026-11-20", 3810.0)])
+        sina = _FakeSinaIndex(rows=[])
+        summary, _ = _run_job(client, _FakeStore(), sina=sina)
+        assert summary["aborted"] is False
+        assert sina.calls == []
+
+    def test_fallback_isolated_per_symbol(self):
+        """逐指数隔离：第一指数兜底成功保留 bars，第二指数双败只记它一条。"""
+        client = _FakeClient(exc=RuntimeError("em blocked"))
+        sina = _FakeSinaIndex(rows=[_krow("2026-11-23", 3538.9)])
+        orig = sina.fetch_index_daily
+
+        async def picky(symbol, *, beg="0"):          # 沪深300 兜底也失败
+            if symbol == "sh000300":
+                raise RuntimeError("sina down for 300")
+            return await orig(symbol, beg=beg)
+
+        sina.fetch_index_daily = picky
+        summary, _ = _run_job(client, _FakeStore(),
+                              last_date_row=(dt.date(2026, 11, 20),), sina=sina)
+        assert summary["bars"] == 1                   # 仅上证兜底成功那份
+        assert len(summary["failures"]) == 1
+        assert "sh000300" in summary["failures"][0]
 
 
 # ---------- index_store（建表/写入/读取的 SQL 契约） ----------
