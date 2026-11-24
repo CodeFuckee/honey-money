@@ -29,7 +29,9 @@
 """
 
 import gc
+import hashlib
 import io
+import os
 from typing import NamedTuple
 
 import numpy as np
@@ -788,20 +790,8 @@ def run_full_backtest_tp(dsn: str, *, thresholds=TP_THRESHOLDS,
     # 时机行（定投时机视图，见 compute_dip_timing）+ 风险指标行
     # （risk_metrics，列表波动列/详情指标卡共用）：一次 groupby 双产出；
     # 时机行只收 alive 基金（"当前时机"语义），风险行不限（退市基金波动
-    # 回顾仍有意义）
-    timing_rows = []
-    risk_rows = []
-    for code, g in nav.groupby("code", sort=True):
-        g = g.sort_values("nav_date")
-        prep = prep_window(g, None)
-        if prep is None:
-            continue
-        if alive_by_code.get(code):
-            t = compute_dip_timing(*prep)
-            timing_rows.append((code, t["dd_current"], t["days_since_peak"],
-                                t["dip_band"],
-                                str(all_end)[:10] if all_end else None))
-        risk_rows.append(risk_row(code, compute_risk_metrics(*prep)))
+    # 回顾仍有意义）——循环体抽为 _timing_risk_rows 供脏检测日更共用
+    timing_rows, risk_rows = _timing_risk_rows(nav, alive_by_code, all_end)
     stats = {"fund_count": len(old_rows), "round_count": len(old_rounds),
              "tp_round_count": len(tp_rounds),
              "timing_count": len(timing_rows),
@@ -818,6 +808,220 @@ def run_full_backtest_tp(dsn: str, *, thresholds=TP_THRESHOLDS,
     del nav
     gc.collect()
     return old_rows, old_rounds, tp_rows, tp_rounds, timing_rows, risk_rows, stats
+
+
+def _timing_risk_rows(nav: pd.DataFrame, alive_by_code: dict,
+                      all_end) -> tuple[list[tuple], list[tuple]]:
+    """时机行（定投时机视图，见 compute_dip_timing）+ 风险指标行
+    （risk_metrics，列表波动列/详情指标卡共用）：一次 groupby 双产出；
+    时机行只收 alive 基金（"当前时机"语义），风险行不限（退市基金波动
+    回顾仍有意义）。全量与脏检测两路编排共用（脏检测只喂 dirty 基金子集）。"""
+    timing_rows = []
+    risk_rows = []
+    for code, g in nav.groupby("code", sort=True):
+        g = g.sort_values("nav_date")
+        prep = prep_window(g, None)
+        if prep is None:
+            continue
+        if alive_by_code.get(code):
+            t = compute_dip_timing(*prep)
+            timing_rows.append((code, t["dd_current"], t["days_since_peak"],
+                                t["dip_band"],
+                                str(all_end)[:10] if all_end else None))
+        risk_rows.append(risk_row(code, compute_risk_metrics(*prep)))
+    return timing_rows, risk_rows
+
+
+# ===== 脏检测日更（2026-11-24）：基金级输入指纹 + 引擎版本 → 只重算有变的基金 =====
+# 动机：周末/节假日净值零更新，全市场重算产出与前夜完全相同的结果（5 方法
+# 全量本机 ~6h）；按基金比对输入指纹，没变的复用库中上次结果行，周末夜更
+# 从小时级降到分钟级。口径安全性：复权链 = cumprod(日增长率)（build_growth
+# 逐行只依赖当天与前一天），追加新净值不改写历史复权点 → 已关闭轮次与
+# 未变基金的全部结果行可安全复用；指纹含精确和值，数据源回头修正历史净值
+# 也能抓住并强制重算。
+
+# 引擎版本 base——**改算法/口径逻辑（simulate 状态机、XIRR 求解、窗口口径等
+# 代码）时手动 bump**；参数常量（方法清单/止盈档位/费率表/回撤梯度等）由
+# engine_version() 自动纳入哈希（调用时读模块全局，改源码即变），改动即
+# 自动全量，不依赖人的记性。
+ENGINE_VERSION_BASE = "2026-11-24.1"
+
+
+def engine_version(*extra) -> str:
+    """引擎版本串 = base + 参与计算的全部常量与 extra 的 sha1 前 8 位。
+
+    常量清单在函数体内调用时取模块全局——凡参与逐基金计算的口径常量都在
+    此（新增口径常量须同步补进，漏掉的改了不会触发自动全量 → 脏数据风险）。
+    extra 携带运行时配置（如设置页的运作期限下限 min_span_days——DB 值
+    不进代码常量，须显式传入），任何一项变化都让版本串变化 → 次日日更
+    判定全部指纹失效 → 自动全量重算，杜绝表内混版本。"""
+    material = repr((AMOUNT, TAKE_PROFIT, MIN_SPAN_DAYS, TP_THRESHOLDS,
+                     DCA_METHODS, DD_LADDER, DD_LADDER_DEEP, DD_LADDERS,
+                     PROFIT_LADDER, PROFIT_LADDERS, SUB_DISCOUNT, SUB_RATE_A,
+                     _SUB_RATE_DEFAULT, REDEEM_EQUITY, REDEEM_BOND_C)
+                    + tuple(extra))
+    digest = hashlib.sha1(material.encode()).hexdigest()[:8]
+    return f"{ENGINE_VERSION_BASE}+{digest}"
+
+
+# 指纹 SQL：一条 GROUP BY 在 PG 侧聚合全市场（~3200 万行扫描，实测 NAS
+# ~10 分钟），不拉明细进内存。sum 用 ::numeric 精确累加——顺序无关且确定，
+# 历史净值被源修正（count/max_date 不变）时和值必变；带 fund_basic
+# （名称→C 类判定/类型→费率档/退市标记）与 fund_scale（规模/日期，
+# 季度更新）字段，基础信息变更同样触发重算。nav_count<2 的基金不产生
+# 回测结果行，不影响全量口径。
+_FP_SQL = """
+SELECT n.code,
+       count(*)                                  AS nav_count,
+       min(nav_date)::date::text                 AS min_date,
+       max(nav_date)::date::text                 AS max_date,
+       sum(unit_nav::numeric)::text              AS s_unit,
+       sum(accum_nav::numeric)::text             AS s_accum,
+       sum(coalesce(pct_chg, 0)::numeric)::text  AS s_pct,
+       b.name                                    AS name,
+       b.fund_type                               AS fund_type,
+       b.delisted                                AS delisted,
+       s.scale_yi::text                          AS scale_yi,
+       s.scale_date::date::text                  AS scale_date
+FROM fund_nav n
+LEFT JOIN fund_basic b USING (code)
+LEFT JOIN fund_scale s USING (code)
+GROUP BY n.code, b.name, b.fund_type, b.delisted, s.scale_yi, s.scale_date
+"""
+
+
+def load_input_fingerprints(conn) -> dict[str, tuple]:
+    """每基金回测输入指纹（元组，逐位可比）：nav 聚合 + basic + scale。
+    只读，不落库；落库由 dca_store.replace_fingerprints 完成。"""
+    out: dict[str, tuple] = {}
+    with conn.cursor() as cur:
+        cur.execute(_FP_SQL)
+        for (code, nav_count, min_date, max_date, s_unit, s_accum, s_pct,
+             name, fund_type, delisted, scale_yi, scale_date) in cur.fetchall():
+            out[str(code)] = (int(nav_count), min_date, max_date,
+                              s_unit, s_accum, s_pct,
+                              name, fund_type,
+                              None if delisted is None else bool(delisted),
+                              scale_yi, scale_date)
+    return out
+
+
+def compute_dirty(cur_fps: dict[str, tuple], cur_engine: str,
+                  prev_fps: dict[str, tuple] | None,
+                  prev_engine: str | None) -> tuple[set[str], set[str]]:
+    """脏集合推导（纯函数）：引擎版本变化或上次指纹缺失（首跑/表被清）→
+    全量（dirty=全部，gone=∅）；否则指纹变化的基金 + 新基金为脏，消失的
+    基金单列 gone（结果表清行用）。指纹值必须是同构元组（两路加载都已
+    规范化为 tuple）。"""
+    if not prev_fps or prev_engine != cur_engine:
+        return set(cur_fps), set()
+    dirty = {c for c, fp in cur_fps.items() if prev_fps.get(c) != fp}
+    gone = set(prev_fps) - set(cur_fps)
+    return dirty, gone
+
+
+def run_full_backtest_tp_dirty(dsn: str, *, log=print) -> tuple[
+        list[dict], list[tuple], list[dict], list[tuple], list[tuple],
+        list[tuple], dict, dict[str, tuple]]:
+    """日更全量回测（脏检测版）：逐基金比对输入指纹，只重算"净值或基础
+    信息有变"的基金，其余复用库中上次结果行；引擎版本变化（含设置页口径
+    变更）或首跑自动退化为全量；BACKTEST_FORCE_FULL=1 强制全量。
+
+    返回 (old_rows, old_rounds, tp_rows, tp_rounds, timing_rows, risk_rows,
+    stats, fingerprints)——结果行只含 dirty 基金；stats 同
+    run_full_backtest_tp 并增补 engine/dirty_count/skipped_count/gone_count/
+    full_run/dirty/gone 键；fingerprints 为本轮全市场指纹（调用方经
+    dca_store.replace_fingerprints 落库）。合并导入（按 code 范围替换 +
+    alive 全表刷新 + 时机死行清理 + 分位回填）由调用方用 dca_store.merge_*
+    在单事务内完成；纯 CPU，调用方放子进程跑。"""
+    from . import dca_store          # 惰性导入：引擎不依赖存储的依赖方向
+    with psycopg.connect(dsn, connect_timeout=10) as conn:
+        cur_fps = load_input_fingerprints(conn)
+        prev_fps, prev_engine = dca_store.load_fingerprints(conn)
+        # 运作期限下限随设置页（与 run_full_backtest_tp 同款读取与回退）：
+        # DB 值不进代码常量哈希，须作为 extra 纳入版本串
+        try:
+            min_span_days = settings_store.get_min_span_days(
+                conn, default=MIN_SPAN_DAYS)
+        except Exception as exc:
+            log(f"  设置表读取失败，回退运作期限下限 {MIN_SPAN_DAYS} 天：{exc}")
+            min_span_days = MIN_SPAN_DAYS
+    engine = engine_version(min_span_days)
+    if os.environ.get("BACKTEST_FORCE_FULL") == "1":
+        prev_fps, prev_engine = None, None
+        log("BACKTEST_FORCE_FULL=1，强制全量重算")
+    dirty, gone = compute_dirty(cur_fps, engine, prev_fps, prev_engine)
+    # 全局窗口末日 = 全市场 max(末次净值日)（nav_count≥2 的基金——单行基金
+    # 不产生结果行，排除以与旧口径 all_end=max(full_end) 逐位一致）
+    all_end = max((fp[2] for fp in cur_fps.values() if fp[2] and fp[0] >= 2),
+                  default=None)
+    total = len(cur_fps)
+    thresholds = TP_THRESHOLDS
+    stats = {"fund_count": 0, "round_count": 0, "tp_round_count": 0,
+             "timing_count": 0, "risk_count": 0,
+             "thresholds": [float(t) for t in thresholds],
+             "methods": list(DCA_METHODS),
+             "window_end": str(all_end) if all_end else None,
+             "engine": engine, "dirty_count": len(dirty),
+             "skipped_count": total - len(dirty), "gone_count": len(gone),
+             "full_run": not prev_fps or prev_engine != engine,
+             "dirty": sorted(dirty), "gone": sorted(gone)}
+
+    if not dirty:
+        # 周末/节假日快路径：无任何输入变化，零计算——alive 刷新/时机时间戳/
+        # 分位回填/meta 由调用方的 merge_* 集合 SQL 完成
+        log(f"指纹无变化：基金 {total:,} 只全部跳过重算"
+            f"（清理 gone {len(gone):,} 只），仅刷新派生列")
+        stats["fund_count"] = total
+        return [], [], [], [], [], [], stats, cur_fps
+
+    codes_dirty = sorted(dirty)
+    log(f"脏检测：基金 {total:,} 只，重算 {len(dirty):,} 只 / 跳过 "
+        f"{total - len(dirty):,} 只（清理 gone {len(gone):,} 只），引擎 {engine}")
+    with psycopg.connect(dsn, connect_timeout=10) as conn:
+        basic = _load_basic(conn, codes_dirty)
+        scale_map = _load_scale(conn)
+        nav = _load_nav(conn, codes_dirty)
+    log(f"净值行：{len(nav):,}")
+    tp_rows, tp_rounds = [], []
+    for method in DCA_METHODS:
+        m_rows, m_rounds = run_backtest_tp(nav, basic, scale_map, thresholds,
+                                           method=method, log=log,
+                                           min_span_days=min_span_days)
+        tp_rows.extend(m_rows)
+        tp_rounds.extend(m_rounds)
+    # 旧口径行 = amount 且 tp=TAKE_PROFIT 派生（去掉 tp/method 维度），
+    # 与 run_backtest 输出一致（同 run_full_backtest_tp）
+    old_rows = [{k: v for k, v in r.items() if k not in ("tp", "method")}
+                for r in tp_rows
+                if r["tp"] == TAKE_PROFIT and r["method"] == "amount"]
+    old_rounds = [t[:1] + t[3:] for t in tp_rounds
+                  if t[1] == "amount" and t[2] == TAKE_PROFIT]
+    # alive：本次只标 dirty 基金（跳过基金的 alive 由 merge 后的全表刷新
+    # SQL 统一翻转）；cutoff 用全局 all_end（指纹 max 末净值日，跳过基金
+    # 也计入——不能只看本次重算子集的 max，否则窗口末日回退、边界基金误翻转）
+    cutoff = (pd.Timestamp(all_end) - pd.Timedelta(days=_ALIVE_WINDOW_DAYS)) \
+        if all_end else None
+    alive_by_code = {}
+    for r in old_rows:
+        r["alive"] = bool(cutoff and r["full_end"]
+                          and pd.Timestamp(r["full_end"]) >= cutoff)
+        alive_by_code[r["code"]] = r["alive"]
+    for r in tp_rows:
+        r["alive"] = alive_by_code.get(r["code"], False)
+    timing_rows, risk_rows = _timing_risk_rows(nav, alive_by_code, all_end)
+    stats.update({"fund_count": total, "round_count": len(old_rounds),
+                  "tp_round_count": len(tp_rounds),
+                  "timing_count": len(timing_rows),
+                  "risk_count": len(risk_rows)})
+    log(f"重算完成：{len(dirty):,} 只 / 旧口径轮次 {len(old_rounds):,} 行 / "
+        f"多阈值轮次 {len(tp_rounds):,} 行 / 时机行 {len(timing_rows):,} / "
+        f"风险行 {len(risk_rows):,}，窗口截至 {all_end}")
+    # 结果组装完即释放 NAV 大头（同 run_full_backtest_tp 的内存悬崖防御）
+    del nav
+    gc.collect()
+    return (old_rows, old_rounds, tp_rows, tp_rounds, timing_rows, risk_rows,
+            stats, cur_fps)
 
 
 def import_scale_csv(csv_path: str, dsn: str, *, log=print) -> int:

@@ -100,15 +100,16 @@ class PgAdvisoryLock:
 
 async def _run_backtest_job(dsn: str, task: dict, progress,
                             stop_event: asyncio.Event) -> dict:
-    """定投回测日更：子进程全量重算（纯 CPU 不占 API 进程；六档止盈点
-    独立状态机，总计算量 ≈ 单阈值日更 ×6，夜窗 23:00 起跑约 2-3h）
-    → 事务直写 fund_dca_result/fund_dca_rounds（tp=0.20 派生，与旧引擎
-    一致）+ fund_dca_tp_*（5%~30% 六档，见 dca_backtest TP_THRESHOLDS）
-    → crawl_run 记录。
+    """定投回测日更：子进程重算（脏检测版，见 dca_backtest.
+    run_full_backtest_tp_dirty——逐基金比对输入指纹，只重算净值/基础信息
+    有变的基金，引擎版本变化或首跑自动全量；周末/节假日零更新夜全程仅
+    刷派生列，分钟级）→ 单事务合并导入（按 code 范围替换 + alive 全表
+    刷新 + 时机死行清理 + 横截面分位回填）→ crawl_run 记录。
 
     前置只做净值新鲜度告警不阻断（跑最新可得数据，爬取失败次日自愈）；
     stop_event 无法中断子进程，仅在各阶段间生效；kill/重启丢弃当日运行
-    （导入为末尾单事务，半途无脏数据），次日计划照常。
+    （导入为末尾单事务，半途无脏数据），次日计划照常；强制全量逃生口
+    BACKTEST_FORCE_FULL=1（或清空 fund_dca_fp 表）。
     """
     import concurrent.futures
     import multiprocessing
@@ -145,8 +146,8 @@ async def _run_backtest_job(dsn: str, task: dict, progress,
         with concurrent.futures.ProcessPoolExecutor(max_workers=1,
                                                     mp_context=ctx) as pool:
             old_rows, old_rounds, tp_rows, tp_rounds, timing_rows, \
-                risk_rows, stats = await loop.run_in_executor(
-                    pool, dca_backtest.run_full_backtest_tp, dsn)
+                risk_rows, stats, fingerprints = await loop.run_in_executor(
+                    pool, dca_backtest.run_full_backtest_tp_dirty, dsn)
     except Exception as exc:
         with psycopg.connect(dsn) as conn:
             store.finish_run(conn, run_id, total_stocks=0, ok_stocks=0,
@@ -170,25 +171,45 @@ async def _run_backtest_job(dsn: str, task: dict, progress,
     progress(1, 1)
     params = {"amount": 1000.0, "take_profit": 0.2, "frequency": "monthly",
               "window_end": stats.get("window_end"), "min_age_years": None,
-              "scale_min_yi": None, "source": "scheduler/backtest"}
+              "scale_min_yi": None, "source": "scheduler/backtest",
+              "engine": stats.get("engine")}
     tp_params = {"amount": 1000.0, "frequency": "monthly",
                  "thresholds": stats.get("thresholds", []),
                  "window_end": stats.get("window_end"),
-                 "source": "scheduler/backtest"}
+                 "source": "scheduler/backtest",
+                 "engine": stats.get("engine")}
+    # 脏检测合并导入：只替换本次重算（∪ gone 清理）的基金行，未变基金
+    # 原行保留；alive/时机表/横截面分位为全局派生，每晚集合 SQL 刷新
+    dirty_codes = sorted(set(stats.get("dirty", []))
+                         | set(stats.get("gone", [])))
+    cutoff = (dt.date.fromisoformat(str(stats["window_end"])[:10])
+              - dt.timedelta(days=dca_backtest._ALIVE_WINDOW_DAYS)) \
+        if stats.get("window_end") else None
     with psycopg.connect(dsn) as conn:
         dca_store.ensure_tp_schema(conn)          # 多阈值新表 + 波动指标表幂等建表
-        dca_store.import_rows(conn, old_rows, params=params)
-        dca_store.import_rounds(conn, old_rounds)
-        dca_store.import_tp_rows(conn, tp_rows, params=tp_params)
-        dca_store.import_tp_rounds(conn, tp_rounds)
-        dca_store.import_timing(conn, timing_rows)
-        dca_store.import_risk(conn, risk_rows)
+        dca_store.ensure_fp_schema(conn)          # 输入指纹表幂等建表
+        dca_store.merge_rows(conn, old_rows, dirty_codes,
+                             fund_count=stats["fund_count"], params=params)
+        dca_store.merge_rounds(conn, old_rounds, dirty_codes)
+        dca_store.merge_tp_rows(conn, tp_rows, dirty_codes,
+                                fund_count=stats["fund_count"],
+                                params=tp_params)
+        dca_store.merge_tp_rounds(conn, tp_rounds, dirty_codes)
+        dca_store.refresh_alive(conn, cutoff)     # 全表刷新（跳过基金也随窗口翻转）
+        dca_store.merge_timing(conn, timing_rows,
+                               computed_at=str(stats["window_end"])[:10]
+                               if stats.get("window_end") else None)
+        dca_store.merge_risk(conn, risk_rows, dirty_codes)
+        dca_store.replace_fingerprints(conn, fingerprints, stats["engine"])
         store.finish_run(conn, run_id, total_stocks=stats["fund_count"],
                          ok_stocks=stats["fund_count"], failed_stocks=0,
                          bars_upserted=stats["round_count"], failures=[],
                          aborted=False)
         conn.commit()
-    print(f"[backtest] 日更完成：{stats['fund_count']:,} 只 / "
+    print(f"[backtest] 日更完成：基金 {stats['fund_count']:,} 只（重算 "
+          f"{stats.get('dirty_count', 0):,} / 跳过 "
+          f"{stats.get('skipped_count', 0):,} / 清理 "
+          f"{stats.get('gone_count', 0):,}，引擎 {stats.get('engine')}）/ "
           f"旧口径轮次 {stats['round_count']:,} 行 / 多阈值轮次 "
           f"{stats['tp_round_count']:,} 行 / 风险行 {stats['risk_count']:,}，"
           f"窗口截至 {stats.get('window_end')}")

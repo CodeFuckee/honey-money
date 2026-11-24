@@ -618,6 +618,207 @@ def import_risk(conn, rows: list[tuple]) -> int:
     return len(rows)
 
 
+# ===== 脏检测日更合并导入（2026-11-24） =====
+# 与上方 import_* 整表替换并存：调度器脏检测路径用 merge_*（按 code 范围
+# DELETE + INSERT，未变基金的原行原地保留），脚本/回放路径继续用 import_*。
+# 范围替换先例见 scripts/dca_share_sample.py；"合并导入"必须保证同一引擎
+# 版本——引擎/参数变更由引擎侧 engine_version() 自动触发全量（脏路径退化为
+# 与整表替换等价：全部基金进 DELETE 范围）。
+
+FP_DDL = """
+CREATE TABLE IF NOT EXISTS fund_dca_fp (
+  code        VARCHAR(10) PRIMARY KEY,
+  fp          JSONB NOT NULL,
+  engine      TEXT NOT NULL,
+  computed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+"""
+
+
+def ensure_fp_schema(conn) -> None:
+    """基金输入指纹表幂等建表（脏检测日更前提，挂启动清单）。"""
+    with conn.cursor() as cur:
+        cur.execute(FP_DDL)
+
+
+def load_fingerprints(conn) -> tuple[dict[str, tuple], str | None]:
+    """上次日更落库的基金输入指纹 → ({code: fp 元组}, engine 版本串)。
+    表空返回 ({}, None)（编排侧视为全量）。fp 以 jsonb 数组存储、读回
+    转 tuple 与 load_input_fingerprints 的返回值逐位可比。"""
+    out: dict[str, tuple] = {}
+    engine: str | None = None
+    with conn.cursor() as cur:
+        cur.execute("SELECT code, fp, engine FROM fund_dca_fp")
+        for code, fp, eng in cur.fetchall():
+            out[str(code)] = tuple(fp)
+            engine = eng          # 同批整表写入，单版本语义
+    return out, engine
+
+
+def replace_fingerprints(conn, fps: dict[str, tuple], engine: str) -> int:
+    """指纹表整表替换（表小 ~2.7 万行，不做范围合并）；事务由调用方提交。"""
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM fund_dca_fp")
+        if fps:
+            cur.executemany(
+                "INSERT INTO fund_dca_fp (code, fp, engine) "
+                "VALUES (%s, %s::jsonb, %s)",
+                [(code, json.dumps(list(fp), ensure_ascii=False), engine)
+                 for code, fp in fps.items()])
+    return len(fps)
+
+
+def _codes_arr(codes: list[str]) -> str:
+    return "{" + ",".join(codes) + "}"
+
+
+def merge_rows(conn, rows: list[dict], codes: list[str], *, fund_count: int,
+               params: dict | None = None) -> int:
+    """旧口径结果按 code 范围替换 + meta upsert。codes = 本次重算 ∪ gone
+    （消失基金也要清行）；未变基金的原行原地保留。meta.fund_count 由调用
+    方显式传全市场基金数（不再取本次行数）；事务由调用方提交。"""
+    with conn.cursor() as cur:
+        if codes:
+            cur.execute("DELETE FROM fund_dca_result WHERE code = ANY(%s)",
+                        (_codes_arr(codes),))
+        if rows:
+            cur.executemany(_INSERT, [tuple(r[c] for c in _COLS) for r in rows])
+        cur.execute(_META_UPSERT,
+                    (fund_count, json.dumps(params or {}, ensure_ascii=False)))
+    return len(rows)
+
+
+# 间隔聚合范围化变体：只对本次替换的基金 NULL 化 + 重聚合（照抄
+# dca_share_sample 的防误清写法——全表 RESET 会抹掉未变基金的间隔列）
+_RESET_GAP_CODED = """
+UPDATE fund_dca_result SET gap_avg_days = NULL, gap_min_days = NULL,
+  gap_max_days = NULL, gap_avg_days_disc = NULL, gap_avg_days_nom = NULL
+WHERE code = ANY(%s)
+"""
+
+_APPLY_GAP_CODED = """
+UPDATE fund_dca_result r SET
+  gap_avg_days = t.g_avg, gap_min_days = t.g_min, gap_max_days = t.g_max,
+  gap_avg_days_disc = t.d_avg, gap_avg_days_nom = t.n_avg
+FROM (SELECT code,
+             avg(gap_days) FILTER (WHERE fee = 'gross') AS g_avg,
+             min(gap_days) FILTER (WHERE fee = 'gross') AS g_min,
+             max(gap_days) FILTER (WHERE fee = 'gross') AS g_max,
+             avg(gap_days) FILTER (WHERE fee = 'disc')  AS d_avg,
+             avg(gap_days) FILTER (WHERE fee = 'nom')   AS n_avg
+      FROM fund_dca_rounds WHERE code = ANY(%s) GROUP BY code) t
+WHERE r.code = t.code
+"""
+
+_RESET_GAP_TP_CODED = """
+UPDATE fund_dca_tp_result SET gap_avg_days = NULL, gap_min_days = NULL,
+  gap_max_days = NULL, gap_avg_days_disc = NULL, gap_avg_days_nom = NULL
+WHERE code = ANY(%s)
+"""
+
+_APPLY_GAP_TP_CODED = """
+UPDATE fund_dca_tp_result r SET
+  gap_avg_days = t.g_avg, gap_min_days = t.g_min, gap_max_days = t.g_max,
+  gap_avg_days_disc = t.d_avg, gap_avg_days_nom = t.n_avg
+FROM (SELECT code, tp, method,
+             avg(gap_days) FILTER (WHERE fee = 'gross') AS g_avg,
+             min(gap_days) FILTER (WHERE fee = 'gross') AS g_min,
+             max(gap_days) FILTER (WHERE fee = 'gross') AS g_max,
+             avg(gap_days) FILTER (WHERE fee = 'disc')  AS d_avg,
+             avg(gap_days) FILTER (WHERE fee = 'nom')   AS n_avg
+      FROM fund_dca_tp_rounds WHERE code = ANY(%s)
+      GROUP BY code, tp, method) t
+WHERE r.code = t.code AND r.tp = t.tp AND r.method = t.method
+"""
+
+
+def merge_rounds(conn, rows: list[tuple], codes: list[str]) -> int:
+    """轮次按 code 范围替换 + 仅范围内基金重算间隔汇总列；事务由调用方提交。"""
+    with conn.cursor() as cur:
+        if codes:
+            arr = _codes_arr(codes)
+            cur.execute("DELETE FROM fund_dca_rounds WHERE code = ANY(%s)",
+                        (arr,))
+            if rows:
+                cur.executemany(_UPSERT_ROUND, rows)
+            cur.execute(_RESET_GAP_CODED, (arr,))
+            cur.execute(_APPLY_GAP_CODED, (arr,))
+    return len(rows)
+
+
+def merge_tp_rows(conn, rows: list[dict], codes: list[str], *,
+                  fund_count: int, params: dict | None = None) -> int:
+    """多阈值结果按 code 范围替换 + meta upsert（语义同 merge_rows）。"""
+    with conn.cursor() as cur:
+        if codes:
+            cur.execute("DELETE FROM fund_dca_tp_result WHERE code = ANY(%s)",
+                        (_codes_arr(codes),))
+        if rows:
+            cur.executemany(_TP_INSERT,
+                            [tuple(r[c] for c in _TP_COLS) for r in rows])
+        cur.execute(_TP_META_UPSERT,
+                    (fund_count, json.dumps(params or {}, ensure_ascii=False)))
+    return len(rows)
+
+
+def merge_tp_rounds(conn, rows: list[tuple], codes: list[str]) -> int:
+    """多阈值轮次按 code 范围替换 + 仅范围内基金重算间隔汇总列。"""
+    with conn.cursor() as cur:
+        if codes:
+            arr = _codes_arr(codes)
+            cur.execute("DELETE FROM fund_dca_tp_rounds WHERE code = ANY(%s)",
+                        (arr,))
+            if rows:
+                cur.executemany(_TP_UPSERT_ROUND, rows)
+            cur.execute(_RESET_GAP_TP_CODED, (arr,))
+            cur.execute(_APPLY_GAP_TP_CODED, (arr,))
+    return len(rows)
+
+
+def refresh_alive(conn, cutoff) -> None:
+    """alive 全表集合刷新：45 天窗口相对全局 all_end，窗口推进时跳过重算
+    的基金也要翻转（活→死单向；死而复生必伴随新净值=必在重算集）。cutoff
+    为 date 或 ISO 串；None（空库）不动作。事务由调用方提交。"""
+    if cutoff is None:
+        return
+    if isinstance(cutoff, str):
+        cutoff = dt.date.fromisoformat(cutoff)
+    with conn.cursor() as cur:
+        cur.execute("UPDATE fund_dca_result SET alive = "
+                    "(full_end IS NOT NULL AND full_end >= %s)", (cutoff,))
+        cur.execute("UPDATE fund_dca_tp_result SET alive = "
+                    "(full_end IS NOT NULL AND full_end >= %s)", (cutoff,))
+
+
+def merge_timing(conn, rows: list[tuple], *, computed_at) -> int:
+    """时机表合并：①清理已不在市基金的行（时机=「当前时机」语义，表内容
+    恒等于 alive 集合；须在 refresh_alive 之后调用）→ ②插入本次重算的
+    alive 基金新行 → ③保留行 computed_at 统一刷到本轮窗口末日（跳过基金
+    行原样保留，仅时间戳刷新）。事务由调用方提交。"""
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM fund_dip_timing t WHERE NOT EXISTS ("
+                    "SELECT 1 FROM fund_dca_result r "
+                    "WHERE r.code = t.code AND r.alive)")
+        if rows:
+            cur.executemany(_TIMING_INSERT, rows)
+        cur.execute("UPDATE fund_dip_timing SET computed_at = %s",
+                    (computed_at,))
+    return len(rows)
+
+
+def merge_risk(conn, rows: list[tuple], codes: list[str]) -> int:
+    """波动指标按 code 范围替换 + 全表横截面回填（risk_score/osc_pctile
+    是全样本 percent_rank，任何子集变更后都须整表重算——幂等，开销小）。"""
+    with conn.cursor() as cur:
+        if codes:
+            cur.execute("DELETE FROM fund_risk_metrics WHERE code = ANY(%s)",
+                        (_codes_arr(codes),))
+        if rows:
+            cur.executemany(_RISK_INSERT, rows)
+        cur.execute(_RISK_SCORE_BACKFILL)
+    return len(rows)
+
+
 _VALIDATION_COLS = ["grp", "bucket", "tp", "n", "days_median", "days_p25",
                     "days_p75", "success_rate", "xirr_median", "xirr_p25",
                     "xirr_p75"]
