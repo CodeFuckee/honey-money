@@ -896,14 +896,21 @@ VALUES ({", ".join(["%s"] * len(_TP_COMPARE_COLS))})
 
 
 def _tp_compare_row(method: str, equity: bool, fee: str, r: tuple) -> tuple:
-    """聚合行 → 快照行（尾列按 API 现算同精度圆整：分位/均值/占比 4 位、
-    平均轮次 2 位、平均间隔 1 位——快照输出与现算输出逐值一致）。"""
+    """单遍聚合行 → 快照行。一行含三费用块（r[1:15] gross、r[15:29] disc、
+    r[29:43] nom，块序同 _TP_COMPARE_AGG_SQL 的 _FEE_COL_SUFFIX 拼接序），
+    按 fee 取对应块；列内序同 _TP_AGG_BLOCK（count / w10 四分位+均值 /
+    正收益 / 成功 / 平均轮次 / 全史四项 / 平均间隔）。精度圆整同 API 现算
+    （分位/均值/占比 4 位、平均轮次 2 位、平均间隔 1 位——快照输出与现算
+    输出逐值一致）。"""
+    off = 1 + {"gross": 0, "disc": 14, "nom": 28}[fee]
+
     def q(i, nd):
-        return round(r[i], nd) if r[i] is not None else None
-    return (method, equity, fee, r[0], r[1],
-            q(2, 4), q(3, 4), q(4, 4), q(5, 4), q(6, 4),
-            q(7, 4), q(8, 4), q(9, 2), q(10, 4), q(11, 4),
-            q(12, 4), q(13, 4), q(14, 1))
+        return round(r[off + i], nd) if r[off + i] is not None else None
+    return (method, equity, fee, r[0],
+            r[off] if r[off] is not None else None,
+            q(1, 4), q(2, 4), q(3, 4), q(4, 4), q(5, 4),
+            q(6, 4), q(7, 4), q(8, 2), q(9, 4), q(10, 4),
+            q(11, 4), q(12, 4), q(13, 1))
 
 
 def rebuild_tp_compare(conn, *, equity_types) -> int:

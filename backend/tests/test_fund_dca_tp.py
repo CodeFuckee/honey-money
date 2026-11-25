@@ -422,13 +422,18 @@ class AggCursor(FakeCursor):
 
 
 def _agg_row(tp=0.20):
-    """单 (method, equity) 聚合查询的一行（15 元组，列序同
-    _TP_COMPARE_AGG_SQL：count / w10 四分位+均值 / 正收益占比 / 成功率 /
-    平均轮次 / 全史中位+均值+正收益+成功 / 平均间隔），带尾数防未圆整混过。"""
-    return (tp, 15029, 0.02044012345, 0.05949412345, 0.05963912345,
-            0.05024312345, -0.00448112345, 0.63843212345, 0.74223212345,
-            1.931612345, 0.12345612345, 0.23456712345, 0.34567812345,
-            0.45678912345, 703.14159265)
+    """单遍聚合查询的一行（43 元组：tp + 三费用块各 14 列，块序 gross /
+    disc / nom 同 _TP_COMPARE_AGG_SQL；三块取值互异防跨块错位混过——
+    生产首跑曾因恒取 gross 块给三口径标签，桩行 15 列旧形状漏过）。"""
+    def blk(base):
+        return (15029, 0.02044012345 + base, 0.05949412345 + base,
+                0.05963912345 + base, 0.05024312345 + base,
+                -0.00448112345 + base, 0.63843212345 + base,
+                0.74223212345 + base, 1.931612345 + base,
+                0.12345612345 + base, 0.23456712345 + base,
+                0.34567812345 + base, 0.45678912345 + base,
+                703.14159265 + base)
+    return (tp,) + blk(0.0) + blk(0.02) + blk(0.04)
 
 
 class TestTpCompareSnapshot:
@@ -461,12 +466,32 @@ class TestTpCompareSnapshot:
         assert len(eq_params) == n_combo and len(all_params) == n_combo
         assert ("share", ["股票型", "商品"]) in eq_params
         assert ("amount",) in all_params
-        # 整表替换：一次 executemany，值按现算同精度圆整（分位/均值/占比
-        # 4 位、平均轮次 2 位、平均间隔 1 位——快照与现算输出逐值一致）
+        # 整表替换：一次 executemany，三费用块各取各的列（块错位回归守护：
+        # 生产首跑曾恒取 gross 块写满三口径标签）、值按现算同精度圆整
         assert len(conn.cursor_obj.batch) == 1
         ins_sql, rows = conn.cursor_obj.batch[0]
         assert "INSERT INTO fund_dca_tp_compare" in ins_sql
         assert len(rows) == n_combo * 2 * 3 * 8
+
+        def blk_want(base, sfx_want):
+            return ("amount", True, sfx_want, 0.20, 15029,
+                    round(0.02044012345 + base, 4),
+                    round(0.05949412345 + base, 4),
+                    round(0.05963912345 + base, 4),
+                    round(0.05024312345 + base, 4),
+                    round(-0.00448112345 + base, 4),
+                    round(0.63843212345 + base, 4),
+                    round(0.74223212345 + base, 4),
+                    round(1.931612345 + base, 2),
+                    round(0.12345612345 + base, 4),
+                    round(0.23456712345 + base, 4),
+                    round(0.34567812345 + base, 4),
+                    round(0.45678912345 + base, 4),
+                    round(703.14159265 + base, 1))
+
+        assert blk_want(0.0, "gross") in rows
+        assert blk_want(0.02, "disc") in rows
+        assert blk_want(0.04, "nom") in rows
         want = ("amount", True, "gross", 0.20, 15029,
                 round(0.02044012345, 4), round(0.05949412345, 4),
                 round(0.05963912345, 4), round(0.05024312345, 4),
