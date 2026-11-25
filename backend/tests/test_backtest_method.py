@@ -568,3 +568,92 @@ class TestJobProgressWiring:
         done_calls = [(s, p) for s, p in rt_conn.cursor_obj.execute_calls
                       if "SET progress" in s]
         assert done_calls[0][1][1] == 7     # task_id 位（partial 绑定）
+
+
+def _fp(fund_type="混合型-偏股", min_date="2023-01-01",
+        max_date="2025-06-01"):
+    """指纹元组（同 load_input_fingerprints 输出形态；窗口 ~517 天在宇宙内）。"""
+    return (420, min_date, max_date, "1000.5", "1000.5", "105.0",
+            "测试基金", fund_type, False, "12.5", "2026-09-30")
+
+
+class TestMethodUniverseFilter:
+    """单策略编排的宇宙过滤（2026-11-25 十五轮）：进度分母=权益宇宙+指纹
+    未知的新基金——被排除基金（指纹在且非权益/年轻）既不进分片也不计数；
+    fp 表缺失/读取失败回落全量分母（保守方向，worker 层规则仍兜底）。"""
+
+    def test_fp_table_filters_codes_and_denominator(self, monkeypatch):
+        import pandas as pd
+        from app import dca_backtest as mod, dca_store
+
+        nav = _synthetic_nav()
+        basic, scale_map = _basic_scale()
+        # codes 含 000009（fp 表未知的新基金——保留，worker 规则兜底）
+        monkeypatch.setattr(mod, "_load_codes",
+                            lambda conn: ["000001", "000002", "000009"])
+        monkeypatch.setattr(mod, "_load_basic",
+                            lambda conn, codes: basic.loc[list(codes)])
+        monkeypatch.setattr(mod, "_load_scale", lambda conn: scale_map)
+        monkeypatch.setattr(
+            mod, "_load_nav",
+            lambda conn, codes: nav[nav["code"].isin(list(codes))]
+            .reset_index(drop=True))
+        monkeypatch.setattr(mod.psycopg, "connect", lambda *a, **k: _Ctx())
+        fps = {"000001": _fp(),                      # 权益老 → 宇宙
+               "000004": _fp(fund_type="债券型-长债")}  # 非权益 → 排除
+        # 注意：000002 不在 fp 表（新基金）→ 保留
+        monkeypatch.setattr(dca_store, "load_fingerprints",
+                            lambda conn: (fps, "vTEST"))
+        monkeypatch.setattr(mod, "_chunk_size", lambda: 250)
+        monkeypatch.setattr(mod, "_worker_count", lambda: 1)
+        seen = {}
+        rows_by_code = {"000001": [_tp_row("000001", alive=True)],
+                        "000002": [_tp_row("000002", alive=True)],
+                        "000009": [_tp_row("000009", alive=True)]}
+
+        def fake_dispatch(args, workers, on_done=None):
+            seen["codes"] = [c for a in args for c in tuple(a[1])]
+            out = []
+            for a in args:
+                for c in tuple(a[1]):
+                    on_done(0)
+                    out.append(([], [], rows_by_code.get(c, []), [], [], []))
+            return out
+
+        monkeypatch.setattr(mod, "_run_chunk_tasks", fake_dispatch)
+        tp_rows, _rounds, stats = mod.run_full_backtest_tp_method(
+            "postgresql://fake", "pl_ladder", log=lambda *_: None,
+            progress=lambda d, t: seen.setdefault("prog", []).append((d, t)))
+        assert set(seen["codes"]) == {"000001", "000002", "000009"}
+        assert seen["prog"][0] == (0, 3)
+        assert stats["fund_count"] == 3
+
+    def test_fp_missing_falls_back_to_all_codes(self, monkeypatch):
+        """fp 表读取失败（旧库/空表）→ 回落全 codes 分母（worker 层规则
+        兜底，不因进度口径丢基金）。"""
+        from app import dca_backtest as mod, dca_store
+
+        nav = _synthetic_nav()
+        basic, scale_map = _basic_scale()
+        monkeypatch.setattr(mod, "_load_codes",
+                            lambda conn: ["000001", "000002"])
+        monkeypatch.setattr(mod, "_load_basic",
+                            lambda conn, codes: basic.loc[list(codes)])
+        monkeypatch.setattr(mod, "_load_scale", lambda conn: scale_map)
+        monkeypatch.setattr(
+            mod, "_load_nav",
+            lambda conn, codes: nav[nav["code"].isin(list(codes))]
+            .reset_index(drop=True))
+        monkeypatch.setattr(mod.psycopg, "connect", lambda *a, **k: _Ctx())
+
+        def boom(conn):
+            raise RuntimeError("fp 表缺失")
+
+        monkeypatch.setattr(dca_store, "load_fingerprints", boom)
+        monkeypatch.setattr(mod, "_chunk_size", lambda: 250)
+        monkeypatch.setattr(mod, "_worker_count", lambda: 1)
+        seen = []
+        mod.run_full_backtest_tp_method(
+            "postgresql://fake", "pl_ladder", log=lambda *_: None,
+            progress=lambda d, t: seen.append((d, t)))
+        assert seen[0] == (0, 2) and seen[-1] == (2, 2)

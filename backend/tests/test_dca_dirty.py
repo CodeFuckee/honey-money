@@ -96,8 +96,9 @@ class TestEngineVersion:
 
 def _fp(nav_count=420, max_date="2024-02-24", s_unit="1000.5",
         fund_type="混合型-偏股"):
-    """指纹元组（同 load_input_fingerprints 输出形态，逐位可比）。"""
-    return (nav_count, "2024-01-01", max_date, s_unit, "1000.5", "105.0",
+    """指纹元组（同 load_input_fingerprints 输出形态，逐位可比）；
+    窗口 2023-01-01~2024-02-24 ≈ 420 天 ≥ 缺省运作期限下限 90（在宇宙内）。"""
+    return (nav_count, "2023-01-01", max_date, s_unit, "1000.5", "105.0",
             "成长先锋混合A", fund_type, False, "12.5", "2026-09-30")
 
 
@@ -849,3 +850,38 @@ class TestBacktestUniverse:
             "postgresql://fake", log=lambda *_: None)
         assert stats["universe_count"] == 2
         assert stats["excluded_count"] == 1
+
+    def test_excluded_funds_not_chunked(self, monkeypatch):
+        """被排除基金不进分片也不进进度分母（十五轮）——merge 的 dirty 集
+        仍含它们（stats["dirty"]），历史行清理由全量 merge 全删重插完成。"""
+        from app import dca_backtest as mod
+        monkeypatch.setenv("BACKTEST_WORKERS", "1")
+        fps = {"000001": _fp(max_date="2025-06-01"),
+               "000002": _fp(max_date="2025-06-01", s_unit="3.2"),
+               "000004": _fp(max_date="2025-06-01", fund_type="债券型-长债")}
+        monkeypatch.setattr(mod, "engine_version", lambda *a: "vTEST")
+        monkeypatch.setattr(mod, "load_input_fingerprints", lambda conn: fps)
+        monkeypatch.setattr(dca_store, "load_fingerprints",
+                            lambda conn: (fps, "vOLD"))
+        _patch_connect(monkeypatch, mod, FakeConn())
+        monkeypatch.setattr(mod, "_backtest_chunk_worker",
+                            lambda *a: ([], [], [], [], [], []))
+        captured = {}
+
+        def fake_dispatch(args, workers, on_done=None):
+            captured["codes"] = [tuple(a[1]) for a in args]
+            out = []
+            for a in args:
+                if on_done:
+                    on_done(0)
+                out.append(([], [], [], [], [], []))
+            return out
+
+        monkeypatch.setattr(mod, "_run_chunk_tasks", fake_dispatch)
+        seen = []
+        _out = mod.run_full_backtest_tp_dirty(
+            "postgresql://fake", log=lambda *_: None,
+            progress=lambda d, t: seen.append((d, t)))
+        # 缺省 250 只/片 → 两基金同一块；债基 000004 不进分片不分母
+        assert captured["codes"] == [("000001", "000002")]
+        assert seen[0] == (0, 2) and seen[-1] == (2, 2)

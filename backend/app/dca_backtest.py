@@ -796,6 +796,27 @@ def run_full_backtest_tp_method(dsn: str, method: str, *, log=print,
         except Exception as exc:
             log(f"  设置表读取失败，回退运作期限下限 {MIN_SPAN_DAYS} 天：{exc}")
             min_span_days = MIN_SPAN_DAYS
+        # 回测宇宙过滤（十五轮）：fp 表存有上轮逐基金指纹（fund_type+全史
+        # 窗口），读出即可把被排除基金从分片与进度分母中剔除（允许一天内
+        # 陈旧——worker 层 run_backtest_tp 的权威规则兜底）；fp 未收录的
+        # 新基金保留；fp 表缺失/读取失败回落全 codes（不因口径丢基金）
+        prev_fps = None
+        try:
+            from . import dca_store
+            prev_fps, _prev_engine = dca_store.load_fingerprints(conn)
+        except Exception as exc:
+            log(f"  指纹表读取失败，宇宙过滤回落全量分母：{exc}")
+        if prev_fps:
+            universe_codes = {
+                c for c, fp in prev_fps.items()
+                if not fund_excluded(fp[7],
+                                     pd.Timestamp(fp[1]) if fp[1] else None,
+                                     pd.Timestamp(fp[2]) if fp[2] else None,
+                                     min_span_days)}
+            codes = [c for c in codes
+                     if c in universe_codes or c not in prev_fps]
+            log(f"宇宙过滤：{len(codes):,} 只（按上轮指纹剔除 "
+                f"{len(prev_fps) - len(universe_codes):,} 只已排除）")
     log(f"单策略全量：{method} / 净值截至 {end_ts} / 运作期限下限 "
         f"{min_span_days} 天")
     chunks = _chunk_codes(codes, _chunk_size())
@@ -1256,7 +1277,8 @@ def run_full_backtest_tp_dirty(dsn: str, *, log=print,
         stats["fund_count"] = total
         return [], [], [], [], [], [], stats, cur_fps
 
-    codes_dirty = sorted(dirty)
+    codes_dirty = sorted(dirty - excluded)   # 排除基金不进分片/分母（十五轮）；
+    # stats["dirty"] 仍含它们——merge 按 code 范围 DELETE 清历史行
     log(f"脏检测：基金 {total:,} 只，重算 {len(dirty):,} 只 / 跳过 "
         f"{total - len(dirty):,} 只（清理 gone {len(gone):,} 只），引擎 {engine}")
     # 两个全局锚点由父进程从指纹派生后下发 worker（分片后不能各自取局部
