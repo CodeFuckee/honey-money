@@ -3624,12 +3624,11 @@ watch(
                           @click="onDcaTpChange(r.tp)">
                         <td><b>{{ dcaTpLabel(r.tp) }}</b><span v-if="r.tp === 0.20" class="dc-hint" style="margin-left: 6px">默认</span></td>
                         <td><span :class="r.median >= 0 ? 'chg-up' : 'chg-down'">{{ pctp(r.median) }}</span></td>
-                        <td>{{ pctp(r.w10_mean) }}</td>
-                        <td>{{ pct0(r.w10_positive_share) }}</td>
-                        <td>{{ pct0(r.w10_success_share) }}</td>
-                        <td>{{ r.w10_avg_rounds ?? '—' }}</td>
+                        <td>{{ pctp(r.mean) }}</td>
+                        <td>{{ pct0(r.positive_share) }}</td>
+                        <td>{{ pct0(r.success_share) }}</td>
+                        <td>{{ r.avg_rounds ?? '—' }}</td>
                         <td>{{ r.avg_gap_days != null ? '≈' + (r.avg_gap_days / 30.44).toFixed(1) + ' 月/次' : '—' }}</td>
-                        <td>{{ pctp(r.full_median) }}</td>
                       </tr>
                     </tbody>
                   </table>
