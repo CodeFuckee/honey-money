@@ -686,3 +686,85 @@ class TestBacktestProgressFields:
         assert mt["phase"] == "running"
         assert mt["progress_done"] == 40
         assert mt["progress_total"] == 120
+
+
+class TestMethodTaskBlockingAndError:
+    """method_task 快照增补（2026-11-25 十一轮：排队态可见性 + 静默失败
+    修复——用户点击发生在旧 worker 时代被 KeyError 吞掉，UI 只显示排队中
+    且失败后无任何提示）：blocking=串行队列前方运行中任务名（排队提示），
+    last_error=上次运行错误摘要（last_result.error 时取 detail）。"""
+
+    def _client(self, routes):
+        from app import settings_api
+
+        def fake_connect(*a, **k):
+            return _RoutedConn(routes)
+
+        app = FastAPI()
+        settings_api.register_settings_routes(app, connect=fake_connect)
+        return TestClient(app)
+
+    def test_blocking_and_last_error_surfaced(self):
+        routes = [("SELECT c.name FROM crawl_run r",
+                   ("东财每日增量",)),
+                  ("SELECT last_result FROM task_runtime",
+                   ({"error": True, "detail": "KeyError: 'backtest_method'",
+                     "trigger": "manual"},)),
+                  ("FROM crawl_task WHERE source = 'backtest_method'",
+                   (9, "pl_ladder")),
+                  ("FROM task_runtime", ("queued",)),
+                  ("FROM crawl_run WHERE source = 'backtest_method'",
+                   (None, False, datetime(2026, 11, 25, 6, 20), None)),
+                  ("SELECT progress FROM task_runtime",
+                   (None,)),
+                  ("FROM crawl_task", (7,)),
+                  ("FROM crawl_run", (False, False,
+                                      datetime(2026, 11, 24, 9),
+                                      datetime(2026, 11, 24, 9, 30))),
+                  ("fund_dca_fp", (12, True))]
+        mt = self._client(routes).get("/api/settings").json()["method_task"]
+        assert mt["blocking"] == "东财每日增量"
+        assert mt["last_error"] == "KeyError: 'backtest_method'"
+        assert mt["phase"] == "queued"
+
+    def test_no_blocking_no_error_none(self):
+        """无运行中任务、last_result 非错误 → 双字段 None（不误报）。"""
+        routes = [("SELECT c.name FROM crawl_run r", None),
+                  ("SELECT last_result FROM task_runtime",
+                   ({"ok": 3, "error": False},)),
+                  ("FROM crawl_task WHERE source = 'backtest_method'",
+                   (9, "pl_ladder")),
+                  ("FROM task_runtime", ("idle",)),
+                  ("FROM crawl_run WHERE source = 'backtest_method'",
+                   (False, False, datetime(2026, 11, 25, 6, 20),
+                    datetime(2026, 11, 25, 6, 25))),
+                  ("SELECT progress FROM task_runtime", (None,)),
+                  ("FROM crawl_task", (7,)),
+                  ("FROM crawl_run", (False, False,
+                                      datetime(2026, 11, 24, 9),
+                                      datetime(2026, 11, 24, 9, 30))),
+                  ("fund_dca_fp", (12, True))]
+        mt = self._client(routes).get("/api/settings").json()["method_task"]
+        assert mt["blocking"] is None
+        assert mt["last_error"] is None
+
+    def test_non_string_blocking_ignored(self):
+        """假连接形状不符（如日快照元组误路由到 blocking 查询）→ 非 str
+        一律 None，不炸端点不透出垃圾值。"""
+        routes = [("SELECT c.name FROM crawl_run r", None),
+                  ("SELECT last_result FROM task_runtime", None),
+                  ("FROM crawl_task WHERE source = 'backtest_method'",
+                   (9, "pl_ladder")),
+                  ("FROM task_runtime", ("idle",)),
+                  ("FROM crawl_run WHERE source = 'backtest_method'",
+                   (False, False, datetime(2026, 11, 25, 6, 20),
+                    datetime(2026, 11, 25, 6, 25))),
+                  ("SELECT progress FROM task_runtime", (None,)),
+                  ("FROM crawl_task", (7,)),
+                  ("FROM crawl_run", (False, False,
+                                      datetime(2026, 11, 24, 9),
+                                      datetime(2026, 11, 24, 9, 30))),
+                  ("fund_dca_fp", (12, True))]
+        mt = self._client(routes).get("/api/settings").json()["method_task"]
+        assert mt["blocking"] is None
+        assert mt["last_error"] is None

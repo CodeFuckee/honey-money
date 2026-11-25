@@ -185,7 +185,9 @@ def _method_task_state(conn) -> dict:
     task_id / mode（当前目标策略）/ 排队相位（task_runtime.phase，缺行
     视为 idle）/ running（crawl_run source='backtest_method' 最新行未
     收尾——与日更快照的 source='backtest' 过滤互不污染）/ 最近起止与
-    aborted。查询关键词与日更快照逐条可区分（假连接按关键词路由）。"""
+    aborted / blocking（串行队列前方运行中任务名，排队提示）/ last_error
+    （上次运行错误摘要，静默失败可见性）。查询关键词与日更快照逐条可
+    区分（假连接按关键词路由）。"""
     with conn.cursor() as cur:
         cur.execute("SELECT id, mode FROM crawl_task "
                     "WHERE source = 'backtest_method' ORDER BY id LIMIT 1")
@@ -200,6 +202,20 @@ def _method_task_state(conn) -> dict:
         mt_id = trow[0] if trow else None
         progress = _progress_fields(cur, mt_id) if mt_id else \
             {"progress_done": None, "progress_total": None}
+        # 排队可见性（2026-11-25 十一轮）：串行队列前方运行中的任务名
+        cur.execute("SELECT c.name FROM crawl_run r "
+                    "JOIN crawl_task c ON c.id = r.task_id "
+                    "WHERE r.finished_at IS NULL ORDER BY r.id DESC LIMIT 1")
+        brow = cur.fetchone()
+        # 静默失败修复（同轮）：上次运行错误摘要（last_result.error 时取
+        # detail——旧 worker 时代 KeyError 吞掉点击后 UI 毫无提示的教训）
+        cur.execute("SELECT last_result FROM task_runtime WHERE task_id = %s",
+                    (mt_id,) if mt_id else (None,))
+        lrow = cur.fetchone()
+    lr = lrow[0] if lrow else None
+    last_error = (str(lr["detail"])[:200]
+                  if isinstance(lr, dict) and lr.get("error")
+                  and lr.get("detail") else None)
     return {"task_id": trow[0] if trow else None,
             "method": trow[1] if trow else None,
             "phase": (prow[0] if prow else None) or "idle",
@@ -207,5 +223,8 @@ def _method_task_state(conn) -> dict:
             "last_started_at": _iso(run[2] if run else None),
             "last_finished_at": _iso(run[3] if run else None),
             "last_aborted": (bool(run[1]) if run else None),
+            "blocking": (brow[0] if brow and isinstance(brow[0], str)
+                         else None),
+            "last_error": last_error,
             **progress,
             "server_now": _iso(dt.datetime.now(dt.timezone.utc))}

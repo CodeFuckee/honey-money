@@ -1783,7 +1783,8 @@ async function confirmRunBacktest() {
 // 防重，零新触发逻辑）
 const methodTask = ref({ task_id: null, method: null, phase: 'idle',
   running: false, last_started_at: null, last_finished_at: null,
-  last_aborted: null, progress_done: null, progress_total: null })
+  last_aborted: null, progress_done: null, progress_total: null,
+  blocking: null, last_error: null })
 const methodTarget = ref('pl_ladder')      // 待运行策略（缺省最新加的盈亏阶梯）
 const methodConfirmShow = ref(false)
 const methodStarting = ref(false)
@@ -4487,11 +4488,14 @@ watch(
                 </div>
               </div>
               <p v-if="methodBusy" class="note" data-run-method-running
-                style="margin: 8px 0 0; color: #0f62fe">单策略回测{{ methodTask.phase === 'queued' ? '排队中' : '运行中' }}<span v-if="methodTask.last_started_at && methodTask.phase !== 'queued'">（{{ fmtDateTime(methodTask.last_started_at) }} 起<template v-if="methodTask.progress_total">，已完成 {{ methodTask.progress_done || 0 }} / {{ methodTask.progress_total }} 只</template>）</span>——完成后定投回测页该策略数据自动更新</p>
+                style="margin: 8px 0 0; color: #0f62fe">单策略回测{{ methodTask.phase === 'queued' ? '排队中' : '运行中' }}<span v-if="methodTask.phase === 'queued' && methodTask.blocking">（等待「{{ methodTask.blocking }}」完成，完成后自动开始）</span><span v-if="methodTask.last_started_at && methodTask.phase !== 'queued'">（{{ fmtDateTime(methodTask.last_started_at) }} 起<template v-if="methodTask.progress_total">，已完成 {{ methodTask.progress_done || 0 }} / {{ methodTask.progress_total }} 只</template>）</span>——完成后定投回测页该策略数据自动更新</p>
               <p v-else-if="methodTask.last_started_at && methodTask.last_finished_at"
                 class="note" data-run-method-last style="margin: 8px 0 0">
                 上次单策略回测（{{ METHOD_LABELS[methodTask.method] || methodTask.method || '—' }}）：{{ fmtDateTime(methodTask.last_started_at) }} ~ {{ fmtDateTime(methodTask.last_finished_at) }}<span v-if="methodTask.last_aborted">（已中止）</span>
               </p>
+              <p v-if="!methodBusy && methodTask.last_error" class="note"
+                data-run-method-last-error
+                style="margin: 6px 0 0; color: #c9313d">上次单策略回测失败：{{ methodTask.last_error }}——可重新点「运行该策略…」重试</p>
               <p v-if="methodMsg" class="note" data-run-method-triggered
                 style="margin: 6px 0 0; color: #1a7f37">{{ methodMsg }}</p>
               <p v-if="methodError" class="note" data-run-method-error

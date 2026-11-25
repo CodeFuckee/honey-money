@@ -343,3 +343,31 @@ class TestRealProgress:
         width = page.locator("[data-run-progress-fill]").evaluate(
             "el => parseFloat(el.style.width)")
         assert 45.5 <= width <= 47.5, width       # 12345/26548 ≈ 46.46%
+
+
+class TestMethodQueuedAndError:
+    def test_queued_blocking_and_last_error(self, servers, page):
+        """E2E-484：排队态显示等待对象（blocking）+ 空闲态显示上次失败原因
+        （静默失败可见性，2026-11-25 十一轮）。"""
+        import copy
+        task = copy.deepcopy(MOCK_SETTINGS)
+        task["method_task"].update({"phase": "queued", "running": False,
+                                    "blocking": "东财每日增量"})
+        _install_mock(page, task=task)
+        _, frontend_port = servers
+        page.goto(f"http://127.0.0.1:{frontend_port}/settings")
+        expect(page.locator("[data-run-method-running]")
+              ).to_contain_text("排队中（等待「东财每日增量」完成，完成后自动开始）",
+                                timeout=10_000)
+        # 失败可见性：idle + last_error → 红色错误行
+        task2 = copy.deepcopy(MOCK_SETTINGS)
+        task2["method_task"].update({"phase": "idle", "running": False,
+                                     "blocking": None,
+                                     "last_error": "KeyError: 'backtest_method'",
+                                     "last_started_at": "2026-11-25T14:20:00",
+                                     "last_finished_at": "2026-11-25T14:20:01"})
+        _install_mock(page, task=task2)
+        page.reload()
+        expect(page.locator("[data-run-method-last-error]")
+              ).to_contain_text("上次单策略回测失败：KeyError: 'backtest_method'",
+                                timeout=10_000)
