@@ -543,6 +543,13 @@ def ensure_tp_schema(conn) -> None:
         cur.execute(_RISK_SCORE_BACKFILL)
 
 
+def ensure_tp_tables(conn) -> None:
+    """仅多阈值结果三表幂等建表（2026-11-25 九轮：单策略全量运行用——
+    风险表建表与横截面分位回填归日更所有，局部运行不触碰）。"""
+    with conn.cursor() as cur:
+        cur.execute(TP_DDL)
+
+
 def ensure_risk_schema(conn) -> None:
     """波动指标表幂等建表（启动清单兜底，缺表时浏览接口不至于整页 down）。"""
     with conn.cursor() as cur:
@@ -777,6 +784,58 @@ def merge_tp_rounds(conn, rows: list[tuple], codes: list[str]) -> int:
     return len(rows)
 
 
+# ===== 单策略全量运行（2026-11-25 九轮）：method 域替换（设置页按钮） =====
+# 与按 code 范围的日更合并互补：局部运行一次替换选定 method 的全部行。
+# 不触 fund_dca_tp_meta——meta 是全表级新鲜度戳（fund_count/generated_at/
+# params），归日更全量口径所有，局部运行不改写（前端 meta 展示语义不变）。
+
+_RESET_GAP_TP_METHOD = """
+UPDATE fund_dca_tp_result SET gap_avg_days = NULL, gap_min_days = NULL,
+  gap_max_days = NULL, gap_avg_days_disc = NULL, gap_avg_days_nom = NULL
+WHERE method = %s
+"""
+
+_APPLY_GAP_TP_METHOD = """
+UPDATE fund_dca_tp_result r SET
+  gap_avg_days = t.g_avg, gap_min_days = t.g_min, gap_max_days = t.g_max,
+  gap_avg_days_disc = t.d_avg, gap_avg_days_nom = t.n_avg
+FROM (SELECT code, tp, method,
+             avg(gap_days) FILTER (WHERE fee = 'gross') AS g_avg,
+             min(gap_days) FILTER (WHERE fee = 'gross') AS g_min,
+             max(gap_days) FILTER (WHERE fee = 'gross') AS g_max,
+             avg(gap_days) FILTER (WHERE fee = 'disc')  AS d_avg,
+             avg(gap_days) FILTER (WHERE fee = 'nom')   AS n_avg
+      FROM fund_dca_tp_rounds WHERE method = %s
+      GROUP BY code, tp, method) t
+WHERE r.code = t.code AND r.tp = t.tp AND r.method = t.method
+"""
+
+
+def merge_tp_rows_method(conn, rows: list[dict], method: str) -> int:
+    """单策略结果按 method 范围替换（不触 meta，语义见节注释）；
+    事务由调用方提交。"""
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM fund_dca_tp_result WHERE method = %s",
+                    (method,))
+        if rows:
+            cur.executemany(_TP_INSERT,
+                            [tuple(r[c] for c in _TP_COLS) for r in rows])
+    return len(rows)
+
+
+def merge_tp_rounds_method(conn, rows: list[tuple], method: str) -> int:
+    """单策略轮次按 method 范围替换 + method 域重算间隔汇总列；
+    事务由调用方提交。"""
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM fund_dca_tp_rounds WHERE method = %s",
+                    (method,))
+        if rows:
+            cur.executemany(_TP_UPSERT_ROUND, rows)
+        cur.execute(_RESET_GAP_TP_METHOD, (method,))
+        cur.execute(_APPLY_GAP_TP_METHOD, (method,))
+    return len(rows)
+
+
 def refresh_alive(conn, cutoff) -> None:
     """alive 全表集合刷新：45 天窗口相对全局 all_end，窗口推进时跳过重算
     的基金也要翻转（活→死单向；死而复生必伴随新净值=必在重算集）。cutoff
@@ -790,6 +849,21 @@ def refresh_alive(conn, cutoff) -> None:
                     "(full_end IS NOT NULL AND full_end >= %s)", (cutoff,))
         cur.execute("UPDATE fund_dca_tp_result SET alive = "
                     "(full_end IS NOT NULL AND full_end >= %s)", (cutoff,))
+
+
+def refresh_alive_method(conn, cutoff, method: str) -> None:
+    """单策略 alive 刷新（2026-11-25 九轮）：method 域集合刷新，45 天规则
+    同 refresh_alive；旧口径表与其他 method 行严格不动（局部运行的触碰面
+    限定在本策略内）。cutoff 为 date 或 ISO 串；None 不动作。
+    事务由调用方提交。"""
+    if cutoff is None:
+        return
+    if isinstance(cutoff, str):
+        cutoff = dt.date.fromisoformat(cutoff)
+    with conn.cursor() as cur:
+        cur.execute("UPDATE fund_dca_tp_result SET alive = "
+                    "(full_end IS NOT NULL AND full_end >= %s) "
+                    "WHERE method = %s", (cutoff, method))
 
 
 def merge_timing(conn, rows: list[tuple], *, computed_at) -> int:

@@ -9,6 +9,7 @@
   部分重算只喂脏基金 / 引擎变化自动全量。
 """
 
+import concurrent.futures
 import datetime as dt
 import sys
 from pathlib import Path
@@ -574,7 +575,8 @@ class TestChunkWorkerInline:
                                          ("000001", "000002"), 90,
                                          None, None, None)
         old_rows, old_rounds, tp_rows, tp_rounds, timing_rows, risk_rows = out
-        assert len(tp_rows) == 2 * 5 * len(mod.TP_THRESHOLDS)
+        assert len(tp_rows) == (2 * len(mod.DCA_METHODS)
+                                * len(mod.TP_THRESHOLDS))
         assert {r["code"] for r in old_rows} == {"000001", "000002"}
         assert all(r["alive"] is False for r in old_rows)   # cutoff None → 全死
         assert timing_rows == []                            # alive 门控
@@ -612,3 +614,120 @@ class TestChunkWorkerInline:
         assert all(r["alive"] is True for r in old_rows)
         assert {t[0] for t in timing_rows} == {"000001", "000002"}
         assert all(t[4] == "2025-02-23" for t in timing_rows)
+
+
+class TestChunkProgressCallback:
+    """_run_chunk_tasks on_done 回调（2026-11-25 十轮：基金级进度回传缝）：
+    串行与池两路逐块回调、池路结果顺序与输入一致（map 兼容）、worker 异常
+    原样抛回（同 map 语义）、不传回调零改动。"""
+
+    def test_serial_calls_on_done_per_chunk(self, monkeypatch):
+        from app import dca_backtest as mod
+        seen = []
+        monkeypatch.setattr(mod, "_backtest_chunk_worker", lambda *a: ("r",))
+        out = mod._run_chunk_tasks([("a",), ("b",), ("c",)], 1,
+                                   on_done=lambda i: seen.append(i))
+        assert out == [("r",), ("r",), ("r",)]
+        assert seen == [0, 1, 2]
+
+    def test_pool_calls_on_done_and_preserves_order(self, monkeypatch):
+        from app import dca_backtest as mod
+        seen = []
+        monkeypatch.setattr(mod, "_backtest_chunk_worker", lambda tag: tag)
+        monkeypatch.setattr(concurrent.futures, "ProcessPoolExecutor",
+                            _FakeInlinePool)
+        out = mod._run_chunk_tasks([("a",), ("b",), ("c",)], 3,
+                                   on_done=seen.append)
+        assert out == ["a", "b", "c"]            # 顺序与输入一致（map 兼容）
+        assert sorted(seen) == [0, 1, 2]
+
+    def test_pool_worker_exception_propagates(self, monkeypatch):
+        from app import dca_backtest as mod
+
+        def fake_worker(tag):
+            if tag == "b":
+                raise RuntimeError("boom")
+            return tag
+
+        monkeypatch.setattr(mod, "_backtest_chunk_worker", fake_worker)
+        monkeypatch.setattr(concurrent.futures, "ProcessPoolExecutor",
+                            _FakeInlinePool)
+        with pytest.raises(RuntimeError):
+            mod._run_chunk_tasks([("a",), ("b",), ("c",)], 3)
+
+    def test_no_callback_default_unchanged(self, monkeypatch):
+        """不传 on_done：行为与原 map 逐位一致（既有调用零改动锚）。"""
+        from app import dca_backtest as mod
+        monkeypatch.setattr(mod, "_backtest_chunk_worker", lambda tag: tag * 2)
+        monkeypatch.setattr(concurrent.futures, "ProcessPoolExecutor",
+                            _FakeInlinePool)
+        assert mod._run_chunk_tasks([("a",), ("b",)], 2) == ["aa", "bb"]
+
+
+class _FakeInlinePool:
+    """提交即执行的进程池替身（闭包进不了 spawn 池，测试内联解结果）。"""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def submit(self, fn, *args, **kwargs):
+        fut = concurrent.futures.Future()
+        fut.set_result(fn(*args, **kwargs))
+        return fut
+
+
+class TestDirtyProgressCallback:
+    """run_full_backtest_tp_dirty progress 参数（2026-11-25 十轮）：dirty 集
+    算出后先报 (0, 需重算总数)，每块完成报 (累计基金数, 总数)——设置页
+    进度条的真实分母即「本次需要回测的基金数」。"""
+
+    def test_progress_sequence_monotonic(self, monkeypatch):
+        from app import dca_backtest as mod
+        monkeypatch.setenv("BACKTEST_WORKERS", "1")     # 串行内联（不拉池）
+        monkeypatch.setenv("BACKTEST_CHUNK_SIZE", "1")  # 每块 1 基金 → 2 块
+        fps = {"000001": _fp(max_date="2024-02-24"),
+               "000002": _fp(max_date="2024-02-24", s_unit="3.2")}
+        monkeypatch.setattr(mod, "engine_version", lambda *a: "vTEST")
+        monkeypatch.setattr(mod, "load_input_fingerprints", lambda conn: fps)
+        # prev 引擎不同 → 全量（dirty=全部）
+        monkeypatch.setattr(dca_store, "load_fingerprints",
+                            lambda conn: (fps, "vOLD"))
+        _patch_connect(monkeypatch, mod, FakeConn())
+        # worker 打桩（进度测试只看回调序列，不算真净值）
+        monkeypatch.setattr(mod, "_backtest_chunk_worker",
+                            lambda *a: ([], [], [], [], [], []))
+        seen = []
+        mod.run_full_backtest_tp_dirty(
+            "postgresql://fake", log=lambda *_: None,
+            progress=lambda d, t: seen.append((d, t)))
+        assert seen[0] == (0, 2)
+        assert seen[-1] == (2, 2)
+        assert [d for d, _t in seen] == sorted(d for d, _t in seen)
+        assert all(t == 2 for _d, t in seen)
+
+    def test_no_progress_kwarg_unchanged(self, monkeypatch):
+        """不传 progress：派发缝不收到 on_done（既有调用零改动锚）。"""
+        from app import dca_backtest as mod
+        monkeypatch.setenv("BACKTEST_WORKERS", "1")
+        fps = {"000001": _fp()}
+        monkeypatch.setattr(mod, "engine_version", lambda *a: "vTEST")
+        monkeypatch.setattr(mod, "load_input_fingerprints", lambda conn: fps)
+        monkeypatch.setattr(dca_store, "load_fingerprints",
+                            lambda conn: (fps, "vOLD"))
+        captured = {}
+
+        def fake_dispatch(args, workers, on_done=None):
+            captured["on_done"] = on_done
+            return [([], [], [], [], [], [])]
+
+        monkeypatch.setattr(mod, "_run_chunk_tasks", fake_dispatch)
+        _patch_connect(monkeypatch, mod, FakeConn())
+        mod.run_full_backtest_tp_dirty("postgresql://fake",
+                                       log=lambda *_: None)
+        assert captured["on_done"] is None

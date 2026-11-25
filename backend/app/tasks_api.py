@@ -23,7 +23,7 @@ from .scheduler import SH_TZ, next_run_at
 from .task_runtime import PgTaskControl
 from .task_store import TaskStore
 
-VALID_SOURCES = ("sina", "eastmoney", "fund", "backtest")
+VALID_SOURCES = ("sina", "eastmoney", "fund", "backtest", "backtest_method")
 VALID_MODES = ("incremental", "full", "daily")
 
 

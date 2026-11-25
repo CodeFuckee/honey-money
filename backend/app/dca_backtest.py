@@ -1,10 +1,13 @@
 """全市场基金「定投 + 20% 止盈」回测核心（离线脚本与调度器日更共用）。
 
 口径约定：
-- 定投：每只基金每月首个净值日买入；定投方式三档（DCA_METHODS）——
+- 定投：每只基金每月首个净值日买入；定投方式六档（DCA_METHODS）——
   amount 等额定投（每期固定 1000 元，金额不影响收益率）/ share 等份额
   定投（每期固定到手份额 = 1000/窗口首日复权净值，现金随净值波动）/
-  dd_ladder 回撤梯度加码（买入日按当日回撤分档加倍，见 DD_LADDER）；
+  dd_ladder 回撤梯度加码（买入日按当日回撤分档加倍，见 DD_LADDER）/
+  dd_ladder_deep 深回撤加码（更深的回撤才加码）/ profit_dd_ladder 浮盈
+  阶梯（浮盈减码+深撤加码）/ pl_ladder 盈亏阶梯（持仓浮亏加码+浮盈减码
+  停投，两半边均持仓口径）；
 - 复权：东财日增长率 pct_chg 已是分红再投资口径（已验证），链乘合成复权净值；
   pct_chg 缺失行用 (unit_nav+每份分红)/前日单位净值 兜底（分红由累计净值差推出）；
 - 止盈：任一净值日持仓收益率 = 持仓市值/已投入 - 1 ≥ 20% 即全仓赎回并开启新一轮
@@ -55,7 +58,7 @@ TP_THRESHOLDS = (0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40)
 # 跌时花得少，成本摊平效果最差的反面基准；含费为外扣法对偶：现金 =
 # 份额×净值×(1+申购费率)）。API method 白名单与前端 tab 共用此事实源。
 DCA_METHODS = ("amount", "share", "dd_ladder", "dd_ladder_deep",
-               "profit_dd_ladder")
+               "profit_dd_ladder", "pl_ladder")
 # 回撤梯度加码（dd_ladder，2026-11-23 四轮）：月度买入日按当日回撤分档加倍
 # ——回撤 = adj/历史最高（含当日）- 1，因果无前视；取满足 回撤 ≤ 阈值 的
 # 最深一档的倍数（reversed 依序匹配，都不中为 1×——浅档在前直接 next 会
@@ -79,7 +82,18 @@ DD_LADDERS = {"dd_ladder": DD_LADDER, "dd_ladder_deep": DD_LADDER_DEEP,
 # ≥20% → 1.5×、≥30% → 2×），余者 1×。新轮首买 invested=0 浮盈无定义
 # → 直接看回撤档；止盈清算即重置，浮盈档随轮次呼吸。
 PROFIT_LADDER = ((0.10, 0.5), (0.20, 0.25))
-PROFIT_LADDERS = {"profit_dd_ladder": PROFIT_LADDER}
+PROFIT_LADDERS = {"profit_dd_ladder": PROFIT_LADDER,
+                  "pl_ladder": ((0.10, 0.5), (0.20, 0.0))}
+# 盈亏阶梯（pl_ladder，2026-11-24 八轮用户定案）：持仓浮盈亏双向调节
+# ——浮盈/浮亏均用持仓口径（pr = 市值/已投入 - 1，与止盈触发线同口径，
+# 与浮盈阶梯亏损半边用价格回撤不同）：浮亏 ≥10% 投 1.5×、≥20% 投 2×
+# （≤ 阈值取最深档，越亏越买）；浮盈 ≥10% 投 0.5×、≥20% 投 0×（0× =
+# 当期完全停投，无份额无现金流——恰好也是 tp=0.20 的触发区，止盈检查
+# 照常运行，停投即避免止盈前追高）；余者与浮盈无定义（invested=0：
+# 新轮首买/停投后期）投 1×。无回撤分量（DD_LADDERS 无此键）。
+PL_LOSS_LADDER = ((-0.10, 1.5), (-0.20, 2.0))
+PL_PROFIT_LADDER = ((0.10, 0.5), (0.20, 0.0))
+PL_LOSS_LADDERS = {"pl_ladder": PL_LOSS_LADDER}
 
 
 # ===== 费用模型（典型档位近似，见模块 docstring） =====
@@ -288,7 +302,12 @@ def simulate_multi(dates: pd.DatetimeIndex, adj: np.ndarray,
     - profit_dd_ladder（浮盈阶梯）：浮盈档优先——当轮浮盈 = 持仓市值/
       已投入 - 1（与止盈触发线同口径）≥10% → 0.5×、≥20% → 0.25×；
       未触发浮盈档落深梯度回撤档（≥20% → 1.5×、≥30% → 2×），余者 1×。
-      新轮首买 invested=0 浮盈无定义直接看回撤档，invested 每期可变。
+      新轮首买 invested=0 浮盈无定义直接看回撤档，invested 每期可变；
+    - pl_ladder（盈亏阶梯，2026-11-24 八轮）：持仓浮盈亏双向调节（两半边
+      均为持仓口径 pr = 市值/已投入 - 1，无回撤分量）——浮亏 ≥10% 投
+      1.5×、≥20% 投 2×（≤ 阈值取最深档）；浮盈 ≥10% 投 0.5×、≥20% 投
+      0×（当期完全停投：无份额无现金流，止盈检查照常运行）；余者与
+      浮盈无定义（invested=0）投 1×，invested 每期可变。
 
     min_span_days：年化运作期限下限（天），None=读模块常量 MIN_SPAN_DAYS
     （设置页 backtest_min_span_days 经调用方下传；全窗口年化与止盈后当前
@@ -300,7 +319,8 @@ def simulate_multi(dates: pd.DatetimeIndex, adj: np.ndarray,
     # 无前视——adj[0] 即首个月度买入价）
     unit_shares = AMOUNT / adj[0]
     ladder = DD_LADDERS.get(method)   # 梯度加码方式的档位表（amount/share 为 None）
-    pr_ladder = PROFIT_LADDERS.get(method)   # 浮盈阶梯档位表（仅 profit_dd_ladder）
+    pr_ladder = PROFIT_LADDERS.get(method)   # 浮盈档位表（profit_dd_ladder/pl_ladder）
+    pl_loss = PL_LOSS_LADDERS.get(method)   # 盈亏阶梯的浮亏半边（仅 pl_ladder）
     states = [_new_tp_state(tp) for tp in take_profits]
     months = dates.to_numpy().astype("datetime64[M]")
     peak = -np.inf          # dd_ladder 用：历史最高（含当日）的运行峰值
@@ -313,36 +333,43 @@ def simulate_multi(dates: pd.DatetimeIndex, adj: np.ndarray,
         for st in states:
             if m not in st["months"]:
                 st["months"].add(m)
-                if st["basis_units"] == 0.0:
-                    st["round_start"] = dates[i]   # 新一轮从本轮首次买入起算
+                sh = None   # 本期是否实际买入（pl_ladder 0× 停投期无买入）
                 if method == "share":
                     cash = unit_shares * a * (1.0 if fee is None
                                               else 1.0 + fee.sub_rate)
                     sh = unit_shares
                     sub_fee = 0.0 if fee is None else cash - sh * a
                 else:
-                    # 浮盈档优先（profit_dd_ladder）：当轮浮盈 = 市值/已投入
-                    # - 1（与止盈触发线同口径）取最高浮盈档；invested=0 新轮
-                    # 首买浮盈无定义、或浮盈未触发 → 落回撤档（其余方式
-                    # pr_ladder 为 None，行为与原回撤分派逐位一致）
+                    # 浮盈档优先（profit_dd_ladder / pl_ladder）：当轮浮盈 =
+                    # 市值/已投入 - 1（与止盈触发线同口径）取最高浮盈档；
+                    # invested=0 新轮首买浮盈无定义、或浮盈未触发 →
+                    # pl_ladder 落浮亏半边（pr ≤ 阈值取最深档），其余方式
+                    # 落回撤档（无 pr_ladder 者行为与原回撤分派逐位一致）
                     mult = None
                     if pr_ladder and st["invested"] > 0:
                         pr = st["basis_units"] * a / st["invested"] - 1.0
                         mult = next((mv for th, mv in reversed(pr_ladder)
                                      if pr >= th), None)
+                        if mult is None and pl_loss:
+                            mult = next((mv for th, mv in reversed(pl_loss)
+                                         if pr <= th), None)
                     if mult is None:
                         mult = (next((mv for th, mv in reversed(ladder)
                                       if dd <= th), 1.0) if ladder else 1.0)
-                    cash = AMOUNT * mult
-                    net_amount = (cash if fee is None
-                                  else cash / (1.0 + fee.sub_rate))
-                    sh = net_amount / a
-                    sub_fee = cash - net_amount
-                st["lots"].append((i, sh))
-                st["basis_units"] += sh
-                st["invested"] += cash
-                st["round_sub_fee"] += sub_fee
-                st["flows"].append((dates[i], -cash))
+                    if mult > 0:   # pl_ladder 0×（浮盈 ≥20%）：当期完全停投
+                        cash = AMOUNT * mult
+                        net_amount = (cash if fee is None
+                                      else cash / (1.0 + fee.sub_rate))
+                        sh = net_amount / a
+                        sub_fee = cash - net_amount
+                if sh is not None:
+                    if st["basis_units"] == 0.0:
+                        st["round_start"] = dates[i]   # 新一轮从本轮首次买入起算
+                    st["lots"].append((i, sh))
+                    st["basis_units"] += sh
+                    st["invested"] += cash
+                    st["round_sub_fee"] += sub_fee
+                    st["flows"].append((dates[i], -cash))
             if (st["basis_units"] > 0
                     and st["basis_units"] * a
                     >= st["invested"] * (1.0 + st["tp"])):
@@ -693,6 +720,92 @@ def run_full_backtest(dsn: str, *, log=print) -> tuple[list[dict], list[tuple], 
     return rows, rounds_rows, stats
 
 
+def run_full_backtest_tp_method(dsn: str, method: str, *, log=print,
+                                progress=None) -> tuple[list[dict],
+                                                        list[tuple], dict]:
+    """单策略全市场重算（设置页「运行单策略全量」按钮的执行体，2026-11-25
+    九轮）：复用脏检测版的分片并行机制，但只算选定 method——新策略上线后
+    不必等日更全量即可单独出数（其余方法结果不受影响）。
+
+    progress：基金级进度回调（2026-11-25 十轮，与脏检测版同通道）——全市场
+    基金集确定后先报 (0, 总数)，每块完成报 (累计基金数, 总数)。
+
+    与 run_full_backtest_tp_dirty 的刻意差异（正确性锚）：
+    - 不读/不写输入指纹：fund_dca_fp 的引擎串归日更所有，局部运行改写会让
+      日更误判「引擎未变」而跳过其余方法的陈旧行——引擎陈旧判定留给日更
+      兜底全量（正确性优先，接受一次重复计算）；
+    - 不产旧口径行/时机行/风险行：三者与 method 无关，日更每晚统一维护；
+    - end_ts = 全市场 max(nav_date)（索引尾扫，秒级；分片 worker 仍须显式
+      下发全局锚，理由同脏检测版）；
+    - alive 由本结果集窗口末派生 45 天 cutoff 重盖（合并后调用方再做
+      method 域集合刷新兜底）。
+
+    返回 (tp_rows, tp_rounds, stats)；合并导入（merge_tp_*_method method
+    域替换 + refresh_alive_method + 对比快照重建）由调用方完成。
+    """
+    if method not in DCA_METHODS:
+        raise ValueError(f"unknown dca method: {method!r}")
+    with psycopg.connect(dsn, connect_timeout=10) as conn:
+        codes = _load_codes(conn)
+        log(f"有净值的基金：{len(codes):,} 只")
+        if not codes:
+            raise SystemExit("fund_nav 为空，无从回测")
+        with conn.cursor() as cur:
+            cur.execute("SELECT max(nav_date) FROM fund_nav")
+            row = cur.fetchone()
+        end_ts = pd.Timestamp(row[0]) if row and row[0] else None
+        # 运作期限下限随设置页（与日更同款读取与回退，读失败不崩）
+        try:
+            min_span_days = settings_store.get_min_span_days(
+                conn, default=MIN_SPAN_DAYS)
+        except Exception as exc:
+            log(f"  设置表读取失败，回退运作期限下限 {MIN_SPAN_DAYS} 天：{exc}")
+            min_span_days = MIN_SPAN_DAYS
+    log(f"单策略全量：{method} / 净值截至 {end_ts} / 运作期限下限 "
+        f"{min_span_days} 天")
+    chunks = _chunk_codes(codes, _chunk_size())
+    workers = min(_worker_count(), len(chunks)) or 1
+    log(f"并行重算：{len(chunks)} 块 × ≤{_chunk_size()} 只 / {workers} worker")
+    args = [(dsn, tuple(c), min_span_days, None, None,
+             str(end_ts) if end_ts else None, (method,)) for c in chunks]
+    # 基金级进度（2026-11-25 十轮，与脏检测版同通道）
+    on_done = None
+    if progress:
+        progress(0, len(codes))
+        sizes = [len(c) for c in chunks]
+        done = {"n": 0}
+
+        def on_done(idx):
+            done["n"] += sizes[idx]
+            progress(done["n"], len(codes))
+    results = (_run_chunk_tasks(args, workers, on_done=on_done)
+               if on_done else _run_chunk_tasks(args, workers))
+    tp_rows: list[dict] = []
+    tp_rounds: list[tuple] = []
+    for _c_old, _c_old_rounds, c_tp, c_tp_rounds, _c_timing, _c_risk in results:
+        tp_rows.extend(c_tp)
+        tp_rounds.extend(c_tp_rounds)
+    # alive：本结果集窗口末（max full_end）派生 45 天 cutoff 重盖（worker
+    # 传 cutoff None 已标全死，此处为权威值）
+    all_end = max((r["full_end"] for r in tp_rows if r["full_end"]),
+                  default=None)
+    cutoff = (pd.Timestamp(all_end) - pd.Timedelta(days=_ALIVE_WINDOW_DAYS)) \
+        if all_end else None
+    for r in tp_rows:
+        r["alive"] = bool(cutoff and r["full_end"]
+                          and pd.Timestamp(r["full_end"]) >= cutoff)
+    stats = {"method": method, "fund_count": len(codes),
+             "tp_round_count": len(tp_rounds),
+             "thresholds": [float(t) for t in TP_THRESHOLDS],
+             "window_end": str(all_end) if all_end else None,
+             "engine": engine_version(min_span_days),
+             "workers": workers, "chunks": len(chunks)}
+    log(f"单策略重算完成：{method} / {stats['fund_count']:,} 只 / "
+        f"轮次 {stats['tp_round_count']:,} 行 / {workers} worker × "
+        f"{len(chunks)} 块，窗口截至 {all_end}")
+    return tp_rows, tp_rounds, stats
+
+
 def compute_dip_timing(dates: pd.DatetimeIndex, adj: np.ndarray) -> dict:
     """单基金当前时机指标（定投时机视图，2026-11-16 假设验证结论）。
 
@@ -857,8 +970,10 @@ def engine_version(*extra) -> str:
     判定全部指纹失效 → 自动全量重算，杜绝表内混版本。"""
     material = repr((AMOUNT, TAKE_PROFIT, MIN_SPAN_DAYS, TP_THRESHOLDS,
                      DCA_METHODS, DD_LADDER, DD_LADDER_DEEP, DD_LADDERS,
-                     PROFIT_LADDER, PROFIT_LADDERS, SUB_DISCOUNT, SUB_RATE_A,
-                     _SUB_RATE_DEFAULT, REDEEM_EQUITY, REDEEM_BOND_C)
+                     PROFIT_LADDER, PROFIT_LADDERS, PL_LOSS_LADDER,
+                     PL_PROFIT_LADDER, PL_LOSS_LADDERS, SUB_DISCOUNT,
+                     SUB_RATE_A, _SUB_RATE_DEFAULT, REDEEM_EQUITY,
+                     REDEEM_BOND_C)
                     + tuple(extra))
     digest = hashlib.sha1(material.encode()).hexdigest()[:8]
     return f"{ENGINE_VERSION_BASE}+{digest}"
@@ -949,32 +1064,48 @@ def _worker_count() -> int:
     return max(1, min(4, os.cpu_count() or 1))
 
 
-def _run_chunk_tasks(args_list: list[tuple], workers: int) -> list:
+def _run_chunk_tasks(args_list: list[tuple], workers: int,
+                     on_done=None) -> list:
     """分片派发缝：workers≤1 或只有一块 → 串行内联（退化路径/单测）；
-    否则 spawn 进程池 map。worker 异常经 map 原样抛回（调度器记 aborted，
-    与顺序版一致）。"""
+    否则 spawn 进程池。worker 异常原样抛回（调度器记 aborted，与顺序版
+    一致）。on_done：每块完成回调（传完成块的 args 下标；2026-11-25 十轮
+    基金级进度回传缝——闭包仅在本进程内使用不跨 pickle，串行/池两路同
+    语义，池路按 as_completed 逐块回调、结果顺序仍与输入一致）。"""
     if workers <= 1 or len(args_list) <= 1:
-        return [_backtest_chunk_worker(*a) for a in args_list]
+        results = []
+        for i, a in enumerate(args_list):
+            results.append(_backtest_chunk_worker(*a))
+            if on_done:
+                on_done(i)
+        return results
     import concurrent.futures
     import multiprocessing
     ctx = multiprocessing.get_context("spawn")
     with concurrent.futures.ProcessPoolExecutor(max_workers=workers,
                                                 mp_context=ctx) as pool:
-        # map(fn, *iterables) 星散：args_list 是 (dsn, codes, ...) 元组列表，
-        # 逐元组单参传会让 worker 报缺参（map(fn, list) 只给一个位置参数）
-        return list(pool.map(_backtest_chunk_worker, *zip(*args_list)))
+        futures = {pool.submit(_backtest_chunk_worker, *a): i
+                   for i, a in enumerate(args_list)}
+        results: list = [None] * len(args_list)
+        for fut in concurrent.futures.as_completed(futures):
+            i = futures[fut]
+            results[i] = fut.result()   # 异常原样抛回（原 map 同语义）
+            if on_done:
+                on_done(i)
+        return results
 
 
 def _backtest_chunk_worker(dsn: str, codes, min_span_days: int,
                            cutoff_iso: str | None, computed_at_iso: str | None,
-                           end_ts_iso: str | None) -> tuple[
+                           end_ts_iso: str | None,
+                           methods: tuple = DCA_METHODS) -> tuple[
         list[dict], list[tuple], list[dict], list[tuple],
         list[tuple], list[tuple]]:
     """并行分片 worker（模块级函数可被 spawn pickle，教训②）。自加载本块
-    basic/scale/nav → 5 方法 × 8 阈值全算（end_ts 必须用父进程下发的全局
-    值——缺省会取本块 nav 的最大净值日，各块窗口右端漂移）→ 时机/风险行
-    （按 cutoff 门控 alive）。返回 (old_rows, old_rounds, tp_rows,
-    tp_rounds, timing_rows, risk_rows)；alive 交由父进程统一重盖。"""
+    basic/scale/nav → methods（缺省全部定投方式；单策略全量运行传单方法
+    元组）× 8 阈值全算（end_ts 必须用父进程下发的全局值——缺省会取本块
+    nav 的最大净值日，各块窗口右端漂移）→ 时机/风险行（按 cutoff 门控
+    alive）。返回 (old_rows, old_rounds, tp_rows, tp_rounds, timing_rows,
+    risk_rows)；alive 交由父进程统一重盖。"""
     with psycopg.connect(dsn, connect_timeout=10) as conn:
         basic = _load_basic(conn, list(codes))
         scale_map = _load_scale(conn)
@@ -983,7 +1114,7 @@ def _backtest_chunk_worker(dsn: str, codes, min_span_days: int,
     thresholds = TP_THRESHOLDS
     tp_rows: list[dict] = []
     tp_rounds: list[tuple] = []
-    for method in DCA_METHODS:
+    for method in methods:
         m_rows, m_rounds = run_backtest_tp(nav, basic, scale_map, thresholds,
                                            end_ts=end_ts, method=method,
                                            log=print,
@@ -1014,12 +1145,19 @@ def _backtest_chunk_worker(dsn: str, codes, min_span_days: int,
     return old_rows, old_rounds, tp_rows, tp_rounds, timing_rows, risk_rows
 
 
-def run_full_backtest_tp_dirty(dsn: str, *, log=print) -> tuple[
+def run_full_backtest_tp_dirty(dsn: str, *, log=print,
+                               progress=None) -> tuple[
         list[dict], list[tuple], list[dict], list[tuple], list[tuple],
         list[tuple], dict, dict[str, tuple]]:
     """日更全量回测（脏检测版）：逐基金比对输入指纹，只重算"净值或基础
     信息有变"的基金，其余复用库中上次结果行；引擎版本变化（含设置页口径
     变更）或首跑自动退化为全量；BACKTEST_FORCE_FULL=1 强制全量。
+
+    progress：基金级进度回调（2026-11-25 十轮）——dirty 集算出后先报
+    (0, 需重算总数)，此后每块完成报 (累计基金数, 总数)；分母=本次需要
+    回测的基金数（dirty 集，含强制全量的全市场）。调度器传
+    functools.partial(task_runtime.write_progress, dsn, task_id) 跨 spawn
+    池落库 task_runtime.progress。
 
     返回 (old_rows, old_rounds, tp_rows, tp_rounds, timing_rows, risk_rows,
     stats, fingerprints)——结果行只含 dirty 基金；stats 同
@@ -1087,7 +1225,21 @@ def run_full_backtest_tp_dirty(dsn: str, *, log=print) -> tuple[
     log(f"并行重算：{len(chunks)} 块 × ≤{_chunk_size()} 只 / {workers} worker")
     args = [(dsn, tuple(c), min_span_days, cutoff_iso, computed_at,
              str(end_ts) if end_ts else None) for c in chunks]
-    results = _run_chunk_tasks(args, workers)
+    # 基金级进度（2026-11-25 十轮）：先报 (0, 重算总数)，每块完成累加；
+    # on_done 闭包仅在本进程内使用（外层池只 pickle worker fn+args），分母
+    # =本次需要回测的基金数
+    on_done = None
+    if progress:
+        dirty_total = len(codes_dirty)
+        progress(0, dirty_total)
+        sizes = [len(c) for c in chunks]
+        done = {"n": 0}
+
+        def on_done(idx):
+            done["n"] += sizes[idx]
+            progress(done["n"], dirty_total)
+    results = (_run_chunk_tasks(args, workers, on_done=on_done)
+               if on_done else _run_chunk_tasks(args, workers))
     tp_rows: list[dict] = []
     tp_rounds: list[tuple] = []
     old_rows: list[dict] = []

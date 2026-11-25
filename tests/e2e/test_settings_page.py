@@ -14,11 +14,20 @@
   运行中禁用；
 - E2E-475 P1 取消不发包 + 409 已在运行分支错误提示；
 - E2E-476 P1 运行中状态：mock GET running=true → 按钮禁用 + 运行中
-  状态可见。
+  状态可见；
+- E2E-481 P0 单策略全量主流程（2026-11-25 九轮）：策略选择器六枚、默认
+  选中「盈亏阶梯」→ 切「深回撤加码」→ 运行按钮 → 确认框含「10 分钟~
+  2 小时」与策略名 → 确认 → POST /api/settings/backtest-method-run
+  载荷 {"method":"dd_ladder_deep"} + POST /api/tasks/9/run + 已触发提示
+  + 按钮转禁用；
+- E2E-482 P1 单策略守卫：取消不发包；前置 409（日更运行中）→ 错误提示
+  含「日更」且不触发任务运行；method_task running=true → 按钮禁用 +
+  运行中状态可见。
 运行：python -m pytest tests/e2e/test_settings_page.py
 """
 
 import json
+import re
 
 from playwright.sync_api import expect
 
@@ -27,14 +36,20 @@ MOCK_SETTINGS = {"status": "up",
                  "backtest_task": {"task_id": 7, "running": False,
                                    "estimate": "full",
                                    "last_started_at": None,
-                                   "last_finished_at": None}}
+                                   "last_finished_at": None},
+                 "method_task": {"task_id": 9, "method": "pl_ladder",
+                                 "phase": "idle", "running": False,
+                                 "last_started_at": None,
+                                 "last_finished_at": None,
+                                 "last_aborted": None}}
 
 
 def _install_mock(page, put_status=200, put_body=None,
-                  run_status=200, run_body=None, task=MOCK_SETTINGS):
-    """拦截 /api/settings*（GET 回显/PUT 记录）与 /api/tasks/*/run
-    （POST 记录并可指定 409 等应答）。"""
-    calls = {"get": [], "put": [], "run": []}
+                  run_status=200, run_body=None, task=MOCK_SETTINGS,
+                  method_pre_status=200, method_pre_body=None):
+    """拦截 /api/settings*（GET 回显/PUT 记录/方法前置 POST 记录）与
+    /api/tasks/*/run（POST 记录并可指定 409 等应答）。"""
+    calls = {"get": [], "put": [], "run": [], "method_pre": []}
 
     def _route(route):
         req = route.request
@@ -43,6 +58,18 @@ def _install_mock(page, put_status=200, put_body=None,
             body = run_body if run_body is not None else \
                 {"triggered": 7, "queue_position": 0}
             route.fulfill(status=run_status, content_type="application/json",
+                          body=json.dumps(body))
+            return
+        if "backtest-method-run" in req.url:
+            calls["method_pre"].append(req.post_data)
+            if method_pre_body is not None:
+                body = method_pre_body
+            else:
+                method = (json.loads(req.post_data or "{}")).get("method")
+                body = {"status": "up", "task_id": 9, "method": method,
+                        "note": "目标策略已更新，触发经任务系统执行"}
+            route.fulfill(status=method_pre_status,
+                          content_type="application/json",
                           body=json.dumps(body))
             return
         if req.method == "GET":
@@ -222,3 +249,97 @@ class TestBacktestProgress:
         page.locator("[data-run-backtest]").click()
         expect(page.locator("[data-run-confirm-time]")
               ).to_contain_text("约 10 分钟", timeout=10_000)
+
+
+class TestRunMethodButton:
+    """单策略全量运行按钮（2026-11-25 九轮）：六策略选择器 + 前置校验 +
+    任务系统触发。"""
+
+    def test_run_method_main_flow(self, servers, page):
+        """E2E-481：选择器默认「盈亏阶梯」→ 切「深回撤加码」→ 确认框
+        （耗时文案 + 策略名）→ 确认 → 前置 POST 载荷 {"method":…} +
+        POST /api/tasks/9/run + 已触发提示 + 按钮转禁用。"""
+        calls = _install_mock(page)
+        _, frontend_port = servers
+        page.goto(f"http://127.0.0.1:{frontend_port}/settings")
+        seg = page.locator("[data-method-target-seg]")
+        expect(seg.locator("button")).to_have_count(6)   # 六种全可选
+        expect(page.locator('[data-method-target="pl_ladder"]')
+              ).to_have_class(re.compile("active"))      # 缺省最新策略
+        page.locator('[data-method-target="dd_ladder_deep"]').click()
+        expect(page.locator('[data-method-target="dd_ladder_deep"]')
+              ).to_have_class(re.compile("active"))
+        page.locator("[data-run-method]").click()
+        expect(page.locator("[data-method-confirm]")).to_be_visible()
+        expect(page.locator("[data-method-confirm-time]")
+              ).to_contain_text("10 分钟~2 小时")
+        expect(page.locator("[data-method-confirm-time]")
+              ).to_contain_text("深回撤加码")
+        page.locator("[data-method-confirm-ok]").click()
+        expect(page.locator("[data-run-method-triggered]")
+              ).to_contain_text("深回撤加码", timeout=10_000)
+        assert calls["method_pre"] and \
+            json.loads(calls["method_pre"][-1]) == {"method": "dd_ladder_deep"}
+        assert calls["run"] and "/api/tasks/9/run" in calls["run"][-1], calls
+        expect(page.locator("[data-run-method]")).to_be_disabled()
+
+    def test_run_method_cancel_and_409(self, servers, page):
+        """E2E-482a：取消不发包；前置 409（日更运行中）→ 错误提示含
+        「日更」且不触发任务运行。"""
+        calls = _install_mock(page, method_pre_status=409,
+                              method_pre_body={
+                                  "detail": "回测日更运行中，请等待完成后再运行单策略全量"})
+        _, frontend_port = servers
+        page.goto(f"http://127.0.0.1:{frontend_port}/settings")
+        page.locator("[data-run-method]").click()
+        expect(page.locator("[data-method-confirm]")).to_be_visible()
+        page.locator("[data-method-confirm-cancel]").click()
+        expect(page.locator("[data-method-confirm]")).to_have_count(0)
+        assert not calls["method_pre"] and not calls["run"], calls
+        page.locator("[data-run-method]").click()
+        page.locator("[data-method-confirm-ok]").click()
+        expect(page.locator("[data-run-method-error]")
+              ).to_contain_text("日更", timeout=10_000)
+        assert len(calls["method_pre"]) == 1
+        assert not calls["run"]            # 前置拒绝后不触发任务运行
+
+    def test_run_method_running_state(self, servers, page):
+        """E2E-482b：method_task running=true → 按钮禁用 + 运行中状态可见。"""
+        import copy
+        task = copy.deepcopy(MOCK_SETTINGS)
+        task["method_task"].update({"running": True, "phase": "running",
+                                    "last_started_at": "2026-11-25T10:00:00"})
+        _install_mock(page, task=task)
+        _, frontend_port = servers
+        page.goto(f"http://127.0.0.1:{frontend_port}/settings")
+        expect(page.locator("[data-run-method]")).to_be_disabled()
+        expect(page.locator("[data-run-method-running]")
+              ).to_contain_text("运行中", timeout=10_000)
+
+
+class TestRealProgress:
+    def test_progress_real_fund_counts(self, servers, page):
+        """E2E-483：基金级真实进度（2026-11-25 十轮）——mock progress
+        12345/26548 → 进度条按真实比例（≈46.4%）渲染 + 文案「已完成
+        12345 / 26548 只基金」。无 progress 字段回落时间推算（E2E-477
+        已覆盖），本用例锁真实分母优先。"""
+        import copy
+        import datetime as dtm
+        task = copy.deepcopy(MOCK_SETTINGS)
+        now = dtm.datetime.now(dtm.timezone.utc)
+        task["backtest_task"].update({
+            "running": True, "estimate": "full",
+            "progress_done": 12345, "progress_total": 26548,
+            "last_started_at": (now - dtm.timedelta(hours=2)).isoformat(),
+            "last_finished_at": None, "server_now": now.isoformat()})
+        _install_mock(page, task=task)
+        _, frontend_port = servers
+        page.goto(f"http://127.0.0.1:{frontend_port}/settings")
+        expect(page.locator("[data-run-progress]")).to_be_visible()
+        expect(page.locator("[data-run-progress-text]")
+              ).to_contain_text("已完成 12345 / 26548 只基金", timeout=10_000)
+        expect(page.locator("[data-run-progress-text]")
+              ).to_contain_text("46.5%")            # round(46.4646…, 1)
+        width = page.locator("[data-run-progress-fill]").evaluate(
+            "el => parseFloat(el.style.width)")
+        assert 45.5 <= width <= 47.5, width       # 12345/26548 ≈ 46.46%

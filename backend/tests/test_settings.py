@@ -437,3 +437,252 @@ class TestBacktestTaskServerNow:
         # ISO 串含 T 且带时区偏移（+00:00），前端可直接 Date 解析
         assert "T" in task["server_now"]
         assert task["server_now"][-6] in "+-"
+
+
+class TestSettingsMethodTask:
+    """GET /api/settings 的 method_task 字段：单策略全量回测任务快照
+    （2026-11-25 九轮：预置任务「单策略全量回测」source='backtest_method'，
+    mode 列携带目标策略；running 判定按 crawl_run 同 source 隔离——方法
+    运行行绝不污染日更快照，反之亦然）。"""
+
+    BASE = [("FROM crawl_task WHERE source = 'backtest_method'",
+             (9, "pl_ladder")),
+            ("FROM task_runtime", ("idle",)),
+            ("FROM crawl_run WHERE source = 'backtest_method'",
+             (False, False, datetime(2026, 11, 24, 10),
+              datetime(2026, 11, 24, 11)))]
+
+    def _client(self, routes):
+        from app import settings_api
+
+        def fake_connect(*a, **k):
+            return _RoutedConn(routes)
+
+        app = FastAPI()
+        settings_api.register_settings_routes(app, connect=fake_connect)
+        return TestClient(app)
+
+    def test_snapshot_fields(self):
+        body = self._client(list(self.BASE)
+                            + [("FROM crawl_task", (7,)),
+                               ("FROM crawl_run", (False, False,
+                                                   datetime(2026, 11, 24, 9),
+                                                   None)),
+                               ("fund_dca_fp", (12, True))]).get("/api/settings").json()
+        mt = body["method_task"]
+        assert mt["task_id"] == 9
+        assert mt["method"] == "pl_ladder"
+        assert mt["phase"] == "idle"
+        assert mt["running"] is False
+        assert mt["last_finished_at"].startswith("2026-11-24T11")
+        # 日更快照不受方法任务查询影响（路由各归各）
+        assert body["backtest_task"]["task_id"] == 7
+
+    def test_running_and_phase_queued(self):
+        routes = [("FROM crawl_task WHERE source = 'backtest_method'",
+                   (9, "dd_ladder")),
+                  ("FROM task_runtime", ("running",)),
+                  ("FROM crawl_run WHERE source = 'backtest_method'",
+                   (True, False, datetime(2026, 11, 24, 10), None)),
+                  ("FROM crawl_task", (7,)),
+                  ("FROM crawl_run", (False, False,
+                                      datetime(2026, 11, 24, 9),
+                                      datetime(2026, 11, 24, 9, 30))),
+                  ("fund_dca_fp", (12, True))]
+        mt = self._client(routes).get("/api/settings").json()["method_task"]
+        assert mt["running"] is True
+        assert mt["phase"] == "running"
+        assert mt["method"] == "dd_ladder"
+
+    def test_task_missing_none_fields(self):
+        routes = [("FROM crawl_task WHERE source = 'backtest_method'", None),
+                  ("FROM task_runtime", None),
+                  ("FROM crawl_run WHERE source = 'backtest_method'", None),
+                  ("FROM crawl_task", (7,)),
+                  ("FROM crawl_run", (False, False,
+                                      datetime(2026, 11, 24, 9),
+                                      datetime(2026, 11, 24, 9, 30))),
+                  ("fund_dca_fp", (12, True))]
+        mt = self._client(routes).get("/api/settings").json()["method_task"]
+        assert mt["task_id"] is None
+        assert mt["method"] is None
+        assert mt["running"] is False
+        assert mt["phase"] == "idle"
+
+    def test_snapshot_failure_degrades_to_none(self):
+        """方法任务快照异常（如旧假连接形状不符）→ method_task=None 而
+        整个 GET 仍 up（与 fp 表缺失兜底同一降级哲学）。"""
+        body = self._client([("FROM crawl_task", (7,)),          # 1 元组陷阱
+                             ("FROM crawl_run", (False, False,
+                                                 datetime(2026, 11, 24, 9),
+                                                 None)),
+                             ("fund_dca_fp", (12, True))]).get("/api/settings").json()
+        assert body["status"] == "up"
+        assert body["method_task"] is None
+
+
+class TestSettingsMethodRun:
+    """POST /api/settings/backtest-method-run：改目标策略 + 触发前置校验
+    （body{method}；日更运行中 409、方法任务排队/运行中 409；触发本身由
+    前端复用任务系统 POST /api/tasks/{id}/run——零新触发逻辑）。"""
+
+    def _client(self, routes):
+        from app import settings_api
+
+        conn = _RoutedConn(routes)
+
+        def fake_connect(*a, **k):
+            return conn
+
+        app = FastAPI()
+        settings_api.register_settings_routes(app, connect=fake_connect)
+        return TestClient(app), conn
+
+    ROLES = [("FROM crawl_task WHERE source = 'backtest_method'",
+              (9, "pl_ladder")),
+             ("FROM crawl_run WHERE source = 'backtest' ORDER", (False,)),
+             ("FROM task_runtime", ("idle",)),
+             ("FROM crawl_task", (7,)),
+             ("FROM crawl_run", (False, False,
+                                 datetime(2026, 11, 24, 9), None)),
+             ("fund_dca_fp", (12, True))]
+
+    def test_run_ok_updates_mode(self):
+        client, conn = self._client(list(self.ROLES))
+        resp = client.post("/api/settings/backtest-method-run",
+                           json={"method": "dd_ladder_deep"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "up"
+        assert body["task_id"] == 9
+        assert body["method"] == "dd_ladder_deep"
+        # UPDATE 落库且提交（mode 列改写为目标策略）
+        assert any("UPDATE crawl_task SET mode" in s for s in conn.executed)
+        assert conn.committed is True
+
+    def test_invalid_method_400(self):
+        client, _ = self._client(list(self.ROLES))
+        resp = client.post("/api/settings/backtest-method-run",
+                           json={"method": "bogus"})
+        assert resp.status_code == 400
+
+    def test_daily_running_409(self):
+        routes = [("FROM crawl_task WHERE source = 'backtest_method'",
+                   (9, "pl_ladder")),
+                  ("FROM crawl_run WHERE source = 'backtest' ORDER", (True,)),
+                  ("FROM task_runtime", ("idle",))]
+        client, conn = self._client(routes)
+        resp = client.post("/api/settings/backtest-method-run",
+                           json={"method": "pl_ladder"})
+        assert resp.status_code == 409
+        assert "日更" in resp.json()["detail"]
+        assert conn.committed is False        # 拒绝路径不落任何写
+
+    def test_method_queued_409(self):
+        routes = [("FROM crawl_task WHERE source = 'backtest_method'",
+                   (9, "pl_ladder")),
+                  ("FROM crawl_run WHERE source = 'backtest' ORDER", (False,)),
+                  ("FROM task_runtime", ("queued",))]
+        client, _ = self._client(routes)
+        resp = client.post("/api/settings/backtest-method-run",
+                           json={"method": "pl_ladder"})
+        assert resp.status_code == 409
+        assert "排队" in resp.json()["detail"]
+
+    def test_method_running_409(self):
+        routes = [("FROM crawl_task WHERE source = 'backtest_method'",
+                   (9, "pl_ladder")),
+                  ("FROM crawl_run WHERE source = 'backtest' ORDER", (False,)),
+                  ("FROM task_runtime", ("running",))]
+        client, _ = self._client(routes)
+        resp = client.post("/api/settings/backtest-method-run",
+                           json={"method": "pl_ladder"})
+        assert resp.status_code == 409
+
+    def test_down_degrades(self):
+        from app import settings_api
+
+        class _Boom:
+            def __enter__(self):
+                raise RuntimeError("pg down")
+
+            def __exit__(self, *exc):
+                return False
+
+        def fake_connect(*a, **k):
+            return _Boom()
+
+        app = FastAPI()
+        settings_api.register_settings_routes(app, connect=fake_connect)
+        resp = TestClient(app).post("/api/settings/backtest-method-run",
+                                    json={"method": "pl_ladder"})
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "down"
+
+
+class TestBacktestProgressFields:
+    """GET /api/settings 的基金级进度字段（2026-11-25 十轮）：任务运行态
+    task_runtime.progress JSONB {done,total} → progress_done/progress_total
+    （引擎分块回调写入；无行/形状不符一律 None——前端回落时间推算）。"""
+
+    def _client(self, routes):
+        from app import settings_api
+
+        def fake_connect(*a, **k):
+            return _RoutedConn(routes)
+
+        app = FastAPI()
+        settings_api.register_settings_routes(app, connect=fake_connect)
+        return TestClient(app)
+
+    BASE = [("SELECT progress FROM task_runtime",
+             ({"done": 12345, "total": 26548},)),
+            ("FROM crawl_task", (7,)),
+            ("FROM crawl_run", (True, False, datetime(2026, 11, 24, 10),
+                                None)),
+            ("fund_dca_fp", (12, True))]
+
+    def test_backtest_task_progress_dict(self):
+        body = self._client(list(self.BASE)).get("/api/settings").json()
+        task = body["backtest_task"]
+        assert task["progress_done"] == 12345
+        assert task["progress_total"] == 26548
+
+    def test_progress_missing_none_fallback(self):
+        """无进度行（指纹阶段）→ 双字段 None，前端回落时间推算。"""
+        routes = [("FROM crawl_task", (7,)),
+                  ("FROM crawl_run", (True, False,
+                                      datetime(2026, 11, 24, 10), None)),
+                  ("fund_dca_fp", (12, True))]
+        task = self._client(routes).get("/api/settings").json()["backtest_task"]
+        assert task["progress_done"] is None
+        assert task["progress_total"] is None
+
+    def test_progress_bad_shape_none(self):
+        """phase 字符串误路由到 progress 查询（假连接关键词重叠）→ 非 dict
+        一律 None，不炸端点。"""
+        routes = [("SELECT progress FROM task_runtime", ("idle",)),
+                  ("FROM crawl_task", (7,)),
+                  ("FROM crawl_run", (True, False,
+                                      datetime(2026, 11, 24, 10), None)),
+                  ("fund_dca_fp", (12, True))]
+        task = self._client(routes).get("/api/settings").json()["backtest_task"]
+        assert task["progress_done"] is None
+
+    def test_method_task_progress_fields(self):
+        routes = [("SELECT progress FROM task_runtime",
+                   ({"done": 40, "total": 120},)),
+                  ("FROM crawl_task WHERE source = 'backtest_method'",
+                   (9, "pl_ladder")),
+                  ("FROM task_runtime", ("running",)),
+                  ("FROM crawl_run WHERE source = 'backtest_method'",
+                   (True, False, datetime(2026, 11, 25, 10), None)),
+                  ("FROM crawl_task", (7,)),
+                  ("FROM crawl_run", (False, False,
+                                      datetime(2026, 11, 24, 9),
+                                      datetime(2026, 11, 24, 9, 30))),
+                  ("fund_dca_fp", (12, True))]
+        mt = self._client(routes).get("/api/settings").json()["method_task"]
+        assert mt["phase"] == "running"
+        assert mt["progress_done"] == 40
+        assert mt["progress_total"] == 120

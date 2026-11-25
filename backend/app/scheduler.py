@@ -118,9 +118,10 @@ async def _run_backtest_job(dsn: str, task: dict, progress,
     BACKTEST_FORCE_FULL=1（或清空 fund_dca_fp 表）。
     """
     import concurrent.futures
+    import functools
     import multiprocessing
 
-    from . import dca_backtest, dca_store
+    from . import dca_backtest, dca_store, task_runtime
     from .crawler.store import Store
     from .dca_api import TP_COMPARE_EQUITY_TYPES   # 对比池白名单（API 层常量）
 
@@ -145,16 +146,24 @@ async def _run_backtest_job(dsn: str, task: dict, progress,
         return {"total": 0, "ok": 0, "failed": 0, "bars": 0, "failures": [],
                 "aborted": True, "stopped": True, "error": False}
 
-    progress(0, 1)
     ctx = multiprocessing.get_context("spawn")
+    # 基金级进度（2026-11-25 十轮）：引擎在 spawn 池内逐块回调 → 经
+    # partial(write_progress, dsn, task_id) 跨进程落库 task_runtime；
+    # job 层不再写 (0,1)/(1,1) 占位——引擎独占进度生命周期（末块写满格，
+    # merge 段保持 100% 至 finish 清除）
+    progress_cb = (functools.partial(task_runtime.write_progress, dsn,
+                                     task["id"])
+                   if task.get("id") is not None else None)
     try:
         # 模块级函数 + 基元参数才可被 spawn pickle（嵌套闭包会
-        # "Can't get local object" 崩掉子进程任务）
+        # "Can't get local object" 崩掉子进程任务；partial 同理可 pickle）
         with concurrent.futures.ProcessPoolExecutor(max_workers=1,
                                                     mp_context=ctx) as pool:
             old_rows, old_rounds, tp_rows, tp_rounds, timing_rows, \
                 risk_rows, stats, fingerprints = await loop.run_in_executor(
-                    pool, dca_backtest.run_full_backtest_tp_dirty, dsn)
+                    pool, functools.partial(
+                        dca_backtest.run_full_backtest_tp_dirty, dsn,
+                        progress=progress_cb))
     except Exception as exc:
         with psycopg.connect(dsn) as conn:
             store.finish_run(conn, run_id, total_stocks=0, ok_stocks=0,
@@ -175,7 +184,8 @@ async def _run_backtest_job(dsn: str, task: dict, progress,
                 "bars": stats["round_count"], "failures": [],
                 "aborted": True, "stopped": True, "error": False}
 
-    progress(1, 1)
+    # 引擎末块已把进度写到满格（total/total）——此处不再写占位，merge 段
+    # 保持 100% 至 finish 清除
     params = {"amount": 1000.0, "take_profit": 0.2, "frequency": "monthly",
               "window_end": stats.get("window_end"), "min_age_years": None,
               "scale_min_yi": None, "source": "scheduler/backtest",
@@ -252,6 +262,113 @@ async def _run_backtest_job(dsn: str, task: dict, progress,
     return {"total": stats["fund_count"], "ok": stats["fund_count"],
             "failed": 0, "bars": stats["round_count"], "failures": [],
             "aborted": False, "stopped": False, "error": False}
+
+
+async def _run_backtest_method_job(dsn: str, task: dict, progress,
+                                   stop_event: asyncio.Event) -> dict:
+    """单策略全量回测（设置页「运行单策略全量」按钮触发，2026-11-25 九轮）：
+    预置任务「单策略全量回测」（source='backtest_method'，mode 列=目标
+    策略，由设置端点改写）——只重算选定 method 的全市场 8 档止盈 × 3 费率
+    （引擎 run_full_backtest_tp_method 分片并行），按 method 域替换
+    fund_dca_tp_* 行 + alive method 域集合刷新 + 对比快照重建（独立事务）。
+
+    与日更 _run_backtest_job 的刻意差异（正确性锚）：不写输入指纹表
+    （引擎陈旧判定留给日更兜底全量，防止局部运行掩盖其余方法陈旧）、
+    不产旧口径/时机/风险行（与 method 无关，日更每晚统一维护）、不做
+    Pages 发布（旧口径表未动）。crawl_run 以 source='backtest_method'
+    落行——日更运行中判定按 source='backtest' 过滤，两路互不污染。"""
+    import concurrent.futures
+    import functools
+    import multiprocessing
+
+    from . import dca_backtest, dca_store, task_runtime
+    from .crawler.store import Store
+
+    method = task["mode"]
+    store = Store()
+    loop = asyncio.get_running_loop()
+    with psycopg.connect(dsn) as conn:
+        run_id = store.start_run(conn, mode=method[:16],
+                                 source="backtest_method",
+                                 task_id=task["id"],
+                                 trigger=task.get("_trigger", "manual"))
+        conn.commit()
+    if method not in dca_backtest.DCA_METHODS:
+        with psycopg.connect(dsn) as conn:
+            store.finish_run(conn, run_id, total_stocks=0, ok_stocks=0,
+                             failed_stocks=0, bars_upserted=0,
+                             failures=[f"unknown dca method: {method}"],
+                             aborted=True)
+            conn.commit()
+        raise ValueError(f"unknown dca method: {method!r}")
+    ctx = multiprocessing.get_context("spawn")
+    # 基金级进度（2026-11-25 十轮，与日更同通道）：引擎独占进度生命周期
+    progress_cb = (functools.partial(task_runtime.write_progress, dsn,
+                                     task["id"])
+                   if task.get("id") is not None else None)
+    try:
+        # 模块级函数 + 基元参数才可被 spawn pickle（同日更教训）
+        with concurrent.futures.ProcessPoolExecutor(max_workers=1,
+                                                    mp_context=ctx) as pool:
+            tp_rows, tp_rounds, stats = await loop.run_in_executor(
+                pool, functools.partial(
+                    dca_backtest.run_full_backtest_tp_method, dsn, method,
+                    progress=progress_cb))
+    except Exception as exc:
+        with psycopg.connect(dsn) as conn:
+            store.finish_run(conn, run_id, total_stocks=0, ok_stocks=0,
+                             failed_stocks=0, bars_upserted=0,
+                             failures=[f"{type(exc).__name__}: "
+                                       f"{str(exc)[:180]}"],
+                             aborted=True)
+            conn.commit()
+        raise
+    if stop_event.is_set():
+        # 算完但等停：丢弃结果（不导入），下次照常
+        with psycopg.connect(dsn) as conn:
+            store.finish_run(conn, run_id, total_stocks=stats["fund_count"],
+                             ok_stocks=0, failed_stocks=0,
+                             bars_upserted=stats["tp_round_count"],
+                             failures=[], aborted=True)
+            conn.commit()
+        return {"total": stats["fund_count"], "ok": 0, "failed": 0,
+                "bars": stats["tp_round_count"], "failures": [],
+                "aborted": True, "stopped": True, "error": False,
+                "method": method}
+    # 引擎末块已写满格进度——merge 段保持 100% 至 finish 清除（同日更）
+    cutoff = (dt.date.fromisoformat(str(stats["window_end"])[:10])
+              - dt.timedelta(days=dca_backtest._ALIVE_WINDOW_DAYS)) \
+        if stats.get("window_end") else None
+    with psycopg.connect(dsn) as conn:
+        dca_store.ensure_tp_tables(conn)          # 多阈值三表幂等建表
+        dca_store.merge_tp_rows_method(conn, tp_rows, method)
+        dca_store.merge_tp_rounds_method(conn, tp_rounds, method)
+        dca_store.refresh_alive_method(conn, cutoff, method)
+        store.finish_run(conn, run_id, total_stocks=stats["fund_count"],
+                         ok_stocks=stats["fund_count"], failed_stocks=0,
+                         bars_upserted=stats["tp_round_count"], failures=[],
+                         aborted=False)
+        conn.commit()
+    print(f"[backtest-method] 单策略全量完成：{method} / "
+          f"{stats['fund_count']:,} 只 / 轮次 {stats['tp_round_count']:,} 行，"
+          f"窗口截至 {stats.get('window_end')}")
+
+    # 对比快照重建（独立事务，失败只告警——派生聚合不回滚结果导入，缺行
+    # 时对比 API 回落现算，下次运行自愈；见 dca_store.rebuild_tp_compare）
+    try:
+        from .dca_api import TP_COMPARE_EQUITY_TYPES
+        with psycopg.connect(dsn) as conn:
+            n_cmp = dca_store.rebuild_tp_compare(
+                conn, equity_types=TP_COMPARE_EQUITY_TYPES)
+            conn.commit()
+        print(f"[backtest-method] 对比快照重建：{n_cmp} 行")
+    except Exception as exc:      # noqa: BLE001 —— 快照失败不影响结果交付
+        print(f"[backtest-method] 对比快照重建失败（对比卡暂回落现算，"
+              f"下次运行重试）: {type(exc).__name__}: {str(exc)[:180]}")
+    return {"total": stats["fund_count"], "ok": stats["fund_count"],
+            "failed": 0, "bars": stats["tp_round_count"], "failures": [],
+            "aborted": False, "stopped": False, "error": False,
+            "method": method}
 
 
 async def _run_index_job(dsn: str, proxy_pool_url: str, task: dict, *,
@@ -361,6 +478,9 @@ def build_crawl_executor(dsn: str, proxy_pool_url: str):
     async def execute(task: dict, *, progress, stop_event: asyncio.Event) -> dict:
         if task["source"] == "backtest":
             return await _run_backtest_job(dsn, task, progress, stop_event)
+        if task["source"] == "backtest_method":
+            return await _run_backtest_method_job(dsn, task, progress,
+                                                  stop_event)
         if task["source"] == "index":
             return await _run_index_job(dsn, proxy_pool_url, task,
                                         progress=progress, stop_event=stop_event)

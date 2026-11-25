@@ -21,7 +21,8 @@ import datetime as dt
 import psycopg
 
 SOURCE_NAMES = {"sina": "新浪", "eastmoney": "东财", "fund": "基金",
-                "backtest": "回测", "index": "指数"}
+                "backtest": "回测", "index": "指数",
+                "backtest_method": "单策略回测"}
 MODE_NAMES = {"incremental": "增量", "full": "全量", "daily": "日更"}
 
 _DDL_TASK = """
@@ -102,6 +103,16 @@ class TaskStore:
                 " SELECT '定投回测日更', 'backtest', 'daily', '23:00'::time, TRUE"
                 " WHERE NOT EXISTS (SELECT 1 FROM crawl_task"
                 "                    WHERE name = '定投回测日更')")
+            # 单策略全量回测：设置页「运行单策略全量」按钮的载体任务
+            # （2026-11-25 九轮）——source='backtest_method'，mode 列=目标
+            # 策略（设置端点改写后由前端复用任务系统触发），无调度时刻、
+            # 默认禁用（仅手动），与退市股历史补爬同一手动任务模式
+            cur.execute(
+                "INSERT INTO crawl_task (name, source, mode, schedule_time, enabled)"
+                " SELECT '单策略全量回测', 'backtest_method', 'pl_ladder',"
+                " NULL::time, FALSE"
+                " WHERE NOT EXISTS (SELECT 1 FROM crawl_task"
+                "                    WHERE name = '单策略全量回测')")
             # 指数日更：收盘后拉指数日线（上证指数，519 vs 924 对比页数据源），
             # 17:30 预置且默认启用——对比页要求 924 线动态延长（2026-11-20）
             cur.execute(

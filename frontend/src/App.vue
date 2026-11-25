@@ -458,6 +458,7 @@ const DCA_MODE_OPTIONS = [
   { key: 'dd_ladder', label: '回撤加码' },
   { key: 'dd_ladder_deep', label: '深回撤加码' },
   { key: 'profit_dd_ladder', label: '浮盈阶梯' },
+  { key: 'pl_ladder', label: '盈亏阶梯' },
 ]
 // 定投方式说明（2026-11-23 五轮：? 图标点击弹出全部说明；悬停按钮 title
 // 显示对应方式详情）——brief 是面板里的一句话定位，detail 是完整口径
@@ -486,6 +487,11 @@ const DCA_MODE_HELP = {
     title: '浮盈阶梯',
     brief: '浮盈少买、深跌加倍',
     detail: '每月基础 1000 元，按当轮持仓浮盈调节：浮盈 ≥10% 投 0.5 倍、≥20% 投 0.25 倍（浮盈档优先）——涨得越多买得越少、高位少囤筹码；浮盈不足 10% 时落深回撤档：较历史最高回撤 ≥20% 投 1.5 倍、≥30% 投 2 倍，余者 1 倍。止盈清算后新一轮首期按回撤档重新起步。贵时少买、深跌加码的双向调节。',
+  },
+  pl_ladder: {
+    title: '盈亏阶梯',
+    brief: '浮亏加倍、浮盈减码，浮盈≥20% 停投',
+    detail: '每月基础 1000 元，按当轮持仓浮盈亏双向调节（浮盈亏 = 市值/已投入 - 1，与止盈触发线同口径）：浮亏 ≥10% 投 1.5 倍、≥20% 投 2 倍——越亏越买摊低成本；浮盈 ≥10% 投 0.5 倍、≥20% 停投——接近止盈线不再追高。与「浮盈阶梯」的区别：亏损半边也看持仓浮亏（而非价格回撤）——低位摊薄过的持仓跌得浅、加码更温和；且浮盈 ≥20% 彻底停投（浮盈阶梯是 0.25 倍）。止盈清算后新一轮首期浮盈无定义，按 1 倍正常起步。',
   },
 }
 const dcaModeHelpShow = ref(false)
@@ -1625,7 +1631,8 @@ const backtestMinSpan = ref(90)
 // estimate 由后端按指纹表 vs 引擎版本串判定（dirty=增量分钟级/full=全量
 // 6~10 小时），确认对话框的时间提示据此渲染
 const backtestTask = ref({ task_id: null, running: false, estimate: 'full',
-  last_started_at: null, last_finished_at: null })
+  last_started_at: null, last_finished_at: null,
+  progress_done: null, progress_total: null })
 const runConfirmShow = ref(false)
 const runStarting = ref(false)
 const runBacktestMsg = ref('')
@@ -1648,7 +1655,18 @@ const backtestElapsedMs = computed(() => {
   if (!started) return null
   return Math.max(0, nowTick.value - Date.parse(started) - serverSkew.value)
 })
+// 基金级真实进度（2026-11-25 十轮）：引擎分块回调逐块写
+// task_runtime.progress，GET /api/settings 透出 progress_done/progress_total
+// （分母=本次需要回测的基金数）——有值时进度条按真实比例渲染；无值
+// （指纹比对阶段尚无基金级信号）回落时间推算
+const backtestRealPercent = computed(() => {
+  const t = backtestTask.value.progress_total
+  if (!backtestTask.value.running || !t) return null
+  return Math.min(100, Math.round((backtestTask.value.progress_done || 0)
+    / t * 1000) / 10)
+})
 const backtestProgressPercent = computed(() => {
+  if (backtestRealPercent.value !== null) return backtestRealPercent.value
   const e = backtestElapsedMs.value
   if (e === null) return null
   return Math.min(100, Math.round(e / backtestExpectedMs.value * 1000) / 10)
@@ -1717,9 +1735,10 @@ async function loadSettings() {
           serverSkew.value = Date.parse(body.backtest_task.server_now) -
             Date.now()
         }
-        if (backtestTask.value.running) startProgressTimer()
-        else stopProgressTimer()
       }
+      if (body.method_task) methodTask.value = body.method_task
+      if (backtestTask.value.running || methodBusy.value) startProgressTimer()
+      else stopProgressTimer()
     } else {
       settingsStatus.value = 'down'
       settingsDetail.value = body.detail || '设置服务不可用'
@@ -1753,6 +1772,65 @@ async function confirmRunBacktest() {
     runBacktestError.value = String(e)
   } finally {
     runStarting.value = false
+  }
+}
+
+// 单策略全量运行（2026-11-25 九轮定案：六策略全可选/进任务系统/日更
+// 运行中直接拒绝）：预置任务「单策略全量回测」（source='backtest_method'，
+// mode 列=目标策略）——先 POST /api/settings/backtest-method-run 校验并
+// 改目标策略（日更运行中 / 本任务排队运行中 409 前置拒绝），再复用任务
+// 系统 POST /api/tasks/{id}/run 触发（全局串行 + advisory lock + 409
+// 防重，零新触发逻辑）
+const methodTask = ref({ task_id: null, method: null, phase: 'idle',
+  running: false, last_started_at: null, last_finished_at: null,
+  last_aborted: null, progress_done: null, progress_total: null })
+const methodTarget = ref('pl_ladder')      // 待运行策略（缺省最新加的盈亏阶梯）
+const methodConfirmShow = ref(false)
+const methodStarting = ref(false)
+const methodMsg = ref('')
+const methodError = ref('')
+const METHOD_LABELS = Object.fromEntries(
+  DCA_MODE_OPTIONS.map(o => [o.key, o.label]))
+const methodTargetLabel = computed(() =>
+  METHOD_LABELS[methodTarget.value] || methodTarget.value)
+const methodBusy = computed(() =>
+  methodTask.value.phase === 'queued' || methodTask.value.phase === 'running'
+  || !!methodTask.value.running)
+
+async function confirmRunMethod() {
+  methodError.value = ''
+  methodStarting.value = true
+  try {
+    const pre = await fetch('/api/settings/backtest-method-run', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ method: methodTarget.value }),
+    })
+    if (pre.status === 409) {
+      const b = await pre.json().catch(() => ({}))
+      methodError.value = b.detail || '已有回测运行中，请等待完成后再触发'
+      methodConfirmShow.value = false
+      return
+    }
+    const preBody = await pre.json().catch(() => ({}))
+    if (!pre.ok || preBody.status !== 'up') {
+      methodError.value = preBody.detail || `触发失败（${pre.status}）`
+      return
+    }
+    const runResp = await fetch(
+      `/api/tasks/${preBody.task_id}/run`, { method: 'POST' })
+    if (!runResp.ok) {
+      const b = await runResp.json().catch(() => ({}))
+      methodError.value = b.detail || '任务触发失败'
+      return
+    }
+    methodConfirmShow.value = false
+    methodTask.value.running = true
+    methodTask.value.phase = 'queued'
+    methodMsg.value = `已触发：「${methodTargetLabel.value}」单策略全量运行中（约为全市场全量耗时的 1/6），仅替换该策略结果，其余策略不受影响`
+  } catch (e) {
+    methodError.value = String(e)
+  } finally {
+    methodStarting.value = false
   }
 }
 
@@ -3449,7 +3527,7 @@ watch(
                 <button class="mode-help-btn" @click="dcaModeHelpShow = !dcaModeHelpShow"
                         :class="{ active: dcaModeHelpShow }"
                         data-mode-help aria-label="定投方式说明"
-                        title="查看五种定投方式的完整说明">?</button>
+                        title="查看六种定投方式的完整说明">?</button>
                 <div v-if="dcaModeHelpShow" class="mode-help-pop" data-mode-help-pop>
                   <div v-for="o in DCA_MODE_OPTIONS" :key="o.key" class="mode-help-item">
                     <b>{{ DCA_MODE_HELP[o.key].title }}</b>
@@ -4359,7 +4437,7 @@ watch(
               <div class="settings-row" data-run-backtest-row
                 style="margin-top: 14px; padding-top: 14px; border-top: 1px solid #e0e0e0">
                 <label class="settings-label"><b>立即运行全市场定投回测</b>
-                  <span class="settings-hint">对全市场基金按当前设置重跑五种定投方式 × 8 档止盈回测并入库（等价于手动触发夜窗「定投回测日更」任务；后台运行，期间可关闭页面）</span>
+                  <span class="settings-hint">对全市场基金按当前设置重跑六种定投方式 × 8 档止盈回测并入库（等价于手动触发夜窗「定投回测日更」任务；后台运行，期间可关闭页面）</span>
                 </label>
                 <div class="settings-input">
                   <button class="btn" data-run-backtest
@@ -4376,7 +4454,8 @@ watch(
                     :style="{ width: backtestProgressPercent + '%' }"></div>
                 </div>
                 <p class="note" data-run-progress-text style="margin: 4px 0 0">
-                  已运行 {{ backtestElapsedText }} / 预计约 {{ backtestExpectedText }}（按预估耗时推算{{ backtestTask.estimate === 'dirty' ? '；刚修改过设置或引擎变更将自动转全量' : '，完成度以实际为准' }}）· 本页停留时每 30 秒自动刷新
+                  <template v-if="backtestRealPercent !== null">已完成 {{ backtestTask.progress_done || 0 }} / {{ backtestTask.progress_total }} 只基金（{{ backtestRealPercent }}%· 基金级实际进度）· 已运行 {{ backtestElapsedText }} · 本页停留时每 30 秒自动刷新</template>
+                  <template v-else>已运行 {{ backtestElapsedText }} / 预计约 {{ backtestExpectedText }}（指纹比对阶段尚无基金级进度，按预估耗时推算{{ backtestTask.estimate === 'dirty' ? '；刚修改过设置或引擎变更将自动转全量' : '' }}）· 本页停留时每 30 秒自动刷新</template>
                 </p>
               </div>
               <p v-else-if="backtestTask.last_started_at && backtestTask.last_finished_at"
@@ -4387,6 +4466,36 @@ watch(
                 style="margin: 6px 0 0; color: #1a7f37">{{ runBacktestMsg }}</p>
               <p v-if="runBacktestError" class="note" data-run-backtest-error
                 style="margin: 6px 0 0; color: #c9313d">{{ runBacktestError }}</p>
+              <div class="settings-row" data-run-method-row
+                style="margin-top: 14px; padding-top: 14px; border-top: 1px solid #e0e0e0">
+                <label class="settings-label"><b>运行单个策略全量回测</b>
+                  <span class="settings-hint">只重算选定定投方式的全市场 8 档止盈 × 3 费率并替换该策略结果（约为全市场全量耗时的 1/6，其余策略不受影响；不写指纹表——当晚日更仍会按引擎版本全量兜底）。新策略上线后可不等日更立即出数。</span>
+                </label>
+                <div class="settings-input"
+                  style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap">
+                  <div class="src-seg" data-method-target-seg
+                    title="选择要单独全量重算的定投方式">
+                    <button v-for="o in DCA_MODE_OPTIONS" :key="o.key"
+                      class="src-seg-btn" :data-method-target="o.key"
+                      :class="{ active: methodTarget === o.key }"
+                      :title="`${DCA_MODE_HELP[o.key].title}：${DCA_MODE_HELP[o.key].detail}`"
+                      @click="methodTarget = o.key">{{ o.label }}</button>
+                  </div>
+                  <button class="btn" data-run-method
+                    :disabled="methodBusy || backtestTask.running || methodTask.task_id == null"
+                    @click="methodConfirmShow = true">运行该策略…</button>
+                </div>
+              </div>
+              <p v-if="methodBusy" class="note" data-run-method-running
+                style="margin: 8px 0 0; color: #0f62fe">单策略回测{{ methodTask.phase === 'queued' ? '排队中' : '运行中' }}<span v-if="methodTask.last_started_at && methodTask.phase !== 'queued'">（{{ fmtDateTime(methodTask.last_started_at) }} 起<template v-if="methodTask.progress_total">，已完成 {{ methodTask.progress_done || 0 }} / {{ methodTask.progress_total }} 只</template>）</span>——完成后定投回测页该策略数据自动更新</p>
+              <p v-else-if="methodTask.last_started_at && methodTask.last_finished_at"
+                class="note" data-run-method-last style="margin: 8px 0 0">
+                上次单策略回测（{{ METHOD_LABELS[methodTask.method] || methodTask.method || '—' }}）：{{ fmtDateTime(methodTask.last_started_at) }} ~ {{ fmtDateTime(methodTask.last_finished_at) }}<span v-if="methodTask.last_aborted">（已中止）</span>
+              </p>
+              <p v-if="methodMsg" class="note" data-run-method-triggered
+                style="margin: 6px 0 0; color: #1a7f37">{{ methodMsg }}</p>
+              <p v-if="methodError" class="note" data-run-method-error
+                style="margin: 6px 0 0; color: #c9313d">{{ methodError }}</p>
             </div>
             <!-- 确认对话框：运行时间提示按脏检测增量/全量动态渲染 -->
             <div v-if="runConfirmShow" class="confirm-mask" data-run-confirm
@@ -4395,7 +4504,7 @@ watch(
                 <b>确认立即运行全市场定投回测？</b>
                 <p class="note" data-run-confirm-time style="margin: 8px 0 0">
                   <template v-if="backtestTask.estimate === 'dirty'">脏检测增量回测：仅重算有变化的基金，通常约 10 分钟；若刚修改过运作期限设置或引擎有升级，将自动转为全量（约 6~10 小时）。</template>
-                  <template v-else>本次为<b>全量回测</b>：全市场基金 × 五种定投方式 × 8 档止盈，预计约 <b>6~10 小时</b>。</template>
+                  <template v-else>本次为<b>全量回测</b>：全市场基金 × 六种定投方式 × 8 档止盈，预计约 <b>6~10 小时</b>。</template>
                   后台运行，期间可关闭页面；已有回测在排队/运行时会拒绝重复触发。
                 </p>
                 <div class="confirm-actions">
@@ -4403,6 +4512,22 @@ watch(
                     @click="runConfirmShow = false">取消</button>
                   <button class="btn" data-run-confirm-ok :disabled="runStarting"
                     @click="confirmRunBacktest">{{ runStarting ? '触发中…' : '立即运行' }}</button>
+                </div>
+              </div>
+            </div>
+            <!-- 确认对话框：单策略全量（耗时 ≈ 全量 1/6，仅替换该策略） -->
+            <div v-if="methodConfirmShow" class="confirm-mask" data-method-confirm
+              @click.self="methodConfirmShow = false">
+              <div class="confirm-card">
+                <b>确认运行「{{ methodTargetLabel }}」单策略全量回测？</b>
+                <p class="note" data-method-confirm-time style="margin: 8px 0 0">
+                  全市场基金 × 该策略 × 8 档止盈 × 3 费率，预计约 <b>10 分钟~2 小时</b>（视机器负载，约为全市场全量耗时的 1/6）。仅替换「{{ methodTargetLabel }}」的结果行，其余策略不受影响；后台运行，期间可关闭页面；日更回测运行中时无法启动。
+                </p>
+                <div class="confirm-actions">
+                  <button class="btn" data-method-confirm-cancel
+                    @click="methodConfirmShow = false">取消</button>
+                  <button class="btn" data-method-confirm-ok :disabled="methodStarting"
+                    @click="confirmRunMethod">{{ methodStarting ? '触发中…' : '立即运行' }}</button>
                 </div>
               </div>
             </div>

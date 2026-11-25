@@ -89,11 +89,13 @@ def _round_restart_nav():
 
 class TestSimulateDdLadder:
     def test_methods_pin_values(self):
-        """定投方式口径锚：五档（四轮 dd_ladder、六轮 dd_ladder_deep、
-        七轮 profit_dd_ladder 浮盈阶梯）。"""
+        """定投方式口径锚：六档（四轮 dd_ladder、六轮 dd_ladder_deep、
+        七轮 profit_dd_ladder 浮盈阶梯、八轮 pl_ladder 盈亏阶梯，见
+        test_fund_dca_pl_ladder.py）。"""
         from app.dca_backtest import DCA_METHODS
         assert DCA_METHODS == ("amount", "share", "dd_ladder",
-                               "dd_ladder_deep", "profit_dd_ladder")
+                               "dd_ladder_deep", "profit_dd_ladder",
+                               "pl_ladder")
 
     def test_ladder_constant_pinned(self):
         """档位契约：-10% → 1.5×、-20% → 2×（防悄悄改坏）。"""
@@ -266,11 +268,13 @@ class TestSimulateProfitDdLadder:
 
     def test_profit_constants_pinned(self):
         """档位契约：浮盈 (10% → 0.5×, 20% → 0.25×) 与 PROFIT_LADDERS 映射
-        （防悄悄改坏；方向是 ≥ 取最高浮盈档，与回撤 ≤ 取最深档方向相反）。"""
+        （防悄悄改坏；方向是 ≥ 取最高浮盈档，与回撤 ≤ 取最深档方向相反）。
+        八轮 pl_ladder 复用该分派、档位不同（见 test_fund_dca_pl_ladder）。"""
         from app.dca_backtest import PROFIT_LADDER, PROFIT_LADDERS
         assert PROFIT_LADDER == ((0.10, 0.5), (0.20, 0.25))
-        assert PROFIT_LADDERS == {"profit_dd_ladder":
-                                  ((0.10, 0.5), (0.20, 0.25))}
+        assert PROFIT_LADDERS["profit_dd_ladder"] == \
+            ((0.10, 0.5), (0.20, 0.25))
+        assert PROFIT_LADDERS["pl_ladder"] == ((0.10, 0.5), (0.20, 0.0))
 
     def test_profit_flat_nav_equals_amount(self):
         """恒定净值：浮盈恒 0 未触发浮盈档、回撤恒 0 → profit_dd_ladder

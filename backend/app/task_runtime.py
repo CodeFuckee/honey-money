@@ -267,3 +267,16 @@ class PgTaskControl:
     def delete(self, task_id: int) -> None:
         with self._connect(self._dsn) as conn:
             self._runtime.delete(conn, task_id)
+
+
+def write_progress(dsn: str, task_id: int, done: int, total: int) -> None:
+    """子进程友好的进度落库（2026-11-25 十轮）：回测引擎在 spawn 池内回调
+    基金级进度——闭包不可 pickle，模块级函数 + 基元参数（调度器经
+    functools.partial 绑定 dsn/task_id 下传）才能跨进程；与
+    PgTaskControl.set_progress 同一 UPDATE，自带连接，失败仅打印绝不影响
+    计算。"""
+    try:
+        with psycopg.connect(dsn, connect_timeout=10) as conn:
+            TaskRuntime(dsn).set_progress(conn, task_id, done, total)
+    except Exception as exc:      # noqa: BLE001 —— 进度失败绝不影响计算
+        print(f"[backtest] 进度落库失败（忽略）: {exc}")
