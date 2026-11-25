@@ -371,3 +371,24 @@ class TestMethodQueuedAndError:
         expect(page.locator("[data-run-method-last-error]")
               ).to_contain_text("上次单策略回测失败：KeyError: 'backtest_method'",
                                 timeout=10_000)
+
+
+class TestTriggerStartsPolling:
+    def test_method_trigger_starts_settings_polling(self, servers, page):
+        """E2E-485：停留在页面点「运行」成功后，30 秒设置轮询立即启动
+        （2026-11-25 十二轮——原缺口：定时器只在进入页面时按运行态开启，
+        点完按钮后进度快照永不刷新，基金级进度永远不出现）。"""
+        import copy
+        calls = _install_mock(page)
+        _, frontend_port = servers
+        page.goto(f"http://127.0.0.1:{frontend_port}/settings")
+        expect(page.get_by_role("heading", name="设置")).to_be_visible()
+        gets_before = len(calls["get"])
+        page.locator("[data-run-method]").click()
+        page.locator("[data-method-confirm-ok]").click()
+        expect(page.locator("[data-run-method-triggered]")
+              ).to_contain_text("已触发", timeout=10_000)
+        # 30 秒自动刷新：≥1 次新 GET /api/settings（5s 余量吸收定时器相位）
+        page.wait_for_timeout(36_000)
+        assert len(calls["get"]) >= gets_before + 1, \
+            (gets_before, len(calls["get"]))

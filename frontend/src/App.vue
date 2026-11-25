@@ -1767,6 +1767,10 @@ async function confirmRunBacktest() {
     }
     runConfirmShow.value = false
     backtestTask.value.running = true
+    // 触发成功即启动轮询（2026-11-25 十二轮）：原先只有进入页面时
+    // loadSettings 才会按运行态开定时器——停留在页面点按钮后 30 秒自动
+    // 刷新与逐秒走表都不启动，进度永远不出现（须手动刷新页面）
+    startProgressTimer()
     runBacktestMsg.value = '已触发：全市场回测运行中（后台约数分钟~10 小时），完成后定投回测页数据自动更新'
   } catch (e) {
     runBacktestError.value = String(e)
@@ -1827,6 +1831,9 @@ async function confirmRunMethod() {
     methodConfirmShow.value = false
     methodTask.value.running = true
     methodTask.value.phase = 'queued'
+    // 触发成功即启动轮询（2026-11-25 十二轮，同日更按钮缺口）：停留页面
+    // 点按钮后 30 秒 loadSettings 拉新快照，基金级进度才会出现
+    startProgressTimer()
     methodMsg.value = `已触发：「${methodTargetLabel.value}」单策略全量运行中（约为全市场全量耗时的 1/6），仅替换该策略结果，其余策略不受影响`
   } catch (e) {
     methodError.value = String(e)
