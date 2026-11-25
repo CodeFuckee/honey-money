@@ -1801,6 +1801,29 @@ const methodTargetLabel = computed(() =>
 const methodBusy = computed(() =>
   methodTask.value.phase === 'queued' || methodTask.value.phase === 'running'
   || !!methodTask.value.running)
+// 单策略进度条（2026-11-25 十三轮）：真实分母优先（已完成/需回测基金数），
+// 指纹比对阶段尚无基金级信号时回落已运行时长/预估耗时（单策略 ≈ 全量 1/6
+// ≈ 80 分钟），与全市场回测进度条同款 UX
+const _METHOD_EXPECTED_MS = 80 * 60e3
+const methodElapsedMs = computed(() => {
+  const started = methodTask.value.last_started_at
+  if (!started) return null
+  return Math.max(0, nowTick.value - Date.parse(started) - serverSkew.value)
+})
+const methodElapsedText = computed(() => fmtDuration(methodElapsedMs.value))
+const methodProgressPercent = computed(() => {
+  if (!methodBusy.value) return null
+  const t = methodTask.value.progress_total
+  if (t) {
+    return Math.min(100, Math.round((methodTask.value.progress_done || 0)
+      / t * 1000) / 10)
+  }
+  const e = methodElapsedMs.value
+  if (e === null) return null
+  return Math.min(100, Math.round(e / _METHOD_EXPECTED_MS * 1000) / 10)
+})
+const methodProgressReal = computed(() =>
+  methodBusy.value && !!methodTask.value.progress_total)
 
 async function confirmRunMethod() {
   methodError.value = ''
@@ -4495,7 +4518,18 @@ watch(
                 </div>
               </div>
               <p v-if="methodBusy" class="note" data-run-method-running
-                style="margin: 8px 0 0; color: #0f62fe">单策略回测{{ methodTask.phase === 'queued' ? '排队中' : '运行中' }}<span v-if="methodTask.phase === 'queued' && methodTask.blocking">（等待「{{ methodTask.blocking }}」完成，完成后自动开始）</span><span v-if="methodTask.last_started_at && methodTask.phase !== 'queued'">（{{ fmtDateTime(methodTask.last_started_at) }} 起<template v-if="methodTask.progress_total">，已完成 {{ methodTask.progress_done || 0 }} / {{ methodTask.progress_total }} 只</template>）</span>——完成后定投回测页该策略数据自动更新</p>
+                style="margin: 8px 0 0; color: #0f62fe">单策略回测{{ methodTask.phase === 'queued' ? '排队中' : '运行中' }}<span v-if="methodTask.phase === 'queued' && methodTask.blocking">（等待「{{ methodTask.blocking }}」完成，完成后自动开始）</span><span v-if="methodTask.last_started_at && methodTask.phase !== 'queued'">（{{ fmtDateTime(methodTask.last_started_at) }} 起）</span>——完成后定投回测页该策略数据自动更新</p>
+              <div v-if="methodBusy && methodProgressPercent !== null"
+                data-run-method-progress style="margin: 8px 0 0">
+                <div class="progress-track">
+                  <div class="progress-fill" data-run-method-progress-fill
+                    :style="{ width: methodProgressPercent + '%' }"></div>
+                </div>
+                <p class="note" data-run-method-progress-text style="margin: 4px 0 0">
+                  <template v-if="methodProgressReal">已完成 {{ methodTask.progress_done || 0 }} / {{ methodTask.progress_total }} 只基金（{{ methodProgressPercent }}%· 基金级实际进度）· 已运行 {{ methodElapsedText }} · 本页停留时每 30 秒自动刷新</template>
+                  <template v-else>已运行 {{ methodElapsedText }} / 预计约 80 分钟（指纹比对阶段尚无基金级进度，按预估耗时推算）· 本页停留时每 30 秒自动刷新</template>
+                </p>
+              </div>
               <p v-else-if="methodTask.last_started_at && methodTask.last_finished_at"
                 class="note" data-run-method-last style="margin: 8px 0 0">
                 上次单策略回测（{{ METHOD_LABELS[methodTask.method] || methodTask.method || '—' }}）：{{ fmtDateTime(methodTask.last_started_at) }} ~ {{ fmtDateTime(methodTask.last_finished_at) }}<span v-if="methodTask.last_aborted">（已中止）</span>

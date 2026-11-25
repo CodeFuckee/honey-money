@@ -392,3 +392,48 @@ class TestTriggerStartsPolling:
         page.wait_for_timeout(36_000)
         assert len(calls["get"]) >= gets_before + 1, \
             (gets_before, len(calls["get"]))
+
+
+class TestMethodProgressBar:
+    def test_method_running_progress_bar(self, servers, page):
+        """E2E-486：单策略运行中显示进度条（真实分母优先）——fill 宽度按
+        已完成/总数比例、文案「已完成 N / M 只基金」（2026-11-25 十三轮：
+        此前只有文字计数没有条）。"""
+        import copy
+        import datetime as dtm
+        task = copy.deepcopy(MOCK_SETTINGS)
+        now = dtm.datetime.now(dtm.timezone.utc)
+        task["method_task"].update({
+            "running": True, "phase": "running",
+            "last_started_at": (now - dtm.timedelta(minutes=10)).isoformat(),
+            "progress_done": 1000, "progress_total": 26831,
+            "server_now": now.isoformat()})
+        _install_mock(page, task=task)
+        _, frontend_port = servers
+        page.goto(f"http://127.0.0.1:{frontend_port}/settings")
+        expect(page.locator("[data-run-method-progress]")).to_be_visible()
+        expect(page.locator("[data-run-method-progress-text]")
+              ).to_contain_text("已完成 1000 / 26831 只基金", timeout=10_000)
+        expect(page.locator("[data-run-method-progress-text]")
+              ).to_contain_text("3.7%")            # round(1000/26831,1)=3.7
+        width = page.locator("[data-run-method-progress-fill]").evaluate(
+            "el => parseFloat(el.style.width)")
+        assert 3.0 <= width <= 4.5, width
+
+    def test_method_running_fingerprint_fallback_bar(self, servers, page):
+        """E2E-487：指纹比对阶段（无 progress 字段）→ 回落预估条（文案
+        「指纹比对阶段尚无基金级进度」）。"""
+        import copy
+        import datetime as dtm
+        task = copy.deepcopy(MOCK_SETTINGS)
+        now = dtm.datetime.now(dtm.timezone.utc)
+        task["method_task"].update({
+            "running": True, "phase": "running",
+            "last_started_at": (now - dtm.timedelta(minutes=2)).isoformat(),
+            "server_now": now.isoformat()})
+        _install_mock(page, task=task)
+        _, frontend_port = servers
+        page.goto(f"http://127.0.0.1:{frontend_port}/settings")
+        expect(page.locator("[data-run-method-progress]")).to_be_visible()
+        expect(page.locator("[data-run-method-progress-text]")
+              ).to_contain_text("指纹比对阶段尚无基金级进度", timeout=10_000)
