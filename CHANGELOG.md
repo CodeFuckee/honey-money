@@ -6,6 +6,13 @@
 ## [Unreleased]
 
 ### Fixed
+- **单策略回测排队态可见性 + 静默失败修复（2026-11-25 十一轮）**：用户在部署完成前
+  点击运行，method_task 经 task_runtime 跨进程入队后被**旧代码 NAS worker** 派发
+  即崩（`KeyError: 'backtest_method'`，12ms 回 idle、无 crawl_run 行），前端只显示
+  「排队中」且结束后静默清空。修复：①`GET /api/settings` method_task 快照增
+  `blocking`（串行队列前方运行中任务名，排队提示）与 `last_error`（上次运行错误
+  摘要）两字段；②前端排队行显示「排队中（等待「X」完成，完成后自动开始）」、
+  空闲态显示红色失败原因与重试指引。+3 单测 +1 E2E（E2E-484）。
 - **对比快照三费用块错位——rebuild 恒取 gross 块写满三口径标签（2026-11-25 首跑真机暴露）**：
   首版 `_tp_compare_row` 按旧的单费用查询形状切 `r[2..14]`，而单遍聚合一行
   实含 43 列（tp + gross×14 + disc×14 + nom×14）——disc/nom 的快照行全被
