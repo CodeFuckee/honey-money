@@ -628,9 +628,10 @@ class TestMethodUniverseFilter:
         assert seen["prog"][0] == (0, 3)
         assert stats["fund_count"] == 3
 
-    def test_fp_missing_falls_back_to_all_codes(self, monkeypatch):
-        """fp 表读取失败（旧库/空表）→ 回落全 codes 分母（worker 层规则
-        兜底，不因进度口径丢基金）。"""
+    def test_fp_empty_falls_back_to_direct_sql_universe(self, monkeypatch):
+        """fp 表空（首跑/全量被中断未落指纹）→ 直接查库判定宇宙（权益
+        白名单 + 全史窗口 ≥ 下限，与 worker 规则同语义）：分母只含宇宙
+        基金（十五轮反馈：26831 全市场分母不符合「需要回测的基金数」）。"""
         from app import dca_backtest as mod, dca_store
 
         nav = _synthetic_nav()
@@ -645,11 +646,74 @@ class TestMethodUniverseFilter:
             lambda conn, codes: nav[nav["code"].isin(list(codes))]
             .reset_index(drop=True))
         monkeypatch.setattr(mod.psycopg, "connect", lambda *a, **k: _Ctx())
+        monkeypatch.setattr(dca_store, "load_fingerprints",
+                            lambda conn: ({}, "vTEST"))   # fp 表空
+        # 直接查库宇宙：假游标 fetchall 回 000001（000002 由 SQL 语义排除）
+        seen_sql = []
 
-        def boom(conn):
-            raise RuntimeError("fp 表缺失")
+        class _SqlCur(_NullCur):
+            def execute(self, q, p=None):
+                seen_sql.append(q)
+            def fetchall(self):
+                return [("000001",)]
 
-        monkeypatch.setattr(dca_store, "load_fingerprints", boom)
+        class _SqlCtx(_Ctx):
+            def cursor(self):
+                return _SqlCur()
+
+        monkeypatch.setattr(mod.psycopg, "connect",
+                            lambda *a, **k: _SqlCtx())
+        monkeypatch.setattr(mod, "_chunk_size", lambda: 250)
+        monkeypatch.setattr(mod, "_worker_count", lambda: 1)
+        seen = []
+        mod.run_full_backtest_tp_method(
+            "postgresql://fake", "pl_ladder", log=lambda *_: None,
+            progress=lambda d, t: seen.append((d, t)))
+        assert seen[0] == (0, 1) and seen[-1] == (1, 1)
+        assert any("GROUP BY n.code" in q for q in seen_sql), seen_sql
+
+    def test_direct_sql_failure_falls_back_to_all_codes(self, monkeypatch):
+        """直接查库也失败（库异常）→ 回落全 codes（不因口径丢基金，
+        worker 层规则兜底行级排除）。"""
+        from app import dca_backtest as mod, dca_store
+
+        nav = _synthetic_nav()
+        basic, scale_map = _basic_scale()
+        monkeypatch.setattr(mod, "_load_codes",
+                            lambda conn: ["000001", "000002"])
+        monkeypatch.setattr(mod, "_load_basic",
+                            lambda conn, codes: basic.loc[list(codes)])
+        monkeypatch.setattr(mod, "_load_scale", lambda conn: scale_map)
+        monkeypatch.setattr(
+            mod, "_load_nav",
+            lambda conn, codes: nav[nav["code"].isin(list(codes))]
+            .reset_index(drop=True))
+
+        class _BoomCur:
+            def __enter__(self):
+                return self
+            def __exit__(self, *e):
+                return False
+            def execute(self, q, p=None):
+                if "GROUP BY n.code" in q:      # 仅宇宙直查失败
+                    raise RuntimeError("db down")
+
+            def fetchall(self):
+                return []
+            def fetchone(self):
+                return None
+
+        class _BoomCtx:
+            def __enter__(self):
+                return self
+            def __exit__(self, *e):
+                return False
+            def cursor(self):
+                return _BoomCur()
+
+        monkeypatch.setattr(mod.psycopg, "connect", lambda *a, **k: _BoomCtx())
+        monkeypatch.setattr(dca_store, "load_fingerprints",
+                            lambda conn: ({}, "vTEST"))
         monkeypatch.setattr(mod, "_chunk_size", lambda: 250)
         monkeypatch.setattr(mod, "_worker_count", lambda: 1)
         seen = []

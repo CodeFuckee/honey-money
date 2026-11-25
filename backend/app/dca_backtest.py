@@ -805,7 +805,7 @@ def run_full_backtest_tp_method(dsn: str, method: str, *, log=print,
             from . import dca_store
             prev_fps, _prev_engine = dca_store.load_fingerprints(conn)
         except Exception as exc:
-            log(f"  指纹表读取失败，宇宙过滤回落全量分母：{exc}")
+            log(f"  指纹表读取失败：{exc}")
         if prev_fps:
             universe_codes = {
                 c for c, fp in prev_fps.items()
@@ -817,6 +817,27 @@ def run_full_backtest_tp_method(dsn: str, method: str, *, log=print,
                      if c in universe_codes or c not in prev_fps]
             log(f"宇宙过滤：{len(codes):,} 只（按上轮指纹剔除 "
                 f"{len(prev_fps) - len(universe_codes):,} 只已排除）")
+        else:
+            # fp 表空（首跑/近次全量被中断未落指纹，2026-11-25 实测）→
+            # 直接查库判定宇宙（权益白名单+全史窗口 ≥ 下限，与 worker 规则
+            # 同语义；索引扫描约数分钟，仅过渡期发生——日更落指纹后走 fp
+            # 快路径）；查库也失败 → 回落全 codes（行级排除兜底）
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT n.code FROM fund_nav n "
+                        "JOIN fund_basic b USING (code) "
+                        "WHERE b.fund_type = ANY(%s) GROUP BY n.code HAVING "
+                        "max(n.nav_date) - min(n.nav_date) >= "
+                        "make_interval(days => %s)",
+                        (list(BACKTEST_UNIVERSE_TYPES), min_span_days))
+                    universe = {r[0] for r in cur.fetchall()}
+                codes_all = len(codes)
+                codes = [c for c in codes if c in universe]
+                log(f"宇宙过滤（直查）：{len(codes):,} 只（fp 表空，全市场 "
+                    f"{codes_all:,} 只中剔除 {codes_all - len(codes):,} 只）")
+            except Exception as exc:
+                log(f"  宇宙直查失败，回落全量分母：{exc}")
     log(f"单策略全量：{method} / 净值截至 {end_ts} / 运作期限下限 "
         f"{min_span_days} 天")
     chunks = _chunk_codes(codes, _chunk_size())
