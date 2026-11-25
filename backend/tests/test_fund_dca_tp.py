@@ -407,6 +407,86 @@ class TestTpStore:
         # run_backtest_tp 的 append 处锚定，另有 tp=0.20≡旧引擎测试守护）
 
 
+# ===== 对比快照：rebuild_tp_compare 全组合重建（2026-11-25） =====
+
+class AggCursor(FakeCursor):
+    """fetchall 返回固定聚合行（rebuild_tp_compare 每个 (method, equity)
+    查询共用一份桩行）。"""
+
+    def __init__(self, conn, agg_rows):
+        super().__init__(conn)
+        self._agg_rows = agg_rows
+
+    def fetchall(self):
+        return self._agg_rows
+
+
+def _agg_row(tp=0.20):
+    """单 (method, equity) 聚合查询的一行（15 元组，列序同
+    _TP_COMPARE_AGG_SQL：count / w10 四分位+均值 / 正收益占比 / 成功率 /
+    平均轮次 / 全史中位+均值+正收益+成功 / 平均间隔），带尾数防未圆整混过。"""
+    return (tp, 15029, 0.02044012345, 0.05949412345, 0.05963912345,
+            0.05024312345, -0.00448112345, 0.63843212345, 0.74223212345,
+            1.931612345, 0.12345612345, 0.23456712345, 0.34567812345,
+            0.45678912345, 703.14159265)
+
+
+class TestTpCompareSnapshot:
+    def test_rebuild_writes_full_grid_with_filter_anchor(self):
+        from app.dca_backtest import DCA_METHODS
+        from app.dca_store import rebuild_tp_compare
+        n_combo = len(DCA_METHODS)      # × 2 池 × 3 费用 × 8 档（方式清单随引擎扩展）
+        conn = FakeConn()
+        conn.cursor_obj = AggCursor(conn, [_agg_row(tp) for tp in
+                                           (0.05, 0.10, 0.15, 0.20, 0.25,
+                                            0.30, 0.35, 0.40)])
+        n = rebuild_tp_compare(conn, equity_types=("股票型", "商品"))
+        assert n == n_combo * 2 * 3 * 8
+        sqls = [sql for sql, _ in conn.cursor_obj.executed]
+        assert any("CREATE TABLE IF NOT EXISTS fund_dca_tp_compare" in s
+                   for s in sqls)
+        aggs = [sql for sql in sqls if "GROUP BY tp" in sql]
+        assert len(aggs) == n_combo * 2     # 每 (方式, 池) 单遍三费用口径
+        # 口径锚点（2026-11-25 真机证伪无过滤版）：年化 NULL 行其轮次/间隔
+        # 列仍非空，每项聚合必须 FILTER (WHERE w10_xirr_* IS NOT NULL)
+        assert all("FILTER (WHERE w10_xirr_nom IS NOT NULL)" in s
+                   for s in aggs)
+        assert all("FROM fund_dca_tp_result" in s for s in aggs)
+        assert "DELETE FROM fund_dca_tp_compare" in sqls
+        # equity 两池：白名单参数（fund_type = ANY）vs 全市场无池参数
+        eq_params = [p for _, p in conn.cursor_obj.executed
+                     if p and len(p) == 2]
+        all_params = [p for _, p in conn.cursor_obj.executed
+                      if p and len(p) == 1]
+        assert len(eq_params) == n_combo and len(all_params) == n_combo
+        assert ("share", ["股票型", "商品"]) in eq_params
+        assert ("amount",) in all_params
+        # 整表替换：一次 executemany，值按现算同精度圆整（分位/均值/占比
+        # 4 位、平均轮次 2 位、平均间隔 1 位——快照与现算输出逐值一致）
+        assert len(conn.cursor_obj.batch) == 1
+        ins_sql, rows = conn.cursor_obj.batch[0]
+        assert "INSERT INTO fund_dca_tp_compare" in ins_sql
+        assert len(rows) == n_combo * 2 * 3 * 8
+        want = ("amount", True, "gross", 0.20, 15029,
+                round(0.02044012345, 4), round(0.05949412345, 4),
+                round(0.05963912345, 4), round(0.05024312345, 4),
+                round(-0.00448112345, 4), round(0.63843212345, 4),
+                round(0.74223212345, 4), round(1.931612345, 2),
+                round(0.12345612345, 4), round(0.23456712345, 4),
+                round(0.34567812345, 4), round(0.45678912345, 4),
+                round(703.14159265, 1))
+        assert want in rows
+
+    def test_rebuild_empty_table_still_replaces(self):
+        from app.dca_store import rebuild_tp_compare
+        conn = FakeConn()
+        conn.cursor_obj = AggCursor(conn, [])
+        assert rebuild_tp_compare(conn, equity_types=("股票型",)) == 0
+        sqls = [sql for sql, _ in conn.cursor_obj.executed]
+        assert "DELETE FROM fund_dca_tp_compare" in sqls
+        assert conn.cursor_obj.batch == []      # 空结果不 executemany
+
+
 # ===== API：/api/funds/dca/tp 三端点契约 =====
 
 def _patch_connect(monkeypatch, module, conn):
@@ -475,6 +555,72 @@ class TestDcaTpRoutes:
         cmp_sql = [s for s in sqls if "GROUP BY tp" in s]
         assert cmp_sql and "FROM fund_dca_tp_result" in cmp_sql[0]
         assert "w10_xirr_nom" in cmp_sql[0] and "full_xirr_nom" in cmp_sql[0]
+
+    def _snap_row(self, tp=0.20):
+        """快照表一行（16 元组：14 聚合列已圆整 + computed_at），列序同
+        _TP_COMPARE_SNAP_SQL。"""
+        import datetime as dtm
+        return (tp, 15029, 0.0204, 0.0595, 0.0596, 0.0502, -0.0045, 0.6384,
+                0.7422, 1.93, 0.1235, 0.2346, 0.3457, 0.4568, 703.1,
+                dtm.datetime(2026, 11, 25, 12, 0, 0,
+                             tzinfo=dtm.timezone.utc))
+
+    def test_compare_snapshot_hit_skips_live_sql(self, client, monkeypatch):
+        """快照满八档：只查 fund_dca_tp_compare 一条 SQL（不落百万行现算），
+        source=snapshot、computed_at 透传、行值原样返回。"""
+        import app.dca_api as dca_mod
+        rows = [self._snap_row(tp) for tp in (0.05, 0.10, 0.15, 0.20, 0.25,
+                                              0.30, 0.35, 0.40)]
+        conn = FakeConnOne((None,), rows=rows)
+        _patch_connect(monkeypatch, dca_mod, conn)
+        resp = client.get("/api/funds/dca/tp/compare",
+                          params={"fee": "nom", "method": "share"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "up" and body["source"] == "snapshot"
+        assert body["computed_at"] == "2026-11-25T12:00:00+00:00"
+        assert body["method"] == "share"
+        r = body["rows"][3]             # tp=0.20
+        assert r["tp"] == 0.20 and r["count"] == 15029
+        assert r["w10_median"] == 0.0595 and r["w10_avg_rounds"] == 1.93
+        assert r["avg_gap_days"] == 703.1 and r["full_median"] == 0.1235
+        assert len(conn.executed) == 1 and "GROUP BY tp" not in conn.executed[0]
+        assert "fund_dca_tp_compare" in conn.executed[0]
+
+    def test_compare_snapshot_incomplete_falls_back_live(self,
+                                                         client, monkeypatch):
+        """快照该组合不满八档（部署早期/重建中断）：回落现算聚合仍 up。"""
+        import app.dca_api as dca_mod
+        conn = FakeConnOne((None,), rows=[self._snap_row()])
+        _patch_connect(monkeypatch, dca_mod, conn)
+        resp = client.get("/api/funds/dca/tp/compare", params={"fee": "nom"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "up" and body["source"] == "live"
+        assert body["computed_at"] is None
+        cmp_sql = [s for s in conn.executed if "GROUP BY tp" in s]
+        assert cmp_sql and "fund_dca_tp_result" in cmp_sql[0]
+
+    def test_compare_snapshot_missing_table_falls_back(self,
+                                                       client, monkeypatch):
+        """快照缺表（建表前）：现算路径照常工作，绝不 500。"""
+        import psycopg
+        import app.dca_api as dca_mod
+
+        class SnapFailConn(FakeConnOne):
+            def execute(self, query, params=None):
+                if "fund_dca_tp_compare" in query:
+                    raise psycopg.errors.UndefinedTable(
+                        "relation does not exist")
+                self.executed.append(query)
+
+        conn = SnapFailConn((None,), rows=[self._snap_row()])
+        _patch_connect(monkeypatch, dca_mod, conn)
+        resp = client.get("/api/funds/dca/tp/compare", params={"fee": "nom"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "up" and body["source"] == "live"
+        assert body["rows"][0]["count"] == 15029
 
     def test_compare_equity_pool_includes_commodity(self):
         """对比池口径（2026-11-15 用户确认）：权益 8 类 + QDII-商品 + 商品。"""

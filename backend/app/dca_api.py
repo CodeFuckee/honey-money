@@ -802,6 +802,17 @@ GROUP BY tp ORDER BY tp
 # 排行切换端点仍用 EQUITY_TYPES（与既有权益开关同口径）
 TP_COMPARE_EQUITY_TYPES = EQUITY_TYPES + ("QDII-商品", "商品")
 
+# 对比聚合快照（fund_dca_tp_compare，日更导入后 dca_store.rebuild_tp_compare
+# 重建）：值已按现算同精度圆整，读出即返回；computed_at 随行取 max
+_TP_COMPARE_SNAP_SQL = """
+SELECT tp, sample_count, w10_p25, w10_median, w10_p75, w10_p90, w10_mean,
+       w10_positive_share, w10_success_share, w10_avg_rounds,
+       full_median, full_mean, full_positive_share, full_success_share,
+       avg_gap_days, computed_at
+FROM fund_dca_tp_compare
+WHERE method = %s AND equity = %s AND fee = %s ORDER BY tp
+"""
+
 
 def _parse_tp(raw) -> float:
     """tp 查询参数 → 白名单阈值；乱值/越界回落 20%（与 sort/fee 同约定）。"""
@@ -941,6 +952,12 @@ def fetch_dca_tp_compare(dsn: str, *, fee: str = "nom", equity: bool = True,
     （轮次>0 占比）/ 平均轮次 / 全史中位与均值 / 平均止盈间隔。
     fee 切换口径（gross/disc/nom），equity=False 切全市场对照，
     method 切定投方式（DCA_METHODS）。
+
+    优先读 fund_dca_tp_compare 快照（日更导入后 dca_store.rebuild_tp_compare
+    顺带重建，240 行小表毫秒级；生产百万行现算实测 ~2.2s）；快照缺表或该
+    组合不满八档回落现算聚合（口径同前）。响应新增 source（snapshot/live）
+    与 computed_at（快照重建时间 ISO 串，live 为 None）键，前端不读取，
+    形状向后兼容。降级约定同 /api/funds/dca。
     """
     fee_val = fee if fee in _FEE_XIRR_COL else "nom"
     method_val = method if method in DCA_METHODS else "amount"
@@ -949,7 +966,35 @@ def fetch_dca_tp_compare(dsn: str, *, fee: str = "nom", equity: bool = True,
             "wr": f"w10_rounds{suffix}", "fr": f"full_rounds{suffix}",
             "gap": f"gap_avg_days{suffix}"}
 
+    def _snap_rows_to_out(snap):
+        return [{"tp": r[0], "count": r[1],
+                 "w10_p25": r[2], "w10_median": r[3],
+                 "w10_p75": r[4], "w10_p90": r[5], "w10_mean": r[6],
+                 "w10_positive_share": r[7], "w10_success_share": r[8],
+                 "w10_avg_rounds": r[9],
+                 "full_median": r[10], "full_mean": r[11],
+                 "full_positive_share": r[12], "full_success_share": r[13],
+                 "avg_gap_days": r[14]} for r in snap]
+
     def run():
+        # 快照优先：缺表（部署早期）/库不可达一律回落现算，绝不 500
+        snap = None
+        try:
+            with psycopg.connect(dsn, connect_timeout=3) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(_TP_COMPARE_SNAP_SQL,
+                                (method_val, bool(equity), fee_val))
+                    snap = cur.fetchall()
+        except psycopg.Error:
+            snap = None
+        if snap is not None and len(snap) == len(TP_THRESHOLDS):
+            computed = max((r[15] for r in snap if r[15] is not None),
+                           default=None)
+            return {"status": "up", "fee": fee_val, "method": method_val,
+                    "equity": bool(equity), "source": "snapshot",
+                    "computed_at": computed.isoformat() if computed else None,
+                    "thresholds": [float(t) for t in TP_THRESHOLDS],
+                    "rows": _snap_rows_to_out(snap)}
         with psycopg.connect(dsn, connect_timeout=3) as conn:
             with conn.cursor() as cur:
                 params = [method_val]
@@ -983,11 +1028,12 @@ def fetch_dca_tp_compare(dsn: str, *, fee: str = "nom", equity: bool = True,
                 "avg_gap_days": round(r[14], 1) if r[14] is not None else None,
             })
         return {"status": "up", "fee": fee_val, "method": method_val,
-                "equity": bool(equity),
+                "equity": bool(equity), "source": "live", "computed_at": None,
                 "thresholds": [float(t) for t in TP_THRESHOLDS], "rows": out}
     return _safe(run, {"status": "down", "detail": "pg unreachable",
                        "method": method, "equity": bool(equity),
-                       "thresholds": [], "rows": []})
+                       "thresholds": [], "rows": [],
+                       "source": None, "computed_at": None})
 
 
 _TP_ROUNDS_SQL = """

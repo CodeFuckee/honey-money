@@ -20,6 +20,8 @@ from pathlib import Path
 
 import psycopg
 
+from .dca_backtest import DCA_METHODS   # 定投方式白名单（引擎单一事实源）
+
 DDL = """
 CREATE TABLE IF NOT EXISTS fund_dca_result (
   code            VARCHAR(10) PRIMARY KEY,
@@ -816,6 +818,116 @@ def merge_risk(conn, rows: list[tuple], codes: list[str]) -> int:
         if rows:
             cur.executemany(_RISK_INSERT, rows)
         cur.execute(_RISK_SCORE_BACKFILL)
+    return len(rows)
+
+
+# ===== 止盈点对比市场级聚合快照（2026-11-25） =====
+# /api/funds/dca/tp/compare 原先每请求现算聚合（fund_dca_tp_result 百万行级
+# percentile_cont 分位，生产实测 ~2.2s/次、前端切换定投方式感知 2~4s）——
+# 改为日更导入后顺带预计算落小表（method × equity × fee × tp = 5×2×3×8
+# = 240 行），API 优先读快照（毫秒级），快照缺表/缺行回落现算。
+# 口径锚点（2026-11-25 生产真机对跑逐值一致）：旧查询 WHERE {wx} IS NOT
+# NULL 把「年化非空」宇宙作用到全部聚合列——年化 NULL（窗口过短）的行其
+# 轮次/间隔列仍非空、不能混入统计（无过滤单遍版会被真机数据证伪：成功率
+# /平均轮次/平均间隔全部偏移），因此单遍版每个聚合都必须带
+# FILTER (WHERE {wx} IS NOT NULL)。
+
+_TP_COMPARE_DDL = """
+CREATE TABLE IF NOT EXISTS fund_dca_tp_compare (
+  method       VARCHAR(16) NOT NULL,
+  equity       BOOLEAN NOT NULL,
+  fee          VARCHAR(8) NOT NULL,
+  tp           DOUBLE PRECISION NOT NULL,
+  sample_count INTEGER,
+  w10_p25 DOUBLE PRECISION, w10_median DOUBLE PRECISION,
+  w10_p75 DOUBLE PRECISION, w10_p90 DOUBLE PRECISION, w10_mean DOUBLE PRECISION,
+  w10_positive_share DOUBLE PRECISION, w10_success_share DOUBLE PRECISION,
+  w10_avg_rounds DOUBLE PRECISION,
+  full_median DOUBLE PRECISION, full_mean DOUBLE PRECISION,
+  full_positive_share DOUBLE PRECISION, full_success_share DOUBLE PRECISION,
+  avg_gap_days DOUBLE PRECISION,
+  computed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (method, equity, fee, tp)
+);
+"""
+
+_FEE_COL_SUFFIX = {"gross": "", "disc": "_disc", "nom": "_nom"}
+
+# 单费用口径的 14 项聚合列块（{wx} 年化 / {fx} 全史年化 / {wr} 轮次 /
+# {fr} 全史轮次 / {gap} 平均间隔；后缀按 _FEE_COL_SUFFIX 替换）。列序与
+# _tp_compare_row 映射、API 快照行映射逐位对齐；FILTER 口径锚点见节注释
+_TP_AGG_BLOCK = """
+  count({wx}) FILTER (WHERE {wx} IS NOT NULL),
+  percentile_cont(0.25) WITHIN GROUP (ORDER BY {wx}) FILTER (WHERE {wx} IS NOT NULL),
+  percentile_cont(0.5)  WITHIN GROUP (ORDER BY {wx}) FILTER (WHERE {wx} IS NOT NULL),
+  percentile_cont(0.75) WITHIN GROUP (ORDER BY {wx}) FILTER (WHERE {wx} IS NOT NULL),
+  percentile_cont(0.9)  WITHIN GROUP (ORDER BY {wx}) FILTER (WHERE {wx} IS NOT NULL),
+  avg({wx}) FILTER (WHERE {wx} IS NOT NULL),
+  avg(({wx} > 0)::int) FILTER (WHERE {wx} IS NOT NULL),
+  avg(({wr} > 0)::int) FILTER (WHERE {wx} IS NOT NULL),
+  avg({wr}) FILTER (WHERE {wx} IS NOT NULL),
+  percentile_cont(0.5) WITHIN GROUP (ORDER BY {fx}) FILTER (WHERE {wx} IS NOT NULL),
+  avg({fx}) FILTER (WHERE {wx} IS NOT NULL),
+  avg(({fx} > 0)::int) FILTER (WHERE {wx} IS NOT NULL),
+  avg(({fr} > 0)::int) FILTER (WHERE {wx} IS NOT NULL),
+  avg({gap}) FILTER (WHERE {wx} IS NOT NULL)
+"""
+
+_TP_COMPARE_AGG_SQL = "SELECT tp,\n" + ",\n".join(
+    _TP_AGG_BLOCK.format(wx=f"w10_xirr{sfx}", fx=f"full_xirr{sfx}",
+                         wr=f"w10_rounds{sfx}", fr=f"full_rounds{sfx}",
+                         gap=f"gap_avg_days{sfx}")
+    for sfx in _FEE_COL_SUFFIX.values()) + """
+FROM fund_dca_tp_result
+WHERE alive AND method = %s{equity_clause}
+GROUP BY tp ORDER BY tp
+"""
+
+_TP_COMPARE_COLS = ["method", "equity", "fee", "tp", "sample_count",
+                    "w10_p25", "w10_median", "w10_p75", "w10_p90", "w10_mean",
+                    "w10_positive_share", "w10_success_share",
+                    "w10_avg_rounds", "full_median", "full_mean",
+                    "full_positive_share", "full_success_share",
+                    "avg_gap_days"]
+_TP_COMPARE_INSERT = f"""
+INSERT INTO fund_dca_tp_compare ({", ".join(_TP_COMPARE_COLS)})
+VALUES ({", ".join(["%s"] * len(_TP_COMPARE_COLS))})
+"""
+
+
+def _tp_compare_row(method: str, equity: bool, fee: str, r: tuple) -> tuple:
+    """聚合行 → 快照行（尾列按 API 现算同精度圆整：分位/均值/占比 4 位、
+    平均轮次 2 位、平均间隔 1 位——快照输出与现算输出逐值一致）。"""
+    def q(i, nd):
+        return round(r[i], nd) if r[i] is not None else None
+    return (method, equity, fee, r[0], r[1],
+            q(2, 4), q(3, 4), q(4, 4), q(5, 4), q(6, 4),
+            q(7, 4), q(8, 4), q(9, 2), q(10, 4), q(11, 4),
+            q(12, 4), q(13, 4), q(14, 1))
+
+
+def rebuild_tp_compare(conn, *, equity_types) -> int:
+    """八档对比市场级聚合快照整表替换（method × equity × fee × tp 全组合，
+    每行恒带三费用口径；DDL 幂等自带）。equity_types 为对比池基金类型
+    白名单（dca_api.TP_COMPARE_EQUITY_TYPES，参数传入避免 store→api 反向
+    依赖）。每 (method, equity) 单遍聚合三费用口径（FILTER 口径锚点见节
+    注释）。事务由调用方提交。"""
+    with conn.cursor() as cur:
+        cur.execute(_TP_COMPARE_DDL)
+        rows = []
+        for method in DCA_METHODS:
+            for equity in (True, False):
+                sql = _TP_COMPARE_AGG_SQL.replace(
+                    "{equity_clause}", " AND fund_type = ANY(%s)" if equity
+                    else "")
+                params = (method, list(equity_types)) if equity else (method,)
+                cur.execute(sql, params)
+                for r in cur.fetchall():
+                    for fee in _FEE_COL_SUFFIX:
+                        rows.append(_tp_compare_row(method, equity, fee, r))
+        cur.execute("DELETE FROM fund_dca_tp_compare")
+        if rows:
+            cur.executemany(_TP_COMPARE_INSERT, rows)
     return len(rows)
 
 

@@ -122,6 +122,7 @@ async def _run_backtest_job(dsn: str, task: dict, progress,
 
     from . import dca_backtest, dca_store
     from .crawler.store import Store
+    from .dca_api import TP_COMPARE_EQUITY_TYPES   # 对比池白名单（API 层常量）
 
     store = Store()
     loop = asyncio.get_running_loop()
@@ -219,6 +220,19 @@ async def _run_backtest_job(dsn: str, task: dict, progress,
           f"旧口径轮次 {stats['round_count']:,} 行 / 多阈值轮次 "
           f"{stats['tp_round_count']:,} 行 / 风险行 {stats['risk_count']:,}，"
           f"窗口截至 {stats.get('window_end')}")
+
+    # 对比快照重建（独立事务，失败只告警——派生聚合不回滚日更导入，缺行
+    # 时对比 API 回落现算聚合，夜间任务次日自愈；见 dca_store.rebuild_tp_compare）
+    try:
+        with psycopg.connect(dsn) as conn:
+            n_cmp = dca_store.rebuild_tp_compare(
+                conn, equity_types=TP_COMPARE_EQUITY_TYPES)
+            conn.commit()
+        print(f"[backtest] 对比快照重建：{n_cmp} 行"
+              f"（method×equity×fee×tp，对比卡毫秒级取数）")
+    except Exception as exc:      # noqa: BLE001 —— 快照失败不影响日更交付
+        print(f"[backtest] 对比快照重建失败（对比卡暂回落现算，次日重试）: "
+              f"{type(exc).__name__}: {str(exc)[:180]}")
 
     # Pages 自动发布（可选）：PAGES_REPO_URL 配置了含 token 的仓库 URL 才启用；
     # 失败只告警不回滚——回测结果是主交付物，公开页保持上一份快照次日自愈
