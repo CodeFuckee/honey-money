@@ -401,6 +401,21 @@
   子进程 RSS 峰值（背景见 Fixed 的 run 122 诊断）。
 
 ### Fixed
+- **设置页/全站 502——frontend nginx 缓存 backend 旧 IP（2026-11-25 线上
+  事故，任务独立 worker 后首例）**：nginx `proxy_pass http://backend:8000`
+  静态主机名在启动时一次性解析并永久缓存；2026-11-25 凌晨补部署单独重建
+  backend 容器（新 IP）后，frontend 未同批重建，nginx 仍指旧 IP → /api
+  与 healthz 全量 502，设置页报「设置数据不可用：Unexpected token '<'」
+  （响应是 nginx 502 HTML）。**根因是架构解耦的伴生缺口**：旧全量部署时代
+  backend 总与 frontend 同批重建、DNS 永远新鲜；拆分后补部署可只重建
+  backend——静态解析的缓存从此必然过期。修复：nginx.conf 改 **变量
+  proxy_pass + Docker 内嵌 DNS resolver（127.0.0.11，valid=10s）**——
+  运行时解析，backend 重建后 ≤10s 自动跟上，frontend 生命周期与 backend
+  彻底无关。临时恢复走 nas-ops 强制重建 frontend（09:33 恢复）；临时
+  操作暴露的运维缺口顺带修：nas-ops 作业此前从未演练过（manual job 需
+  流水线到达 deploy 阶段才可 play）。诊断依据：容器内自探 backend
+  `localhost:8000/api/infra` 健康（PG up）而 nginx 502，frontend 重建
+  即愈——三层排障定位到转发层而非服务层。
 - **指数日更东财被风控 → 新浪指数日线兜底（2026-11-24，519 vs 924 页 924 线
   停更修复）**：「指数日更」任务 11-23 起 `push2his.eastmoney.com` 对 NAS
   家宽 IP 风控（RemoteProtocolError 传输层重试用尽，与东财 Cookie 验证失败
