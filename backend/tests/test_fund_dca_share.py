@@ -585,3 +585,16 @@ class TestShareScatter:
         assert "FROM fund_dca_tp_result" in main2 and "tp = %s" in main2
         assert any(0.2 in (p or ()) and "share" in (p or ())
                    for p in conn2.params), conn2.params
+
+
+class TestUniverseAliasSingleSource:
+    def test_equity_types_alias_engine_universe(self):
+        """排行权益白名单与回测宇宙白名单同一事实源（十四轮排除对齐——
+        回测了但排行默认看不到的错位不再可能）。"""
+        import app.dca_api as dca_mod
+        from app.dca_backtest import BACKTEST_UNIVERSE_TYPES
+        assert dca_mod.EQUITY_TYPES is BACKTEST_UNIVERSE_TYPES
+        # 对比卡权益+商品池 = 宇宙白名单 + 商品两类型（商品按用户定案排除
+        # 出回测，对比池组合保留仅为兼容既有快照行）
+        assert dca_mod.TP_COMPARE_EQUITY_TYPES[:len(BACKTEST_UNIVERSE_TYPES)] \
+            == tuple(BACKTEST_UNIVERSE_TYPES)

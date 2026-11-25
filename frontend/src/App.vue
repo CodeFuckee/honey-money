@@ -104,7 +104,6 @@ function buildQuery() {
     if (dcaAlive.value !== 'true') q.set('alive', dcaAlive.value)
     if (dcaAge.value) q.set('age', dcaAge.value)
     if (dcaScale.value) q.set('scale', dcaScale.value)
-    if (dcaEquity.value) q.set('equity', '1')
     if (dcaTp.value !== 0.20) q.set('tp', dcaTp.value)
     if (dcaMode.value !== 'amount') q.set('mode', dcaMode.value)
     if (dcaSort.value !== 'w10_xirr') q.set('sort', dcaSort.value)
@@ -211,7 +210,7 @@ function applyUrl() {
   // 定投止盈回测排行
   if (NAV_BY_PATH[u.pathname] === 'fundDca' &&
       (q.get('q') != null || q.get('page') || q.get('alive') != null
-       || q.get('age') || q.get('scale') || q.get('equity') != null
+       || q.get('age') || q.get('scale')
        || q.get('tp') != null || q.get('mode') != null
        || q.get('sort') || q.get('order'))) {
     dcaQuery.value = q.get('q') ?? ''
@@ -219,7 +218,6 @@ function applyUrl() {
     if (q.get('alive') != null) dcaAlive.value = q.get('alive')
     if (q.get('age') != null && /^\d+$/.test(q.get('age'))) dcaAge.value = +q.get('age')
     if (q.get('scale') != null && /^\d+(\.\d+)?$/.test(q.get('scale'))) dcaScale.value = +q.get('scale')
-    if (q.get('equity') != null) dcaEquity.value = ['1', 'true'].includes(q.get('equity'))
     if (q.get('tp') != null) {
       const v = parseFloat(q.get('tp'))
       if (DCA_TP_OPTIONS.includes(v)) dcaTp.value = v
@@ -436,10 +434,11 @@ const dcaAge = ref(null)
 const dcaScale = ref(null)
 // 权益类筛选：true 仅权益类（默认，2026-11-15 用户确认口径）/ false 全市场。
 // 白名单=东财 fund_type 8 类（核心三类+灵活/平衡混合+海外权益），与后端
-// app.dca_api.EQUITY_TYPES 保持一致；静态模式用它做客户端过滤（快照恒为全市场）
+// app.dca_api.EQUITY_TYPES 保持一致；静态模式用它做客户端过滤（快照恒为
+// 权益宇宙——2026-11-25 十四轮起引擎只对权益类 8 类出回测结果行，非权益
+// 与年轻基金被排除，基金类型切换开关随之移除）
 const DCA_EQUITY_TYPES = ['股票型', '混合型-偏股', '混合型-灵活', '混合型-平衡',
   '指数型-股票', '指数型-海外股票', 'QDII-普通股票', 'QDII-混合偏股']
-const dcaEquity = ref(true)
 
 // ===== 多止盈点市场级对比（2026-11-15 grilling 定案，同日追加 35%/40% → 5%~40% 八档） =====
 // 阈值切换只改排行/统计/弹窗明细的数据源（tp≠0.2 走 /api/funds/dca/tp*，
@@ -534,7 +533,7 @@ function dcaStaticView() {
     (alive === '' || (alive === 'true' ? r.alive === true : r.alive === false))
     && (!ageN || (r.age_years != null && r.age_years > ageN))
     && (!scaleN || (r.scale_yi != null && r.scale_yi > scaleN))
-    && (!dcaEquity.value || DCA_EQUITY_TYPES.includes(r.fund_type)))
+    && DCA_EQUITY_TYPES.includes(r.fund_type))
   const rows = base.filter(r =>
     !q || r.code.toLowerCase().includes(q) || r.name.toLowerCase().includes(q))
   const key = dcaSort.value, dir = dcaOrder.value === 'asc' ? 1 : -1
@@ -588,7 +587,6 @@ async function loadDca() {
       ? '/api/funds/dca?'
       : `/api/funds/dca/tp?tp=${dcaTp.value}&method=${dcaMode.value}&`
     const r = await fetch(`${base}q=${q}&alive=${dcaAlive.value}${age}${sc}`
-      + `&equity=${dcaEquity.value}`
       + `&sort=${dcaSort.value}&order=${dcaOrder.value}`
       + `&fee=${dcaFeeMode.value}`
       + `&limit=${DCA_PAGE_SIZE}&offset=${off}${dcaRangeQuery()}`)
@@ -619,13 +617,13 @@ function onDcaModeChange(mode) {
   loadDcaTpCompare()
   loadDcaScatter()
 }
-// 八档对比聚合（跟随费用口径/定投方式/基金类型开关——equity=true 为权益+商品
-// 池（对比专用口径），false 全市场对照；三轮需求：所有统计跟随总开关）
+// 八档对比聚合（跟随费用口径/定投方式——equity 用后端缺省 true 权益池；
+// 2026-11-25 十四轮起回测宇宙即权益类 8 类，基金类型开关已移除）
 async function loadDcaTpCompare() {
   if (STATIC_MODE) return
   dcaTpLoading.value = true
   try {
-    const r = await fetch(`/api/funds/dca/tp/compare?fee=${dcaFeeMode.value}&method=${dcaMode.value}&equity=${dcaEquity.value}`)
+    const r = await fetch(`/api/funds/dca/tp/compare?fee=${dcaFeeMode.value}&method=${dcaMode.value}`)
     dcaTpCompare.value = await r.json()
   } catch (e) {
     dcaTpCompare.value = { status: 'down', detail: String(e), rows: [] }
@@ -824,12 +822,11 @@ function dcaFeeVal(row, f) {
   return v === undefined ? row[f] : v
 }
 
-// 静态模式散点权益过滤：快照恒为全市场（pages_export 导出 equity=False），
-// 在客户端按行内 fund_type 过滤点集并重算分箱——与服务端 compute_bands
+// 静态模式散点权益过滤：快照导出行的宇宙已随引擎排除收窄（权益类），
+// 客户端仍按行内 fund_type 过滤兜底并重算分箱——与服务端 compute_bands
 // 同口径（每基金落入唯一年限段×规模段格，均值/中位/正占比）。
-// 仅当权益开关打开时重算；全市场直接透传快照原分箱。
 function applyDcaEquity(sc) {
-  if (!dcaEquity.value || sc?.status !== 'up' || !Array.isArray(sc.points)) return sc
+  if (sc?.status !== 'up' || !Array.isArray(sc.points)) return sc
   const pts = sc.points.filter(p => DCA_EQUITY_TYPES.includes(p[5]))
   return { ...sc, points: pts, ...recomputeDcaBands(pts) }
 }
@@ -878,7 +875,7 @@ async function loadDcaScatter() {
   try {
     const r = await fetch(STATIC_MODE
       ? `${DATA_BASE}/funds/dca/scatter.${dcaFeeMode.value}.json`
-      : `/api/funds/dca/scatter?fee=${dcaFeeMode.value}&equity=${dcaEquity.value}&method=${dcaMode.value}&tp=${dcaTp.value}`)
+      : `/api/funds/dca/scatter?fee=${dcaFeeMode.value}&method=${dcaMode.value}&tp=${dcaTp.value}`)
     const body = await r.json()
     // 期间又切换过 → 丢弃旧响应；静态模式权益过滤在客户端做
     if (seq === dcaFeeReqSeq) dcaScatter.value = STATIC_MODE ? applyDcaEquity(body) : body
@@ -894,7 +891,7 @@ async function loadDcaScatter() {
 }
 // 费用口径与权益开关都联动散点+排行（权益切换时统计卡/分箱同步重算）；
 // 费用口径同时联动止盈点对比区块
-watch([dcaFeeMode, dcaEquity], () => { loadDcaScatter(); loadDca(); loadDcaTpCompare() })
+watch(dcaFeeMode, () => { loadDcaScatter(); loadDca(); loadDcaTpCompare() })
 
 function renderDcaScatterChart() {
   if (dcaScatterChart) { dcaScatterChart.destroy(); dcaScatterChart = null }
@@ -3579,19 +3576,6 @@ watch(
                 </div>
               </div>
               <div class="seg-group">
-                <span class="seg-label">基金类型</span>
-                <div class="src-seg" title="排行/统计/散点/对比池共用同一基金类型口径（默认仅权益类；对比卡池=权益 8 类+商品，全市场时为全市场对照）">
-                  <button class="src-seg-btn"
-                          :class="{ active: dcaEquity }"
-                          @click="dcaEquity = true"
-                          data-table-cat="equity">仅权益类</button>
-                  <button class="src-seg-btn"
-                          :class="{ active: !dcaEquity }"
-                          @click="dcaEquity = false"
-                          data-table-cat="all">全市场</button>
-                </div>
-              </div>
-              <div class="seg-group">
                 <span class="seg-label">费用口径</span>
                 <div class="src-seg" title="排行/统计/散点/对比/详情共用同一费用口径（不含费 / 含费·申购一折 / 含费·申购名义）">
                   <button v-for="o in DCA_FEE_OPTIONS" :key="o.key"
@@ -3617,7 +3601,7 @@ watch(
               <div class="toolbar" style="margin: 0 0 6px">
                 <div>
                   <h2 class="h1" style="font-size: 18px">止盈点对比：止盈线设多少更划算？<span class="dc-hint" style="margin-left: 6px">当前口径：{{ dcaModeLabel }}</span></h2>
-                  <p class="sub">同一「月定投（{{ dcaModeLabel }}）+ 止盈重来」策略只换止盈线（5%~40% 八档）在{{ dcaEquity ? '权益类+商品' : '全市场' }}在市基金上的整体表现 · 年化=XIRR 资金加权（钱在场的效率，跨阈值可比；总收益率天然偏向高阈值不作对比依据）· 每档采样 {{ dcaTpCompare.rows?.[0]?.count ?? 0 }} 只（在市且年化非空）· {{ dcaFeeLabel }} · {{ dcaEquity ? '权益+商品池' : '全市场池' }}（随顶部基金类型开关）</p>
+                  <p class="sub">同一「月定投（{{ dcaModeLabel }}）+ 止盈重来」策略只换止盈线（5%~40% 八档）在权益类在市基金上的整体表现 · 年化=XIRR 资金加权（钱在场的效率，跨阈值可比；总收益率天然偏向高阈值不作对比依据）· 每档采样 {{ dcaTpCompare.rows?.[0]?.count ?? 0 }} 只（在市且年化非空）· {{ dcaFeeLabel }}</p>
                 </div>
                 <div class="toolbar-right">
                   <span v-if="dcaTpLoading" class="sub">重算中…</span>
@@ -4031,7 +4015,7 @@ watch(
                   <div class="dca-conclusion" v-if="dcaScatterConclusion">
                     <div class="dc-head">
                       <b>结论</b>
-                      <span class="dc-badge">{{ dcaModeLabel }} · {{ dcaFeeLabel }} · {{ dcaEquity ? '仅权益类' : '全市场' }} · 在市 {{ fmt(dcaScatter.points.length) }} 只 · 每基金只计一次</span>
+                      <span class="dc-badge">{{ dcaModeLabel }} · {{ dcaFeeLabel }} · 仅权益类 · 在市 {{ fmt(dcaScatter.points.length) }} 只 · 每基金只计一次</span>
                     </div>
                     <div class="dc-grid">
                       <div class="dc-item">
@@ -4462,7 +4446,7 @@ watch(
                     @click="saveMinSpanDays">{{ minSpanSaving ? '保存中…' : '保存' }}</button>
                 </div>
               </div>
-              <p class="note" style="margin: 10px 0 0">取值 90~3650 天，默认 90；下一次回测（当晚日更 / scripts/dca_share_sample.py 手动回放）起按新值计算。</p>
+              <p class="note" style="margin: 10px 0 0">取值 90~3650 天，默认 90；同时是回测宇宙的排除线——全史窗口低于该期限的基金不参与回测（年化与结果行均不产出）。下一次回测（当晚日更 / scripts/dca_share_sample.py 手动回放）起按新值计算。</p>
               <p v-if="minSpanMsg" class="note" data-settings-saved style="margin: 6px 0 0; color: #1a7f37">{{ minSpanMsg }}</p>
               <p v-if="settingsError" class="note" data-settings-error style="margin: 6px 0 0; color: #c9313d">{{ settingsError }}</p>
               <div class="settings-row" data-run-backtest-row
@@ -4500,7 +4484,7 @@ watch(
               <div class="settings-row" data-run-method-row
                 style="margin-top: 14px; padding-top: 14px; border-top: 1px solid #e0e0e0">
                 <label class="settings-label"><b>运行单个策略全量回测</b>
-                  <span class="settings-hint">只重算选定定投方式的全市场 8 档止盈 × 3 费率并替换该策略结果（约为全市场全量耗时的 1/6，其余策略不受影响；不写指纹表——当晚日更仍会按引擎版本全量兜底）。新策略上线后可不等日更立即出数。</span>
+                  <span class="settings-hint">只重算选定定投方式的权益类全市场 8 档止盈 × 3 费率并替换该策略结果（约为全市场全量耗时的 1/6，其余策略不受影响；不写指纹表——当晚日更仍会按引擎版本全量兜底）。新策略上线后可不等日更立即出数。</span>
                 </label>
                 <div class="settings-input"
                   style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap">
@@ -4566,7 +4550,7 @@ watch(
               <div class="confirm-card">
                 <b>确认运行「{{ methodTargetLabel }}」单策略全量回测？</b>
                 <p class="note" data-method-confirm-time style="margin: 8px 0 0">
-                  全市场基金 × 该策略 × 8 档止盈 × 3 费率，预计约 <b>10 分钟~2 小时</b>（视机器负载，约为全市场全量耗时的 1/6）。仅替换「{{ methodTargetLabel }}」的结果行，其余策略不受影响；后台运行，期间可关闭页面；日更回测运行中时无法启动。
+                  权益类全市场基金 × 该策略 × 8 档止盈 × 3 费率，预计约 <b>10 分钟~2 小时</b>（视机器负载，约为全市场全量耗时的 1/6）。仅替换「{{ methodTargetLabel }}」的结果行，其余策略不受影响；后台运行，期间可关闭页面；日更回测运行中时无法启动。
                 </p>
                 <div class="confirm-actions">
                   <button class="btn" data-method-confirm-cancel

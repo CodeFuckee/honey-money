@@ -94,6 +94,29 @@ PROFIT_LADDERS = {"profit_dd_ladder": PROFIT_LADDER,
 PL_LOSS_LADDER = ((-0.10, 1.5), (-0.20, 2.0))
 PL_PROFIT_LADDER = ((0.10, 0.5), (0.20, 0.0))
 PL_LOSS_LADDERS = {"pl_ladder": PL_LOSS_LADDER}
+# 回测宇宙白名单（2026-11-25 十四轮用户定案）：仅权益类 8 类产生回测结果
+# 行——与排行默认筛选同口径（dca_api.EQUITY_TYPES 别名引用本常量，事实源
+# 单一）；债券/FOF/货币/商品/Reits/偏债/未知类型与年轻基金（全史窗口 <
+# 运作期限下限）一律不参与回测（此前年轻基金仅年化置空，非权益全量参与）。
+# 时机表/波动指标表不受影响（行情派生视图，维持全市场口径）。
+BACKTEST_UNIVERSE_TYPES = ("股票型", "混合型-偏股", "混合型-灵活", "混合型-平衡",
+                           "指数型-股票", "指数型-海外股票", "QDII-普通股票",
+                           "QDII-混合偏股")
+
+
+def fund_excluded(fund_type, first_date, last_date,
+                  min_span_days: int | None = None) -> bool:
+    """回测宇宙排除规则（十四轮）：非权益类或年轻基金（全史窗口 <
+    运作期限下限，日期闭区间差 ≥ 下限才保留——与年化门槛同 ≥ 约定）
+    返回 True；日期缺失一律排除。fund_type 为 None/未知类型视为非权益。"""
+    if (fund_type or "") not in BACKTEST_UNIVERSE_TYPES:
+        return True
+    if first_date is None or last_date is None:
+        return True
+    if min_span_days is None:
+        min_span_days = MIN_SPAN_DAYS
+    return pd.Timestamp(last_date) - pd.Timestamp(first_date) \
+        < pd.Timedelta(days=min_span_days)
 
 
 # ===== 费用模型（典型档位近似，见模块 docstring） =====
@@ -471,6 +494,12 @@ def run_backtest(nav: pd.DataFrame, basic: pd.DataFrame,
     rows, rounds_rows = [], []
     for code, g in nav.groupby("code", sort=True):
         g = g.sort_values("nav_date")
+        # 回测宇宙排除（十四轮）：非权益/年轻基金不产生结果行（脚本离线
+        # 路径与 worker 路径经此处共享同一规则）
+        fd = g["nav_date"]
+        if fund_excluded(basic["fund_type"].get(code, ""), fd.iloc[0],
+                         fd.iloc[-1], min_span_days):
+            continue
         full_p = prep_window(g, None)
         w10_p = prep_window(g, end_ts - WINDOW_10Y)
         if full_p is None and w10_p is None:
@@ -568,6 +597,12 @@ def run_backtest_tp(nav: pd.DataFrame, basic: pd.DataFrame,
     n_funds = 0
     for code, g in nav.groupby("code", sort=True):
         g = g.sort_values("nav_date")
+        # 回测宇宙排除（十四轮）：非权益/年轻基金不产生结果行（脚本离线
+        # 路径与 worker 路径经此处共享同一规则）
+        fd = g["nav_date"]
+        if fund_excluded(basic["fund_type"].get(code, ""), fd.iloc[0],
+                         fd.iloc[-1], min_span_days):
+            continue
         full_p = prep_window(g, None)
         w10_p = prep_window(g, end_ts - WINDOW_10Y)
         if full_p is None and w10_p is None:
@@ -971,7 +1006,8 @@ def engine_version(*extra) -> str:
     material = repr((AMOUNT, TAKE_PROFIT, MIN_SPAN_DAYS, TP_THRESHOLDS,
                      DCA_METHODS, DD_LADDER, DD_LADDER_DEEP, DD_LADDERS,
                      PROFIT_LADDER, PROFIT_LADDERS, PL_LOSS_LADDER,
-                     PL_PROFIT_LADDER, PL_LOSS_LADDERS, SUB_DISCOUNT,
+                     PL_PROFIT_LADDER, PL_LOSS_LADDERS,
+                     BACKTEST_UNIVERSE_TYPES, SUB_DISCOUNT,
                      SUB_RATE_A, _SUB_RATE_DEFAULT, REDEEM_EQUITY,
                      REDEEM_BOND_C)
                     + tuple(extra))
@@ -1183,6 +1219,17 @@ def run_full_backtest_tp_dirty(dsn: str, *, log=print,
         prev_fps, prev_engine = None, None
         log("BACKTEST_FORCE_FULL=1，强制全量重算")
     dirty, gone = compute_dirty(cur_fps, engine, prev_fps, prev_engine)
+    # 回测宇宙排除（十四轮）：指纹即可判定（fund_type + 全史窗口），无需
+    # 加载明细；被排除基金的历史行由「版本变化→全量→merge 全删重插」自动
+    # 清理（规则变化必 bump 版本 → 必走全量），无需专门清理机制
+    excluded = {code for code, fp in cur_fps.items()
+                if fund_excluded(fp[7],
+                                 pd.Timestamp(fp[1]) if fp[1] else None,
+                                 pd.Timestamp(fp[2]) if fp[2] else None,
+                                 min_span_days)}
+    log(f"回测宇宙：全市场 {len(cur_fps):,} 只，权益类且窗口 ≥ "
+        f"{min_span_days} 天 {len(cur_fps) - len(excluded):,} 只（排除 "
+        f"{len(excluded):,} 只）")
     # 全局窗口末日 = 全市场 max(末次净值日)（nav_count≥2 的基金——单行基金
     # 不产生结果行，排除以与旧口径 all_end=max(full_end) 逐位一致）
     all_end = max((fp[2] for fp in cur_fps.values() if fp[2] and fp[0] >= 2),
@@ -1196,6 +1243,8 @@ def run_full_backtest_tp_dirty(dsn: str, *, log=print,
              "window_end": str(all_end) if all_end else None,
              "engine": engine, "dirty_count": len(dirty),
              "skipped_count": total - len(dirty), "gone_count": len(gone),
+             "universe_count": total - len(excluded),
+             "excluded_count": len(excluded),
              "full_run": not prev_fps or prev_engine != engine,
              "dirty": sorted(dirty), "gone": sorted(gone)}
 

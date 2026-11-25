@@ -344,20 +344,19 @@ class TestDcaShareMode:
 
     def test_master_bar_all_groups_at_top(self, servers, page, mock_dca,
                                           mock_share, mock_navs):
-        """E2E-454：四组总开关（定投方式/止盈点/基金类型/费用口径）都在
-        统计卡之前的最前位置；筛选面板与散点卡不再有重复组。"""
+        """E2E-454：总开关（定投方式/止盈点/费用口径）都在统计卡之前的最前
+        位置；筛选面板与散点卡不再有重复组。（基金类型开关已于十四轮移除
+        ——回测宇宙=权益类 8 类，全市场/权益两池合一。）"""
         _, frontend_port = servers
         open_dca(page, frontend_port)
         metrics_y = page.locator(".learn-metrics").first.bounding_box()["y"]
         for sel in ('button[data-mode="share"]', 'button[data-tp="0.2"]',
-                    'button[data-table-cat="equity"]',
                     'button[data-table-fee="nom"]'):
             btn = page.locator(sel).first
             expect(btn).to_be_visible()
             assert btn.bounding_box()["y"] < metrics_y, sel
         # 全页唯一：面板/散点卡的重复组已移除
         assert page.locator("button[data-tp]").count() == 8
-        assert page.locator("button[data-table-cat]").count() == 2
         assert page.locator("button[data-table-fee]").count() == 3
 
     def test_scatter_follows_tp(self, servers, page, mock_dca, mock_share,
@@ -374,20 +373,17 @@ class TestDcaShareMode:
         expect(page.locator(".card", has_text="三维散点").first
               ).to_contain_text("止盈 15%", timeout=10_000)
 
-    def test_compare_follows_equity_toggle(self, servers, page, mock_dca,
-                                           mock_share, mock_navs):
-        """E2E-456：顶部基金类型切「全市场」→ 对比卡请求带 equity=false、
-        副标题池文案切换（权益+商品池 → 全市场池）。"""
+    def test_cat_toggle_removed(self, servers, page, mock_dca,
+                                mock_share, mock_navs):
+        """E2E-456（十四轮改锚）：基金类型开关已移除（回测宇宙=权益类 8 类，
+        全市场/权益两池合一）——页面无 data-table-cat 控件、对比卡文案不再
+        出现池切换描述、请求不再携带 equity 参数。"""
         _, frontend_port = servers
         open_dca(page, frontend_port)
+        expect(page.locator("button[data-table-cat]")).to_have_count(0)
         card = page.locator(".card", has_text="止盈点对比").first
-        expect(card).to_contain_text("权益+商品池")
-        page.locator('button[data-table-cat="all"]').click()
-        expect(page.locator('button[data-table-cat="all"]')
-              ).to_have_class(re.compile("active"), timeout=10_000)
-        compare_calls = [u for u in mock_share if "/compare" in u]
-        assert compare_calls and "equity=false" in compare_calls[-1], mock_share
-        expect(card).to_contain_text("全市场池", timeout=10_000)
+        expect(card).to_contain_text("权益类在市基金上")
+        assert not any("equity=" in u for u in mock_share), mock_share
 
     def test_dd_ladder_switch_and_request(self, servers, page, mock_dca,
                                           mock_share, mock_navs,

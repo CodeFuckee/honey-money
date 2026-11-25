@@ -12,7 +12,7 @@ import psycopg
 from . import config
 from . import bear_pause                              # 断缴实验常量（案例码）
 from .dca_backtest import (DCA_METHODS, TAKE_PROFIT,   # 阈值/定投方式事实源单一
-                           TP_THRESHOLDS)
+                           TP_THRESHOLDS, BACKTEST_UNIVERSE_TYPES)
 
 _DCA_LIST_SQL = """
 SELECT r.code, r.name, r.fund_type, r.alive, r.scale_yi, r.scale_date,
@@ -163,10 +163,10 @@ def _range_filters(*, ref, suffix, age_min=None, age_max=None,
 
 # 权益类白名单（东财 fund_type）：股票/偏股/灵活/平衡混合 + A股股票指数
 # + 海外权益（海外股票指数、QDII 股票/QDII 偏股）。债券、FOF、货币、偏债、
-# 商品、REITs 不在内。口径 2026-11-15 用户确认（全市场开关默认仅权益类）。
-EQUITY_TYPES = ("股票型", "混合型-偏股", "混合型-灵活", "混合型-平衡",
-                "指数型-股票", "指数型-海外股票", "QDII-普通股票",
-                "QDII-混合偏股")
+# 商品、REITs 不在内。口径 2026-11-15 用户确认（全市场开关默认仅权益类）；
+# 2026-11-25 十四轮起与回测宇宙白名单同一事实源（引擎
+# BACKTEST_UNIVERSE_TYPES 的别名——非权益/年轻基金已不产生回测结果行）。
+EQUITY_TYPES = BACKTEST_UNIVERSE_TYPES
 _EQUITY_TRUTHY = {"true", "1", "yes", "on"}
 
 

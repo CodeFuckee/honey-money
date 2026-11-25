@@ -94,10 +94,11 @@ class TestEngineVersion:
 
 # ===== compute_dirty 纯函数 =====
 
-def _fp(nav_count=420, max_date="2024-02-24", s_unit="1000.5"):
+def _fp(nav_count=420, max_date="2024-02-24", s_unit="1000.5",
+        fund_type="混合型-偏股"):
     """指纹元组（同 load_input_fingerprints 输出形态，逐位可比）。"""
     return (nav_count, "2024-01-01", max_date, s_unit, "1000.5", "105.0",
-            "成长先锋混合A", "混合型-偏股", False, "12.5", "2026-09-30")
+            "成长先锋混合A", fund_type, False, "12.5", "2026-09-30")
 
 
 class TestComputeDirty:
@@ -731,3 +732,120 @@ class TestDirtyProgressCallback:
         mod.run_full_backtest_tp_dirty("postgresql://fake",
                                        log=lambda *_: None)
         assert captured["on_done"] is None
+
+
+class TestBacktestUniverse:
+    """回测宇宙排除（2026-11-25 十四轮用户定案）：非权益类（fund_type 不在
+    BACKTEST_UNIVERSE_TYPES，8 类权益白名单，NULL/未知视为非权益）与年轻
+    基金（全史窗口 < 运作期限下限）不产生任何回测结果行——此前仅年化置空；
+    排除只作用于回测结果（旧口径表+tp 两表），时机表/波动指标表维持全市场。
+    被排除基金的历史行由「引擎版本变化→自动全量→merge 全删重插」清理，
+    无需专门清理机制。"""
+
+    def test_universe_constant_pinned(self):
+        """白名单口径锚：权益类 8 类（与排行默认筛选同一事实源，
+        dca_api.EQUITY_TYPES 别名引用）。"""
+        from app.dca_backtest import BACKTEST_UNIVERSE_TYPES
+        assert BACKTEST_UNIVERSE_TYPES == ("股票型", "混合型-偏股",
+                                           "混合型-灵活", "混合型-平衡",
+                                           "指数型-股票", "指数型-海外股票",
+                                           "QDII-普通股票", "QDII-混合偏股")
+
+    def test_rule_equity_types_included(self):
+        import datetime as dt
+        from app.dca_backtest import BACKTEST_UNIVERSE_TYPES, fund_excluded
+        d1, d2 = dt.date(2024, 1, 1), dt.date(2025, 2, 1)
+        for ft in BACKTEST_UNIVERSE_TYPES:
+            assert not fund_excluded(ft, d1, d2, 365), ft
+
+    def test_rule_non_equity_excluded(self):
+        import datetime as dt
+        from app.dca_backtest import fund_excluded
+        d1, d2 = dt.date(2024, 1, 1), dt.date(2025, 2, 1)
+        for ft in ("债券型-长债", "债券型-混合二级", "货币型", "FOF-稳健型",
+                   "Reits", "商品", "QDII-商品", "混合型-偏债", "指数型-固收",
+                   "指数型-其他", "", None):
+            assert fund_excluded(ft, d1, d2, 365), ft
+
+    def test_rule_young_boundary_same_as_xirr_gate(self):
+        """窗口边界 ≥ 与引擎年化门槛同约定：364 天排除、365 天保留。"""
+        import datetime as dt
+        from app.dca_backtest import fund_excluded
+        d1 = dt.date(2024, 1, 1)
+        assert fund_excluded("股票型", d1, d1 + dt.timedelta(days=364), 365)
+        assert not fund_excluded("股票型", d1, d1 + dt.timedelta(days=365), 365)
+
+    def test_rule_missing_dates_excluded(self):
+        from app.dca_backtest import fund_excluded
+        assert fund_excluded("股票型", None, None, 365)
+
+    def test_universe_types_in_version_material(self):
+        """白名单纳入引擎版本串（改口径自动全量——防脏数据不变量）。"""
+        from app import dca_backtest as mod
+        old = mod.engine_version()
+        saved = mod.BACKTEST_UNIVERSE_TYPES
+        try:
+            mod.BACKTEST_UNIVERSE_TYPES = saved + ("混合型-偏债",)
+            assert mod.engine_version() != old
+        finally:
+            mod.BACKTEST_UNIVERSE_TYPES = saved
+        assert mod.engine_version() == old
+
+    def test_run_backtest_tp_skips_excluded(self):
+        """编排层排除（脚本离线路径同享）：债券基金与年轻权益基金无结果行
+        无轮次行，权益老基金正常产出 8 档。"""
+        import numpy as np
+        from app import dca_backtest as mod
+        dates = pd.date_range("2024-01-01", periods=400, freq="D")
+        a = np.cumprod(1.0 + np.full(400, 0.002))
+        navs = []
+        for code in ("000001", "000004"):
+            for i, d in enumerate(dates):
+                navs.append((code, d, round(float(a[i]), 6),
+                             round(float(a[i]), 6), 0.25))
+        young = pd.date_range("2025-08-01", periods=100, freq="D")
+        for code in ("000003", "000005"):
+            for d in young:
+                navs.append((code, d, 1.0, 1.0, 0.0))
+        nav = pd.DataFrame(navs, columns=["code", "nav_date", "unit_nav",
+                                          "accum_nav", "pct_chg"])
+        basic = pd.DataFrame(
+            {"name": {"000001": "权益老A", "000003": "权益年轻C",
+                      "000004": "债基B", "000005": "权益超短F"},
+             "fund_type": {"000001": "混合型-偏股", "000003": "混合型-偏股",
+                           "000004": "债券型-长债", "000005": "股票型"},
+             "delisted": {c: False for c in
+                          ("000001", "000003", "000004", "000005")}})
+        # 显式 365（对齐生产设置）：100 天窗口的年轻权益基金排除在先，
+        # 「年化置空」不再发生——结果行/轮次行都不产出
+        rows, rounds = mod.run_backtest_tp(nav, basic, {}, method="amount",
+                                           min_span_days=365)
+        codes = {r["code"] for r in rows}
+        assert codes == {"000001"}, codes
+        assert all(t[0] == "000001" for t in rounds)
+
+    def test_dirty_stats_universe_count(self, monkeypatch):
+        """脏检测编排统计增 universe_count/excluded_count（全市场 3 只中
+        债基排除 → 宇宙 2）。"""
+        from app import dca_backtest as mod
+        monkeypatch.setenv("BACKTEST_WORKERS", "1")
+        # 窗口须 ≥ 运作期限下限（缺省 90）：min 2024-01-01 → max 2025-06-01
+        fps = {"000001": _fp(max_date="2025-06-01"),
+               "000002": _fp(max_date="2025-06-01", s_unit="3.2"),
+               "000004": _fp(max_date="2025-06-01", fund_type="债券型-长债")}
+        monkeypatch.setattr(mod, "engine_version", lambda *a: "vTEST")
+        monkeypatch.setattr(mod, "load_input_fingerprints", lambda conn: fps)
+        monkeypatch.setattr(dca_store, "load_fingerprints",
+                            lambda conn: (fps, "vOLD"))
+        captured = {}
+
+        def fake_dispatch(args, workers, on_done=None):
+            captured["on_done"] = on_done
+            return [([], [], [], [], [], [])]
+
+        monkeypatch.setattr(mod, "_run_chunk_tasks", fake_dispatch)
+        _patch_connect(monkeypatch, mod, FakeConn())
+        _s, _o, _t, _tr, _ti, _r, stats, _fps = mod.run_full_backtest_tp_dirty(
+            "postgresql://fake", log=lambda *_: None)
+        assert stats["universe_count"] == 2
+        assert stats["excluded_count"] == 1

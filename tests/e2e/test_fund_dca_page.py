@@ -679,69 +679,22 @@ class TestDcaRiskColumns:
 
 
 class TestDcaEquityFilter:
-    def test_default_equity_on(self, servers, page):
-        """E2E-419：默认仅权益类——首个列表请求带 equity=true、开关 active、
-        权益外类型行（债券型）不可见。"""
+    """E2E-419~423（十四轮改锚）：基金类型开关已随回测宇宙收窄移除——
+    引擎只对权益类 8 类出回测结果行（非权益/年轻基金不参与回测），权益/
+    全市场两池合一，类型切换控件与 equity 请求参数整体退役。原五条
+    开关行为用例（默认开/切换/深链接/与费率共存/散点徽标跟随）退役，
+    以一条移除锚替代：页面无开关控件、请求不再携带 equity 参数、
+    散点徽标恒显「仅权益类」。"""
+
+    def test_cat_toggle_removed_and_no_equity_param(self, servers, page):
         _, frontend_port = servers
         list_calls, _ = mock_dca_equity(page)
         open_dca(page, frontend_port)
-        assert list_calls and "equity=true" in list_calls[0], list_calls
-        expect(page.locator('button[data-table-cat="equity"]')
-              ).to_have_class(re.compile("active"))
-        expect(page.locator(".browse-pv tbody tr",
-                            has_text=EQUITY_BOND_NAME)).to_have_count(0)
-
-    def test_toggle_all_market_and_back(self, servers, page):
-        """E2E-420：切「全市场」→ equity=false、债券型行出现、散点请求同步；
-        切回「仅权益类」→ equity=true 且债券行消失。"""
-        _, frontend_port = servers
-        list_calls, scatter_calls = mock_dca_equity(page)
-        open_dca(page, frontend_port)
-        page.locator('button[data-table-cat="all"]').click()
-        expect(page.locator(".browse-pv tbody tr",
-                            has_text=EQUITY_BOND_NAME)).to_be_visible()
-        assert any("equity=false" in u for u in list_calls), list_calls
-        assert any("equity=false" in u for u in scatter_calls), scatter_calls
-        page.locator('button[data-table-cat="equity"]').click()
-        expect(page.locator(".browse-pv tbody tr",
-                            has_text=EQUITY_BOND_NAME)).to_have_count(0)
-        assert list_calls[-1].split("equity=")[1].split("&")[0] == "true"
-
-    def test_deeplink_equity_off(self, servers, page):
-        """E2E-421：深链接 /data/fund-dca?equity=0 → 首个请求即带
-        equity=false，债券型行可见。"""
-        _, frontend_port = servers
-        list_calls, _ = mock_dca_equity(page)
-        page.goto(f"http://127.0.0.1:{frontend_port}/data/fund-dca?equity=0")
         expect(page.get_by_role("heading", name="定投止盈回测")).to_be_visible()
-        expect(page.locator(".browse-pv tbody tr",
-                            has_text=EQUITY_BOND_NAME)).to_be_visible()
-        assert list_calls and "equity=false" in list_calls[0], list_calls
-
-    def test_fee_and_equity_params_coexist(self, servers, page):
-        """E2E-422：费用口径与权益开关独立生效——切「不含费」后列表请求
-        同时带 fee=gross 与 equity=true（旧费率流程无回归）。"""
-        _, frontend_port = servers
-        list_calls, _ = mock_dca_equity(page)
-        open_dca(page, frontend_port)
-        page.locator('button[data-table-fee="gross"]').first.click()
-        expect(page.locator(".browse-pv tbody tr",
-                            has_text=EQUITY_BOND_NAME)).to_have_count(0)
-        last = list_calls[-1]
-        assert "fee=gross" in last and "equity=true" in last, last
-
-    def test_scatter_badge_follows_equity(self, servers, page):
-        """E2E-423：散点结论徽标随类型口径切换（仅权益类 ↔ 全市场）——
-        类型切换组已上移页面顶部总开关行（data-table-cat 钩子）。"""
-        _, frontend_port = servers
-        mock_dca_equity(page)
-        open_dca(page, frontend_port)
+        expect(page.locator("button[data-table-cat]")).to_have_count(0)
+        assert list_calls and "equity=" not in list_calls[0], list_calls
         badge = page.locator(".dca-conclusion .dc-badge")
         expect(badge).to_contain_text("仅权益类")
-        page.locator('button[data-table-cat="all"]').click()
-        expect(badge).to_contain_text("全市场")
-        expect(page.locator('button[data-table-cat="all"]')
-              ).to_have_class(re.compile("active"))
 
 # 用例表确认门说明：本功能在自主开发模式下进行，测试计划与用例表未单独
 # 走 e2e-test-writer 确认门 1，与前端过目（确认门 2）合并由用户一并确认。
