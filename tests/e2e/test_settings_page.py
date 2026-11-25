@@ -359,6 +359,9 @@ class TestMethodQueuedAndError:
         expect(page.locator("[data-run-method-running]")
               ).to_contain_text("排队中（等待「东财每日增量」完成，完成后自动开始）",
                                 timeout=10_000)
+        # 排队阶段不显示进度条（十六轮：上轮 last_started_at 会把旧运行
+        # 时长错算给排队任务——已运行条只在 running 态出现）
+        expect(page.locator("[data-run-method-progress]")).to_have_count(0)
         # 失败可见性：idle + last_error → 红色错误行
         task2 = copy.deepcopy(MOCK_SETTINGS)
         task2["method_task"].update({"phase": "idle", "running": False,

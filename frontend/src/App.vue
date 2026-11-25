@@ -1802,14 +1802,17 @@ const methodBusy = computed(() =>
 // 指纹比对阶段尚无基金级信号时回落已运行时长/预估耗时（单策略 ≈ 全量 1/6
 // ≈ 80 分钟），与全市场回测进度条同款 UX
 const _METHOD_EXPECTED_MS = 80 * 60e3
+// 已运行时长仅在 phase==='running' 时计——排队中沿用上轮 last_started_at
+// 会把上次运行的时间错算给当前排队任务（2026-11-25 十六轮）
 const methodElapsedMs = computed(() => {
+  if (methodTask.value.phase !== 'running') return null
   const started = methodTask.value.last_started_at
   if (!started) return null
   return Math.max(0, nowTick.value - Date.parse(started) - serverSkew.value)
 })
 const methodElapsedText = computed(() => fmtDuration(methodElapsedMs.value))
 const methodProgressPercent = computed(() => {
-  if (!methodBusy.value) return null
+  if (methodTask.value.phase !== 'running') return null   // 排队中不显示条
   const t = methodTask.value.progress_total
   if (t) {
     return Math.min(100, Math.round((methodTask.value.progress_done || 0)
