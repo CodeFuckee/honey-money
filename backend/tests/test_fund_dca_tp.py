@@ -422,17 +422,17 @@ class AggCursor(FakeCursor):
 
 
 def _agg_row(tp=0.20):
-    """单遍聚合查询的一行（43 元组：tp + 三费用块各 14 列，块序 gross /
+    """单遍聚合查询的一行（22 元组：tp + 三费用块各 7 列，块序 gross /
     disc / nom 同 _TP_COMPARE_AGG_SQL；三块取值互异防跨块错位混过——
-    生产首跑曾因恒取 gross 块给三口径标签，桩行 15 列旧形状漏过）。"""
+    生产首跑曾因恒取 gross 块给三口径标签，桩行列数不足旧形状漏过）。"""
     def blk(base):
-        return (15029, 0.02044012345 + base, 0.05949412345 + base,
-                0.05963912345 + base, 0.05024312345 + base,
-                -0.00448112345 + base, 0.63843212345 + base,
-                0.74223212345 + base, 1.931612345 + base,
-                0.12345612345 + base, 0.23456712345 + base,
-                0.34567812345 + base, 0.45678912345 + base,
-                703.14159265 + base)
+        return (15029,                       # count
+                0.12345612345 + base,        # 中位（全史年化）
+                0.23456712345 + base,        # 均值
+                0.34567812345 + base,        # 正收益占比
+                0.45678912345 + base,        # 成功率（轮次口径）
+                1.931612345 + base,          # 平均轮次
+                703.14159265 + base)         # 平均间隔
     return (tp,) + blk(0.0) + blk(0.02) + blk(0.04)
 
 
@@ -453,9 +453,15 @@ class TestTpCompareSnapshot:
         aggs = [sql for sql in sqls if "GROUP BY tp" in sql]
         assert len(aggs) == n_combo * 2     # 每 (方式, 池) 单遍三费用口径
         # 口径锚点（2026-11-25 真机证伪无过滤版）：年化 NULL 行其轮次/间隔
-        # 列仍非空，每项聚合必须 FILTER (WHERE w10_xirr_* IS NOT NULL)
-        assert all("FILTER (WHERE w10_xirr_nom IS NOT NULL)" in s
+        # 列仍非空，每项聚合必须 FILTER (WHERE full_xirr_* IS NOT NULL)
+        #（十七轮起聚合门与分位源统一全史年化，w10 五分位列退役）
+        assert all("FILTER (WHERE full_xirr IS NOT NULL)" in s
                    for s in aggs)
+        assert all("FILTER (WHERE full_xirr_disc IS NOT NULL)" in s
+                   for s in aggs)
+        assert all("FILTER (WHERE full_xirr_nom IS NOT NULL)" in s
+                   for s in aggs)
+        assert all("w10_xirr" not in s for s in aggs)   # 退役列不得残留
         assert all("FROM fund_dca_tp_result" in s for s in aggs)
         assert "DELETE FROM fund_dca_tp_compare" in sqls
         # equity 两池：白名单参数（fund_type = ANY）vs 全市场无池参数
@@ -475,31 +481,20 @@ class TestTpCompareSnapshot:
 
         def blk_want(base, sfx_want):
             return ("amount", True, sfx_want, 0.20, 15029,
-                    round(0.02044012345 + base, 4),
-                    round(0.05949412345 + base, 4),
-                    round(0.05963912345 + base, 4),
-                    round(0.05024312345 + base, 4),
-                    round(-0.00448112345 + base, 4),
-                    round(0.63843212345 + base, 4),
-                    round(0.74223212345 + base, 4),
-                    round(1.931612345 + base, 2),
                     round(0.12345612345 + base, 4),
                     round(0.23456712345 + base, 4),
                     round(0.34567812345 + base, 4),
                     round(0.45678912345 + base, 4),
+                    round(1.931612345 + base, 2),
                     round(703.14159265 + base, 1))
 
         assert blk_want(0.0, "gross") in rows
         assert blk_want(0.02, "disc") in rows
         assert blk_want(0.04, "nom") in rows
         want = ("amount", True, "gross", 0.20, 15029,
-                round(0.02044012345, 4), round(0.05949412345, 4),
-                round(0.05963912345, 4), round(0.05024312345, 4),
-                round(-0.00448112345, 4), round(0.63843212345, 4),
-                round(0.74223212345, 4), round(1.931612345, 2),
                 round(0.12345612345, 4), round(0.23456712345, 4),
                 round(0.34567812345, 4), round(0.45678912345, 4),
-                round(703.14159265, 1))
+                round(1.931612345, 2), round(703.14159265, 1))
         assert want in rows
 
     def test_rebuild_empty_table_still_replaces(self):
@@ -557,11 +552,11 @@ class TestDcaTpRoutes:
         conn = FakeConnOne((None, None, None))
         _patch_connect(monkeypatch, dca_mod, conn)
         client.get("/api/funds/dca/tp", params={"tp": "0.15", "fee": "nom",
-                                                "sort": "w10_xirr"})
+                                                "sort": "full_xirr"})
         sqls = conn.executed
         assert any("FROM fund_dca_tp_result" in s for s in sqls)
         assert any("tp = %s" in s for s in sqls)
-        assert any("w10_xirr_nom" in s for s in sqls)   # 排序列带口径后缀
+        assert any("full_xirr_nom" in s for s in sqls)   # 排序列带口径后缀
 
     def test_tp_compare_registered_and_degrades(self, client, monkeypatch):
         import app.dca_api as dca_mod
@@ -579,14 +574,14 @@ class TestDcaTpRoutes:
         sqls = conn.executed
         cmp_sql = [s for s in sqls if "GROUP BY tp" in s]
         assert cmp_sql and "FROM fund_dca_tp_result" in cmp_sql[0]
-        assert "w10_xirr_nom" in cmp_sql[0] and "full_xirr_nom" in cmp_sql[0]
+        assert "full_xirr_nom" in cmp_sql[0]
+        assert "w10_xirr" not in cmp_sql[0]   # 退役列不得残留
 
     def _snap_row(self, tp=0.20):
-        """快照表一行（16 元组：14 聚合列已圆整 + computed_at），列序同
+        """快照表一行（9 元组：7 聚合列已圆整 + computed_at），列序同
         _TP_COMPARE_SNAP_SQL。"""
         import datetime as dtm
-        return (tp, 15029, 0.0204, 0.0595, 0.0596, 0.0502, -0.0045, 0.6384,
-                0.7422, 1.93, 0.1235, 0.2346, 0.3457, 0.4568, 703.1,
+        return (tp, 15029, 0.1235, 0.2346, 0.3457, 0.4568, 1.93, 703.1,
                 dtm.datetime(2026, 11, 25, 12, 0, 0,
                              tzinfo=dtm.timezone.utc))
 
@@ -607,8 +602,9 @@ class TestDcaTpRoutes:
         assert body["method"] == "share"
         r = body["rows"][3]             # tp=0.20
         assert r["tp"] == 0.20 and r["count"] == 15029
-        assert r["w10_median"] == 0.0595 and r["w10_avg_rounds"] == 1.93
-        assert r["avg_gap_days"] == 703.1 and r["full_median"] == 0.1235
+        assert r["median"] == 0.1235 and r["mean"] == 0.2346
+        assert r["positive_share"] == 0.3457 and r["success_share"] == 0.4568
+        assert r["avg_rounds"] == 1.93 and r["avg_gap_days"] == 703.1
         assert len(conn.executed) == 1 and "GROUP BY tp" not in conn.executed[0]
         assert "fund_dca_tp_compare" in conn.executed[0]
 
@@ -685,11 +681,11 @@ class TestDcaTpRoutes:
 
     def test_tp_summary_sql_and_rows(self, client, monkeypatch):
         """summary SQL 形状：WHERE code 精确匹配 ORDER BY tp；行映射带
-        三口径总收益率/年化字段并四舍五入（2026-11-19 追加止盈后当前轮
-        十字段，列序见 _TP_SUMMARY_SQL）。"""
+        窗口起始/运作年限与止盈后当前轮十二字段（十七轮起 w10 年化/总
+        收益率六指标键退役不得残留，列序见 _TP_SUMMARY_SQL）。"""
         import app.dca_api as dca_mod
         import datetime as dt
-        row = (0.15, 0.20, 0.12, 0.19, 0.11, 0.18, 0.10,
+        row = (0.15,
                dt.date(2026, 11, 16) - dt.timedelta(days=3653),
                None, None, None, None, None, None, None, None, None, None)
         # ref 查询先行（fetchone 给 ref；fetchall 走 rows）
@@ -701,10 +697,13 @@ class TestDcaTpRoutes:
         assert body["status"] == "up" and body["code"] == "000001"
         r = body["rows"][0]
         assert r["tp"] == 0.15
-        assert r["w10_profit_rate"] == 0.20 and r["w10_xirr"] == 0.12
-        assert r["w10_profit_rate_disc"] == 0.19
-        assert r["w10_xirr_nom"] == 0.10
+        assert r["w10_start_iso"] == (dt.date(2026, 11, 16)
+                                      - dt.timedelta(days=3653)).isoformat()
+        assert r["age_years"] == pytest.approx(10.0, abs=0.1)
         assert r["full_last_tp"] is None and r["full_cur_xirr"] is None
+        for gone in ("w10_profit_rate", "w10_xirr", "w10_profit_rate_disc",
+                     "w10_xirr_disc", "w10_profit_rate_nom", "w10_xirr_nom"):
+            assert gone not in r
         assert "tp = %s" not in "".join(conn.executed)
         assert any("WHERE code = %s" in sql and "ORDER BY tp" in sql
                    for sql in conn.executed)

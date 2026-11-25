@@ -62,12 +62,9 @@ TP_LIST_BODY = {
 
 def _cmp_row(tp: float, med: float) -> dict:
     return {"tp": tp, "count": 8000,
-            "w10_p25": round(med * 0.5, 4), "w10_median": med,
-            "w10_p75": round(med * 1.5, 4), "w10_p90": round(med * 2.0, 4),
-            "w10_mean": round(med * 0.95, 4), "w10_positive_share": 0.8,
-            "w10_success_share": round(0.95 - tp, 4), "w10_avg_rounds": 12.5,
-            "full_median": round(med * 0.9, 4), "full_mean": round(med * 0.88, 4),
-            "full_positive_share": 0.79, "full_success_share": 0.5,
+            "median": med, "mean": round(med * 0.95, 4),
+            "positive_share": 0.8,
+            "success_share": round(0.95 - tp, 4), "avg_rounds": 12.5,
             "avg_gap_days": round(60 + tp * 300, 1)}
 
 
@@ -116,41 +113,14 @@ def _rounds_body_for(tp: float) -> dict:
         return TP_ROUNDS_20_BODY
     return {"status": "up", "code": "019387", "fee": "nom", "tp": tp,
             "rounds": [], "totals": dict(_EMPTY_ROUNDS)}
-
-
-# 单基金全阈值总收益率/年化汇总（gross 原列 / _disc / _nom 后缀，w10 窗口）；
-# 15%/20% 取不同值供切换断言
+# 单基金全阈值汇总（十七轮：w10 指标退役，行仅保留 tp 供档位定位）
 TP_SUMMARY_BODY = {
     "status": "up", "code": "019387",
     "rows": [
-        {"tp": 0.05, "w10_profit_rate": 0.30, "w10_xirr": 0.40,
-         "w10_profit_rate_disc": 0.29, "w10_xirr_disc": 0.38,
-         "w10_profit_rate_nom": 0.28, "w10_xirr_nom": 0.36},
-        {"tp": 0.10, "w10_profit_rate": 0.22, "w10_xirr": 0.60,
-         "w10_profit_rate_disc": 0.21, "w10_xirr_disc": 0.57,
-         "w10_profit_rate_nom": 0.20, "w10_xirr_nom": 0.55},
-        {"tp": 0.15, "w10_profit_rate": 0.16, "w10_xirr": 0.90,
-         "w10_profit_rate_disc": 0.158, "w10_xirr_disc": 0.885,
-         "w10_profit_rate_nom": 0.155, "w10_xirr_nom": 0.87},
-        {"tp": 0.20, "w10_profit_rate": 0.18, "w10_xirr": 1.003,
-         "w10_profit_rate_disc": 0.175, "w10_xirr_disc": 0.96,
-         "w10_profit_rate_nom": 0.17, "w10_xirr_nom": 0.92},
-        {"tp": 0.25, "w10_profit_rate": 0.12, "w10_xirr": 0.70,
-         "w10_profit_rate_disc": 0.115, "w10_xirr_disc": 0.68,
-         "w10_profit_rate_nom": 0.11, "w10_xirr_nom": 0.65},
-        {"tp": 0.30, "w10_profit_rate": None, "w10_xirr": None,
-         "w10_profit_rate_disc": None, "w10_xirr_disc": None,
-         "w10_profit_rate_nom": None, "w10_xirr_nom": None},
-        {"tp": 0.35, "w10_profit_rate": None, "w10_xirr": None,
-         "w10_profit_rate_disc": None, "w10_xirr_disc": None,
-         "w10_profit_rate_nom": None, "w10_xirr_nom": None},
-        {"tp": 0.40, "w10_profit_rate": None, "w10_xirr": None,
-         "w10_profit_rate_disc": None, "w10_xirr_disc": None,
-         "w10_profit_rate_nom": None, "w10_xirr_nom": None},
+        {"tp": 0.05}, {"tp": 0.10}, {"tp": 0.15},
+        {"tp": 0.20}, {"tp": 0.25},
     ],
 }
-
-
 @pytest.fixture
 def mock_tp(page):
     """mock /api/funds/dca/tp*（排行/对比/轮次三端点，记录请求 URL 供参数断言）。
@@ -361,8 +331,8 @@ class TestDcaTp:
     def test_modal_summary_cards_follow_tp_and_fee(self, servers, page,
                                                    mock_dca, mock_tp,
                                                    mock_rounds_navs):
-        """E2E-433：弹窗总收益率/年化卡显示当前档位+费率口径的 w10 值，
-        切档位、切费率均跟随。"""
+        """E2E-433（十七轮改锚）：弹窗近10年指标卡退役（总收益率·近10年/
+        年化 XIRR·近10年 不再出现），止盈后收益率/止盈后年化卡跟随费率。"""
         _, frontend_port = servers
         open_dca(page, frontend_port)
         page.locator(".browse-pv tbody tr", has_text="019387") \
@@ -370,19 +340,12 @@ class TestDcaTp:
         dlg = page.locator(".p-dialog", has_text="每次止盈明细")
         expect(dlg).to_be_visible()
         grid = dlg.locator(".dc-grid").first
-        # 初始：页面 tp=20% + 弹窗费率 nom → 0.20 行 nom 后缀
-        expect(grid).to_contain_text("总收益率·近10年")
-        expect(grid).to_contain_text("+17.0%")
-        expect(grid).to_contain_text("年化 XIRR·近10年")
-        expect(grid).to_contain_text("+92.0%")
-        # 切弹窗档位 15% → 0.15 行 nom
-        dlg.locator('button[data-modal-tp="0.15"]').click()
-        expect(grid).to_contain_text("+15.5%", timeout=10_000)
-        expect(grid).to_contain_text("+87.0%")
-        # 切弹窗费率 gross → 0.15 行原列
+        expect(grid).not_to_contain_text("总收益率·近10年")
+        expect(grid).not_to_contain_text("年化 XIRR·近10年")
+        # 切弹窗费率 gross → 止盈后卡仍跟随费率口径（full_cur 原列）
         dlg.locator('button[data-modal-fee="gross"]').click()
-        expect(grid).to_contain_text("+16.0%", timeout=10_000)
-        expect(grid).to_contain_text("+90.0%")
+        expect(dlg.locator('button[data-modal-fee="gross"]')
+              ).to_have_class(re.compile("active"), timeout=10_000)
 
     def test_modal_fee_switcher_local(self, servers, page, mock_dca, mock_tp,
                                       mock_rounds_navs):

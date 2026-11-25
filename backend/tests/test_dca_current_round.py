@@ -324,13 +324,12 @@ class TestApiCurColumns:
 
     def test_summary_rows_carry_cur_fields(self, client, monkeypatch):
         """summary 行内附十字段（弹窗按 tp/fee 切换取值）：收益率/年化
-        4 位、止盈日 ISO。SELECT 列序 = (tp, w10 收益/年化×三口径, full_start,
-        cur 十字段)。"""
+        4 位、止盈日 ISO。SELECT 列序 = (tp, full_start, cur 十字段)
+        （十七轮起 w10 指标六列退役）。"""
         import datetime as dt
 
         import app.dca_api as dca_mod
-        row = (0.15, 0.20, 0.12, 0.19, 0.11, 0.18, 0.10,
-               dt.date(2016, 11, 16),
+        row = (0.15, dt.date(2016, 11, 16),
                dt.date(2025, 6, 1), dt.date(2025, 6, 1), dt.date(2025, 6, 2),
                7000.0, 0.123456, 0.12, 0.11,
                0.345678, 0.33, 0.32)

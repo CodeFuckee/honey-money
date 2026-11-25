@@ -201,19 +201,19 @@ class TestDcaTimingRoutes:
 
     def test_timing_sql_shape(self, client, monkeypatch):
         """SQL：JOIN fund_dip_timing × fund_dca_tp_result（tp 过滤）、
-        band 过滤、fee 口径后缀排序。"""
+        band 过滤、fee 口径后缀排序（十七轮起年化排序统一全史口径）。"""
         import app.dca_api as dca_mod
         conn = FakeConnOne((None, None, None))
         _patch_connect(monkeypatch, dca_mod, conn)
         client.get("/api/funds/dca/timing",
                    params={"band": "25-30", "tp": "0.2", "fee": "nom",
-                           "sort": "w10_xirr"})
+                           "sort": "full_xirr"})
         sqls = conn.executed
         assert any("JOIN fund_dca_tp_result" in s and "fund_dip_timing" in s
                    for s in sqls)
         assert any("r.tp = %s" in s for s in sqls)
         assert any("t.dip_band = %s" in s for s in sqls)
-        assert any("ORDER BY r.w10_xirr_nom" in s for s in sqls)
+        assert any("ORDER BY r.full_xirr_nom" in s for s in sqls)
         assert any("r.full_start" in s for s in sqls)   # 运作年限数据源
         # 运作年限排序：sort=full_start（列 sortField）与 age_years（列 field）
         # 两种事件值都必须映射到 ORDER BY r.full_start（2026-11-17 用户报告
@@ -226,19 +226,24 @@ class TestDcaTimingRoutes:
                        for sql in conn2.executed), sort_val
 
     def test_timing_row_mapping(self, client, monkeypatch):
-        """行映射：dd/band/素质字段齐全，年化收益率 round(4)。"""
+        """行映射：dd/band/素质字段齐全，年化收益率 round(4)。桩行列序同
+        _TIMING_COLS（十七轮起 w10 年化/收益率六列退役，20 列）。"""
         import app.dca_api as dca_mod
         import datetime as dt
         row = ("000001", "成长先锋混合A", "混合型-偏股", True, -0.2712, 340,
                "25-30", 12.5, dt.date(2026, 11, 16) - dt.timedelta(days=3653),
-               None, None, 3, 95.4, 0.92, 1.003, 0.18,
-               3, 3, 0.90, 0.98, 0.98, 1.05, 0.175, 0.17, 94.0, 96.0)
+               None, None, 3, 95.4, 1.003,
+               3, 3, 0.98, 1.05, 94.0, 96.0)
         import datetime as dt2
         conn = FakeConnOne((dt2.date(2026, 11, 16),), rows=[row])
         _patch_connect(monkeypatch, dca_mod, conn)
         resp = client.get("/api/funds/dca/timing")
         body = resp.json()
         assert body["status"] == "up"
+        r = body["rows"][0]
+        assert r["full_xirr"] == 1.003 and r["full_xirr_nom"] == 1.05
+        assert r["w10_rounds"] == 3 and r["gap_avg_days"] == 95.4
+        assert "w10_xirr" not in r and "w10_profit_rate" not in r
 
     def test_timing_range_filters_sql(self, client, monkeypatch):
         """五维度区间筛选：age/gap/xirr/dd/pr 各自 min/max → 对应 BETWEEN
@@ -260,8 +265,8 @@ class TestDcaTimingRoutes:
         assert any("r.full_start <" in s for s in sqls)
         assert any("r.full_start >" in s for s in sqls)
         assert any("r.gap_avg_days_nom BETWEEN" in s for s in sqls)
-        assert any("r.w10_xirr_nom BETWEEN" in s for s in sqls)
-        assert any("r.w10_profit_rate_nom BETWEEN" in s for s in sqls)
+        assert any("r.full_xirr_nom BETWEEN" in s for s in sqls)
+        assert any("r.full_profit_rate_nom BETWEEN" in s for s in sqls)
         assert any("t.dd_current <= %s" in s for s in sqls)
         assert any("t.dd_current >= %s" in s for s in sqls)
         # dd 参数为用户输入取负（回撤幅度 → 负的 dd_current）
@@ -276,5 +281,5 @@ class TestDcaTimingRoutes:
         conn2 = FakeConnOne((None, None, None))
         _patch_connect(monkeypatch, dca_mod, conn2)
         client.get("/api/funds/dca/timing", params={"xirr_min": 0.3})
-        assert any("r.w10_xirr >= %s" in s for s in conn2.executed)
+        assert any("r.full_xirr >= %s" in s for s in conn2.executed)
         assert not any("BETWEEN" in s for s in conn2.executed)

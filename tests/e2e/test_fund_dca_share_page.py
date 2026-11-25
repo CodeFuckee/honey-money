@@ -68,7 +68,7 @@ SHARE_LIST_BODY = {
 
 def _share_cmp_row(tp: float, med: float) -> dict:
     return {"tp": tp, "count": 7900,
-            "w10_p25": round(med * 0.5, 4), "w10_median": med,
+            "median": med,
             "w10_p75": round(med * 1.5, 4), "w10_p90": round(med * 2.0, 4),
             "w10_mean": round(med * 0.95, 4), "w10_positive_share": 0.72,
             "w10_success_share": round(0.93 - tp, 4), "w10_avg_rounds": 11.2,
@@ -212,7 +212,7 @@ class TestDcaShareMode:
         assert list_calls and "method=share" in list_calls[-1], mock_share
         assert "tp=0.2" in list_calls[-1], list_calls[-1]
         row = page.locator(".browse-pv tbody tr", has_text="019387")
-        expect(row).to_contain_text("+75.0%")   # 等份额行自己的年化
+        expect(row).to_contain_text("+74.0%")   # 等份额行自己的年化
         expect(row).to_contain_text("9")        # 等份额止盈次数
 
     def test_compare_follows_method(self, servers, page, mock_dca,
@@ -403,7 +403,7 @@ class TestDcaShareMode:
         expect(page.locator('button[data-mode="dd_ladder"]')
               ).to_have_attribute("title", re.compile("1\\.5 倍"))
         expect(page.locator(".browse-pv tbody tr", has_text="019387")
-              ).to_contain_text("+75.0%")     # mock 回显行
+              ).to_contain_text("+74.0%")     # mock 回显行
         assert any("method=dd_ladder" in u for u in mock_share_scatter), \
             mock_share_scatter
 
@@ -439,7 +439,7 @@ class TestDcaShareMode:
         expect(page.locator('button[data-mode="dd_ladder_deep"]')
               ).to_have_attribute("title", re.compile("≥20% 投 1\\.5 倍"))
         expect(page.locator(".browse-pv tbody tr", has_text="019387")
-              ).to_contain_text("+75.0%")     # mock 回显行
+              ).to_contain_text("+74.0%")     # mock 回显行
         assert any("method=dd_ladder_deep" in u
                    for u in mock_share_scatter), mock_share_scatter
 
@@ -476,7 +476,7 @@ class TestDcaShareMode:
         expect(page.locator('button[data-mode="profit_dd_ladder"]')
               ).to_have_attribute("title", re.compile("≥10% 投 0\\.5 倍"))
         expect(page.locator(".browse-pv tbody tr", has_text="019387")
-              ).to_contain_text("+75.0%")     # mock 回显行
+              ).to_contain_text("+74.0%")     # mock 回显行
         assert any("method=profit_dd_ladder" in u
                    for u in mock_share_scatter), mock_share_scatter
 
@@ -513,7 +513,7 @@ class TestDcaShareMode:
         expect(page.locator('button[data-mode="pl_ladder"]')
               ).to_have_attribute("title", re.compile("≥20% 停投"))
         expect(page.locator(".browse-pv tbody tr", has_text="019387")
-              ).to_contain_text("+75.0%")     # mock 回显行
+              ).to_contain_text("+74.0%")     # mock 回显行
         assert any("method=pl_ladder" in u
                    for u in mock_share_scatter), mock_share_scatter
 

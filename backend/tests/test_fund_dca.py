@@ -149,10 +149,11 @@ def _fetch_dca(**kw):
 class TestDcaSqlShapes:
     # run() 的执行序：[0]=max(full_end) 参考日，[1]=列表，[2]=count，[3]=stats
     def test_default_sort_and_alive(self):
-        """缺省：alive 仅在市谓词 + ORDER BY w10_xirr DESC NULLS LAST。"""
+        """缺省：alive 仅在市谓词 + ORDER BY full_xirr DESC NULLS LAST
+        （2026-11-25 十七轮：w10 年化退役，缺省排序改全史年化）。"""
         body, conn = _fetch_dca()
         sql, params = conn.cursor_obj.executed[1]
-        assert "ORDER BY r.w10_xirr DESC NULLS LAST" in sql
+        assert "ORDER BY r.full_xirr DESC NULLS LAST" in sql
         assert "r.alive = TRUE" in sql
         assert params[-2:] == (50, 0)
 
@@ -166,11 +167,11 @@ class TestDcaSqlShapes:
         assert any("ORDER BY r.full_start" in s for s in sqls)
 
     def test_sort_whitelist_rejects_injection(self):
-        """sort 非白名单值回落 w10_xirr——非法值不得进入 SQL（防注入）。"""
+        """sort 非白名单值回落 full_xirr——非法值不得进入 SQL（防注入）。"""
         body, conn = _fetch_dca(sort="w10_xirr; DROP TABLE fund_dca_result")
         sql, _ = conn.cursor_obj.executed[1]
         assert "DROP TABLE" not in sql
-        assert "ORDER BY r.w10_xirr DESC" in sql
+        assert "ORDER BY r.full_xirr DESC" in sql
 
     def test_sort_and_order_mapping(self):
         """sort=full_xirr & order=asc → ORDER BY full_xirr ASC。"""
@@ -621,30 +622,35 @@ class TestDcaListFee:
     # run() 的执行序：[0]=max(full_end) 参考日，[1]=列表，[2]=count，[3]=stats
 
     def test_select_always_carries_all_fee_columns(self):
-        """SELECT 恒含三口径后缀列（前端按行内字段自取，不靠服务端裁剪）。"""
+        """SELECT 恒含三口径后缀列（前端按行内字段自取，不靠服务端裁剪）；
+        十七轮退役的 w10 年化/总收益率六列不得残留。"""
         body, conn = _fetch_dca()
         sql, _ = conn.cursor_obj.executed[1]
-        for col in ("w10_xirr_nom", "w10_rounds_disc", "gap_avg_days_nom",
-                    "w10_profit_rate_nom", "full_profit_rate_disc"):
+        for col in ("full_xirr_nom", "full_xirr_disc", "w10_rounds_disc",
+                    "gap_avg_days_nom", "full_profit_rate_nom",
+                    "full_profit_rate_disc"):
             assert col in sql
+        for gone in ("w10_xirr", "w10_profit_rate"):
+            assert gone not in sql
         assert body["fee"] == "gross"          # 缺省口径回显
 
     def test_default_sort_is_gross_column(self):
-        """缺省 fee=gross：排序沿用原列（行为与旧版一致）。"""
+        """缺省 fee=gross：排序/统计用不带后缀的全史年化列（十七轮起
+        统一全史口径，gross 与 disc/nom 仅差后缀）。"""
         body, conn = _fetch_dca()
         sql, _ = conn.cursor_obj.executed[1]
-        assert "ORDER BY r.w10_xirr DESC NULLS LAST" in sql
+        assert "ORDER BY r.full_xirr DESC NULLS LAST" in sql
         stats_sql, _ = conn.cursor_obj.executed[3]
-        assert "r.w10_xirr IS NOT NULL" in stats_sql
+        assert "r.full_xirr IS NOT NULL" in stats_sql
         assert "r.w10_rounds > 0" in stats_sql
 
     def test_fee_nom_switches_sort_and_stats_columns(self):
         """fee=nom：排序/统计切到 _nom 后缀列。"""
         body, conn = _fetch_dca(fee="nom")
         sql, _ = conn.cursor_obj.executed[1]
-        assert "ORDER BY r.w10_xirr_nom DESC NULLS LAST" in sql
+        assert "ORDER BY r.full_xirr_nom DESC NULLS LAST" in sql
         stats_sql, _ = conn.cursor_obj.executed[3]
-        assert "r.w10_xirr_nom IS NOT NULL" in stats_sql
+        assert "r.full_xirr_nom IS NOT NULL" in stats_sql
         assert "r.w10_rounds_nom > 0" in stats_sql
         assert body["fee"] == "nom"
 
@@ -659,9 +665,9 @@ class TestDcaListFee:
 
     def test_fee_disc_sort_by_profit_rate(self):
         """fee=disc：收益率排序切 _disc；非口径字段（规模）不受影响。"""
-        body, conn = _fetch_dca(fee="disc", sort="w10_profit_rate")
+        body, conn = _fetch_dca(fee="disc", sort="full_profit_rate")
         sql, _ = conn.cursor_obj.executed[1]
-        assert "ORDER BY r.w10_profit_rate_disc DESC NULLS LAST" in sql
+        assert "ORDER BY r.full_profit_rate_disc DESC NULLS LAST" in sql
         body, conn = _fetch_dca(fee="nom", sort="scale_yi")
         sql, _ = conn.cursor_obj.executed[1]
         assert "ORDER BY r.scale_yi DESC NULLS LAST" in sql
@@ -671,7 +677,7 @@ class TestDcaListFee:
         body, conn = _fetch_dca(fee="nom; DROP TABLE fund_dca_result")
         sql, _ = conn.cursor_obj.executed[1]
         assert "DROP" not in sql
-        assert "ORDER BY r.w10_xirr DESC NULLS LAST" in sql
+        assert "ORDER BY r.full_xirr DESC NULLS LAST" in sql
         assert body["fee"] == "gross"
 
     def test_select_columns_match_row_mapping(self):
@@ -715,11 +721,11 @@ class TestDcaTimingJoin:
         assert "ORDER BY t.days_since_peak DESC NULLS LAST" in sql
 
     def test_dd_sort_whitelist_rejects_injection(self):
-        """sort 时机列同样受白名单保护：注入串回落 w10_xirr，不得进 SQL。"""
+        """sort 时机列同样受白名单保护：注入串回落 full_xirr，不得进 SQL。"""
         body, conn = _fetch_dca(sort="dd_current; DROP TABLE fund_dip_timing")
         sql, _ = conn.cursor_obj.executed[1]
         assert "DROP" not in sql
-        assert "ORDER BY r.w10_xirr DESC" in sql
+        assert "ORDER BY r.full_xirr DESC" in sql
 
 
 class TestDcaRiskJoin:
@@ -769,11 +775,11 @@ class TestDcaRiskJoin:
         assert "ORDER BY rm.vol_all DESC NULLS LAST" in sql
 
     def test_risk_sort_whitelist_rejects_injection(self):
-        """sort 波动列同样受白名单保护：注入串回落 w10_xirr，不得进 SQL。"""
+        """sort 波动列同样受白名单保护：注入串回落 full_xirr，不得进 SQL。"""
         body, conn = _fetch_dca(sort="vol_all; DROP TABLE fund_risk_metrics")
         sql, _ = conn.cursor_obj.executed[1]
         assert "DROP" not in sql
-        assert "ORDER BY r.w10_xirr DESC" in sql
+        assert "ORDER BY r.full_xirr DESC" in sql
 
     def test_row_mapping_round4_covers_risk(self):
         """行映射 round4 覆盖波动列（sharpe 也 round4，前端 toFixed(2)）。"""
@@ -814,10 +820,10 @@ class TestDcaRiskScore:
         assert "ORDER BY rm.risk_score DESC NULLS LAST" in sql
 
     def test_risk_score_sort_whitelist_rejects_injection(self):
-        """注入串同样回落 w10_xirr，不得进 SQL。"""
+        """注入串同样回落 full_xirr，不得进 SQL。"""
         body, conn = _fetch_dca(sort="risk_score) --")
         sql, _ = conn.cursor_obj.executed[1]
-        assert "ORDER BY r.w10_xirr DESC" in sql
+        assert "ORDER BY r.full_xirr DESC" in sql
 
     def test_risk_score_in_round4(self):
         """行映射 round4 覆盖 risk_score（前端 pctile 百分比格式化）。"""
@@ -887,7 +893,7 @@ class TestDcaRangeFilters:
     def test_xirr_range_clause_and_param(self):
         body, conn = _fetch_dca(xirr_min=0.3, xirr_max=0.9)
         sql, params = conn.cursor_obj.executed[1]
-        assert "r.w10_xirr BETWEEN %s AND %s" in sql
+        assert "r.full_xirr BETWEEN %s AND %s" in sql
         assert params[-4:-2] == (0.3, 0.9)
         assert params[-2:] == (50, 0)
 
@@ -957,28 +963,30 @@ class TestDcaScatterFee:
     def test_default_fee_is_nom(self):
         body, conn = _fetch_scatter()
         sql, _ = conn.cursor_obj.executed[1]
-        assert "w10_xirr_nom" in sql
+        assert "full_xirr_nom" in sql
         assert body["fee"] == "nom"
 
     def test_fee_nom_switches_column(self):
         body, conn = _fetch_scatter(fee="nom")
         sql, _ = conn.cursor_obj.executed[1]
-        assert "w10_xirr_nom" in sql
-        assert "w10_xirr_disc" not in sql
+        assert "full_xirr_nom" in sql
+        assert "full_xirr_disc" not in sql
         assert body["fee"] == "nom"
 
-    def test_fee_gross_uses_legacy_column(self):
+    def test_fee_gross_uses_full_column(self):
+        """gross 口径 = 不带后缀的全史年化列（十七轮起散点统一全史）。"""
         body, conn = _fetch_scatter(fee="gross")
         sql, _ = conn.cursor_obj.executed[1]
-        assert "w10_xirr IS NOT NULL" in sql
+        assert "full_xirr IS NOT NULL" in sql
+        assert "w10_xirr" not in sql
         assert body["fee"] == "gross"
 
     def test_fee_invalid_falls_back_to_nom(self):
         """非白名单值（含注入串）回落 nom，不得进入 SQL。"""
-        body, conn = _fetch_scatter(fee="w10_xirr; DROP TABLE fund_dca_result")
+        body, conn = _fetch_scatter(fee="banana; DROP TABLE fund_dca_result")
         sql, _ = conn.cursor_obj.executed[1]
         assert "DROP" not in sql
-        assert "w10_xirr_nom" in sql
+        assert "full_xirr_nom" in sql
         assert body["fee"] == "nom"
 
 

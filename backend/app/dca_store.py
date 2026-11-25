@@ -900,11 +900,12 @@ def merge_risk(conn, rows: list[tuple], codes: list[str]) -> int:
 # percentile_cont 分位，生产实测 ~2.2s/次、前端切换定投方式感知 2~4s）——
 # 改为日更导入后顺带预计算落小表（method × equity × fee × tp = 5×2×3×8
 # = 240 行），API 优先读快照（毫秒级），快照缺表/缺行回落现算。
-# 口径锚点（2026-11-25 生产真机对跑逐值一致）：旧查询 WHERE {wx} IS NOT
+# 口径锚点（2026-11-25 生产真机对跑逐值一致）：聚合门 WHERE {fx} IS NOT
 # NULL 把「年化非空」宇宙作用到全部聚合列——年化 NULL（窗口过短）的行其
 # 轮次/间隔列仍非空、不能混入统计（无过滤单遍版会被真机数据证伪：成功率
 # /平均轮次/平均间隔全部偏移），因此单遍版每个聚合都必须带
-# FILTER (WHERE {wx} IS NOT NULL)。
+# FILTER (WHERE {fx} IS NOT NULL)——2026-11-25 十七轮起门与分位源统一为
+# 全史年化（w10 年化指标退役，w10 五分位列与 full_* 重复列一并删除）。
 
 _TP_COMPARE_DDL = """
 CREATE TABLE IF NOT EXISTS fund_dca_tp_compare (
@@ -913,42 +914,50 @@ CREATE TABLE IF NOT EXISTS fund_dca_tp_compare (
   fee          VARCHAR(8) NOT NULL,
   tp           DOUBLE PRECISION NOT NULL,
   sample_count INTEGER,
-  w10_p25 DOUBLE PRECISION, w10_median DOUBLE PRECISION,
-  w10_p75 DOUBLE PRECISION, w10_p90 DOUBLE PRECISION, w10_mean DOUBLE PRECISION,
-  w10_positive_share DOUBLE PRECISION, w10_success_share DOUBLE PRECISION,
-  w10_avg_rounds DOUBLE PRECISION,
-  full_median DOUBLE PRECISION, full_mean DOUBLE PRECISION,
-  full_positive_share DOUBLE PRECISION, full_success_share DOUBLE PRECISION,
+  median DOUBLE PRECISION, mean DOUBLE PRECISION,
+  positive_share DOUBLE PRECISION, success_share DOUBLE PRECISION,
+  avg_rounds DOUBLE PRECISION,
   avg_gap_days DOUBLE PRECISION,
   computed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (method, equity, fee, tp)
 );
+ALTER TABLE fund_dca_tp_compare DROP COLUMN IF EXISTS w10_p25;
+ALTER TABLE fund_dca_tp_compare DROP COLUMN IF EXISTS w10_median;
+ALTER TABLE fund_dca_tp_compare DROP COLUMN IF EXISTS w10_p75;
+ALTER TABLE fund_dca_tp_compare DROP COLUMN IF EXISTS w10_p90;
+ALTER TABLE fund_dca_tp_compare DROP COLUMN IF EXISTS w10_mean;
+ALTER TABLE fund_dca_tp_compare DROP COLUMN IF EXISTS w10_positive_share;
+ALTER TABLE fund_dca_tp_compare DROP COLUMN IF EXISTS w10_success_share;
+ALTER TABLE fund_dca_tp_compare DROP COLUMN IF EXISTS w10_avg_rounds;
+ALTER TABLE fund_dca_tp_compare DROP COLUMN IF EXISTS full_median;
+ALTER TABLE fund_dca_tp_compare DROP COLUMN IF EXISTS full_mean;
+ALTER TABLE fund_dca_tp_compare DROP COLUMN IF EXISTS full_positive_share;
+ALTER TABLE fund_dca_tp_compare DROP COLUMN IF EXISTS full_success_share;
+ALTER TABLE fund_dca_tp_compare ADD COLUMN IF NOT EXISTS median DOUBLE PRECISION;
+ALTER TABLE fund_dca_tp_compare ADD COLUMN IF NOT EXISTS mean DOUBLE PRECISION;
+ALTER TABLE fund_dca_tp_compare ADD COLUMN IF NOT EXISTS positive_share DOUBLE PRECISION;
+ALTER TABLE fund_dca_tp_compare ADD COLUMN IF NOT EXISTS success_share DOUBLE PRECISION;
+ALTER TABLE fund_dca_tp_compare ADD COLUMN IF NOT EXISTS avg_rounds DOUBLE PRECISION;
 """
 
 _FEE_COL_SUFFIX = {"gross": "", "disc": "_disc", "nom": "_nom"}
 
-# 单费用口径的 14 项聚合列块（{wx} 年化 / {fx} 全史年化 / {wr} 轮次 /
-# {fr} 全史轮次 / {gap} 平均间隔；后缀按 _FEE_COL_SUFFIX 替换）。列序与
-# _tp_compare_row 映射、API 快照行映射逐位对齐；FILTER 口径锚点见节注释
+# 单费用口径的 7 项聚合列块（{fx} 全史年化 / {wr} 轮次 / {fr} 全史轮次 /
+# {gap} 平均间隔；后缀按 _FEE_COL_SUFFIX 替换；十七轮起 w10 年化退役，
+# 门与分位源统一 {fx}）。列序与 _tp_compare_row 映射、API 快照行映射逐位
+# 对齐；FILTER 口径锚点见节注释
 _TP_AGG_BLOCK = """
-  count({wx}) FILTER (WHERE {wx} IS NOT NULL),
-  percentile_cont(0.25) WITHIN GROUP (ORDER BY {wx}) FILTER (WHERE {wx} IS NOT NULL),
-  percentile_cont(0.5)  WITHIN GROUP (ORDER BY {wx}) FILTER (WHERE {wx} IS NOT NULL),
-  percentile_cont(0.75) WITHIN GROUP (ORDER BY {wx}) FILTER (WHERE {wx} IS NOT NULL),
-  percentile_cont(0.9)  WITHIN GROUP (ORDER BY {wx}) FILTER (WHERE {wx} IS NOT NULL),
-  avg({wx}) FILTER (WHERE {wx} IS NOT NULL),
-  avg(({wx} > 0)::int) FILTER (WHERE {wx} IS NOT NULL),
-  avg(({wr} > 0)::int) FILTER (WHERE {wx} IS NOT NULL),
-  avg({wr}) FILTER (WHERE {wx} IS NOT NULL),
-  percentile_cont(0.5) WITHIN GROUP (ORDER BY {fx}) FILTER (WHERE {wx} IS NOT NULL),
-  avg({fx}) FILTER (WHERE {wx} IS NOT NULL),
-  avg(({fx} > 0)::int) FILTER (WHERE {wx} IS NOT NULL),
-  avg(({fr} > 0)::int) FILTER (WHERE {wx} IS NOT NULL),
-  avg({gap}) FILTER (WHERE {wx} IS NOT NULL)
+  count({fx}) FILTER (WHERE {fx} IS NOT NULL),
+  percentile_cont(0.5) WITHIN GROUP (ORDER BY {fx}) FILTER (WHERE {fx} IS NOT NULL),
+  avg({fx}) FILTER (WHERE {fx} IS NOT NULL),
+  avg(({fx} > 0)::int) FILTER (WHERE {fx} IS NOT NULL),
+  avg(({wr} > 0)::int) FILTER (WHERE {fx} IS NOT NULL),
+  avg({wr}) FILTER (WHERE {fx} IS NOT NULL),
+  avg({gap}) FILTER (WHERE {fx} IS NOT NULL)
 """
 
 _TP_COMPARE_AGG_SQL = "SELECT tp,\n" + ",\n".join(
-    _TP_AGG_BLOCK.format(wx=f"w10_xirr{sfx}", fx=f"full_xirr{sfx}",
+    _TP_AGG_BLOCK.format(fx=f"full_xirr{sfx}",
                          wr=f"w10_rounds{sfx}", fr=f"full_rounds{sfx}",
                          gap=f"gap_avg_days{sfx}")
     for sfx in _FEE_COL_SUFFIX.values()) + """
@@ -958,11 +967,9 @@ GROUP BY tp ORDER BY tp
 """
 
 _TP_COMPARE_COLS = ["method", "equity", "fee", "tp", "sample_count",
-                    "w10_p25", "w10_median", "w10_p75", "w10_p90", "w10_mean",
-                    "w10_positive_share", "w10_success_share",
-                    "w10_avg_rounds", "full_median", "full_mean",
-                    "full_positive_share", "full_success_share",
-                    "avg_gap_days"]
+                    "median", "mean",
+                    "positive_share", "success_share",
+                    "avg_rounds", "avg_gap_days"]
 _TP_COMPARE_INSERT = f"""
 INSERT INTO fund_dca_tp_compare ({", ".join(_TP_COMPARE_COLS)})
 VALUES ({", ".join(["%s"] * len(_TP_COMPARE_COLS))})
@@ -970,21 +977,20 @@ VALUES ({", ".join(["%s"] * len(_TP_COMPARE_COLS))})
 
 
 def _tp_compare_row(method: str, equity: bool, fee: str, r: tuple) -> tuple:
-    """单遍聚合行 → 快照行。一行含三费用块（r[1:15] gross、r[15:29] disc、
-    r[29:43] nom，块序同 _TP_COMPARE_AGG_SQL 的 _FEE_COL_SUFFIX 拼接序），
-    按 fee 取对应块；列内序同 _TP_AGG_BLOCK（count / w10 四分位+均值 /
-    正收益 / 成功 / 平均轮次 / 全史四项 / 平均间隔）。精度圆整同 API 现算
-    （分位/均值/占比 4 位、平均轮次 2 位、平均间隔 1 位——快照输出与现算
-    输出逐值一致）。"""
-    off = 1 + {"gross": 0, "disc": 14, "nom": 28}[fee]
+    """单遍聚合行 → 快照行。一行含三费用块（r[1:8] gross、r[8:15] disc、
+    r[15:22] nom，块序同 _TP_COMPARE_AGG_SQL 的 _FEE_COL_SUFFIX 拼接序），
+    按 fee 取对应块；列内序同 _TP_AGG_BLOCK（count / 中位 / 均值 / 正收益 /
+    成功 / 平均轮次 / 平均间隔——门与分位源统一全史年化，2026-11-25 十七轮）。
+    精度圆整同 API 现算（中位/均值/占比 4 位、平均轮次 2 位、平均间隔 1 位
+    ——快照输出与现算输出逐值一致）。"""
+    off = 1 + {"gross": 0, "disc": 7, "nom": 14}[fee]
 
     def q(i, nd):
         return round(r[off + i], nd) if r[off + i] is not None else None
     return (method, equity, fee, r[0],
             r[off] if r[off] is not None else None,
-            q(1, 4), q(2, 4), q(3, 4), q(4, 4), q(5, 4),
-            q(6, 4), q(7, 4), q(8, 2), q(9, 4), q(10, 4),
-            q(11, 4), q(12, 4), q(13, 1))
+            q(1, 4), q(2, 4), q(3, 4),
+            q(4, 4), q(5, 2), q(6, 1))
 
 
 def rebuild_tp_compare(conn, *, equity_types) -> int:

@@ -41,8 +41,8 @@ LIST_BODY = {
          "risk_score": 0.4123, "osc_per_year": 2.3456, "osc_pctile": 0.7777,
          "w10_start": "2023-11-28", "w10_end": "2026-10-28", "w10_months": 36,
          "w10_rounds": 6, "w10_invested": 36000, "w10_final_value": 42480,
-         "w10_profit_rate": 0.18, "w10_xirr": 1.003, "gap_avg_days": 95.4,
-         "full_xirr": 1.003, "full_rounds": 6, "full_profit_rate": 0.18,
+         "gap_avg_days": 95.4, "full_xirr": 1.003,
+         "full_rounds": 6, "full_profit_rate": 0.18,
          "full_months": 36},
         {"code": "161725", "name": "招商中证白酒指数(LOF)A", "fund_type": "指数型-股票",
          "alive": True, "scale_yi": 209.0, "scale_date": "2026-09-30",
@@ -53,8 +53,8 @@ LIST_BODY = {
          "risk_score": None, "osc_per_year": None, "osc_pctile": None,
          "w10_start": "2016-10-31", "w10_end": "2026-10-28", "w10_months": 121,
          "w10_rounds": 7, "w10_invested": 121000, "w10_final_value": 102850,
-         "w10_profit_rate": -0.15, "w10_xirr": -0.147, "gap_avg_days": None,
-         "full_xirr": -0.133, "full_rounds": 7, "full_profit_rate": -0.15,
+         "gap_avg_days": None, "full_xirr": -0.133,
+         "full_rounds": 7, "full_profit_rate": -0.15,
          "full_months": 138},
     ],
     "stats": {"count": 13557, "p25": 0.022, "median": 0.041, "p75": 0.114,
@@ -127,7 +127,7 @@ def _list_body_for(fee: str) -> dict:
     import copy
     b = copy.deepcopy(LIST_BODY)
     for r in b["rows"]:
-        for k in ("w10_xirr", "full_xirr", "w10_profit_rate", "gap_avg_days"):
+        for k in ("full_xirr", "full_profit_rate", "gap_avg_days"):
             if r.get(k) is not None:
                 for f, s in _FEE_SCALE.items():
                     r[f"{k}_{f}"] = round(r[k] * s, 4)
@@ -243,10 +243,10 @@ class TestFundDcaPage:
         expect(page.locator(".learn-metrics")).to_contain_text("3.8%")
         row = page.locator(".browse-pv tbody tr", has_text="中欧时代共赢")
         expect(row).to_contain_text("+92.3%")
-        expect(row.locator(".chg-up")).to_have_count(3)   # 总收益/两个年化
+        expect(row.locator(".chg-up")).to_have_count(1)   # 年化
         row2 = page.locator(".browse-pv tbody tr", has_text="白酒")
-        expect(row2.locator(".chg-down")).to_have_count(3)
-        expect(row2).to_contain_text("-13.5%")
+        expect(row2.locator(".chg-down")).to_have_count(1)
+        expect(row2).to_contain_text("-12.2%")
         # 运作年限列渲染（服务端按首条净值计算）+ 止盈间隔列
         expect(row).to_contain_text("2.9 年")
         expect(row).to_contain_text("≈2.9 月/次")
@@ -625,7 +625,8 @@ class TestFundDcaPage:
         """E2E-404：点「年化·全史」列头 → sort=full_xirr&order=asc。"""
         _, frontend_port = servers
         open_dca(page, frontend_port)
-        page.locator(".browse-pv th", has_text="年化·全史").click()
+        page.locator(".browse-pv th"
+                     ).filter(has_text=re.compile(r"^年化$")).click()
         page.wait_for_timeout(400)
         assert any("sort=full_xirr" in u and "order=asc" in u
                    for u in mock_dca), mock_dca

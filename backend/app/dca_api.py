@@ -17,12 +17,11 @@ from .dca_backtest import (DCA_METHODS, TAKE_PROFIT,   # 阈值/定投方式事�
 _DCA_LIST_SQL = """
 SELECT r.code, r.name, r.fund_type, r.alive, r.scale_yi, r.scale_date,
        r.w10_start, r.w10_end, r.w10_months, r.w10_rounds,
-       r.w10_invested, r.w10_final_value, r.w10_profit_rate, r.w10_xirr,
+       r.w10_invested, r.w10_final_value,
        r.full_xirr, r.full_rounds, r.full_profit_rate, r.full_months,
        r.full_start, r.gap_avg_days,
-       r.w10_xirr_disc, r.w10_xirr_nom, r.full_xirr_disc, r.full_xirr_nom,
+       r.full_xirr_disc, r.full_xirr_nom,
        r.w10_rounds_disc, r.w10_rounds_nom, r.full_rounds_disc, r.full_rounds_nom,
-       r.w10_profit_rate_disc, r.w10_profit_rate_nom,
        r.full_profit_rate_disc, r.full_profit_rate_nom,
        r.gap_avg_days_disc, r.gap_avg_days_nom,
        t.dd_current, t.days_since_peak, t.dip_band,
@@ -84,7 +83,7 @@ _DCA_REF_SQL = "SELECT max(full_end) FROM fund_dca_result"
 
 # 排序白名单：前端传列名，只允许这些键进 ORDER BY（防注入）
 _SORTABLE = {
-    "w10_xirr", "full_xirr", "w10_profit_rate", "full_profit_rate",
+    "full_xirr", "full_profit_rate",
     "w10_rounds", "full_rounds", "scale_yi", "code", "full_start",
     "gap_avg_days", "age_years",   # 运作年限列 field 别名 → ORDER BY full_start
     "dd_current", "days_since_peak",   # 时机列（LEFT JOIN fund_dip_timing）
@@ -99,7 +98,7 @@ _SORTABLE = {
 # 前端按行内后缀字段自取（与静态快照同一份行结构）
 _LIST_FEE_SUFFIX = {"gross": "", "disc": "_disc", "nom": "_nom"}
 # 这些排序字段区分口径；scale_yi / code / full_start 与费用无关
-_FEE_SORTABLE = {"w10_xirr", "full_xirr", "w10_profit_rate", "full_profit_rate",
+_FEE_SORTABLE = {"full_xirr", "full_profit_rate",
                  "w10_rounds", "full_rounds", "gap_avg_days",
                  "full_cur_xirr", "full_cur_profit_rate"}
 # 排序落在时机表（t 别名）的字段；其余白名单字段在主表（r 别名）
@@ -151,14 +150,14 @@ def _range_filters(*, ref, suffix, age_min=None, age_max=None,
         clauses.append("r.full_start >= %s")
         params.append(ref - dt.timedelta(days=365.25 * age_max))
     _between(f"r.gap_avg_days{suffix}", gap_min, gap_max)
-    _between(f"r.w10_xirr{suffix}", xirr_min, xirr_max)
+    _between(f"r.full_xirr{suffix}", xirr_min, xirr_max)
     if dd_min is not None:
         clauses.append("t.dd_current <= %s")
         params.append(-dd_min / 100.0)   # 25 → -0.25
     if dd_max is not None:
         clauses.append("t.dd_current >= %s")
         params.append(-dd_max / 100.0)
-    _between(f"r.w10_profit_rate{suffix}", pr_min, pr_max)
+    _between(f"r.full_profit_rate{suffix}", pr_min, pr_max)
     return clauses, params
 
 # 权益类白名单（东财 fund_type）：股票/偏股/灵活/平衡混合 + A股股票指数
@@ -178,13 +177,12 @@ def _parse_equity(raw) -> bool:
 _LIST_COLS = ["code", "name", "fund_type", "alive", "scale_yi",
               "scale_date", "w10_start", "w10_end", "w10_months",
               "w10_rounds", "w10_invested", "w10_final_value",
-              "w10_profit_rate", "w10_xirr", "full_xirr",
+              "full_xirr",
               "full_rounds", "full_profit_rate", "full_months",
               "full_start", "gap_avg_days",
-              "w10_xirr_disc", "w10_xirr_nom", "full_xirr_disc",
+              "full_xirr_disc",
               "full_xirr_nom", "w10_rounds_disc", "w10_rounds_nom",
               "full_rounds_disc", "full_rounds_nom",
-              "w10_profit_rate_disc", "w10_profit_rate_nom",
               "full_profit_rate_disc", "full_profit_rate_nom",
               "gap_avg_days_disc", "gap_avg_days_nom",
               # 时机列（LEFT JOIN fund_dip_timing；非在市/未刷新基金为 NULL）
@@ -200,10 +198,9 @@ _LIST_COLS = ["code", "name", "fund_type", "alive", "scale_yi",
               "full_cur_profit_rate_nom",
               "full_cur_xirr", "full_cur_xirr_disc", "full_cur_xirr_nom"]
 # 浮点保留 4 位的字段（口径变体与原字段同规则）
-_LIST_ROUND4 = ("w10_xirr", "full_xirr", "w10_profit_rate",
-                "full_profit_rate", "w10_xirr_disc", "w10_xirr_nom",
+_LIST_ROUND4 = ("full_xirr",
+                "full_profit_rate",
                 "full_xirr_disc", "full_xirr_nom",
-                "w10_profit_rate_disc", "w10_profit_rate_nom",
                 "full_profit_rate_disc", "full_profit_rate_nom",
                 "vol_all", "vol_down_all", "mdd_all", "sharpe_all",
                 "roll_vol", "vol_pctile", "risk_score",
@@ -226,7 +223,7 @@ def _safe(fn, default):
 
 
 def fetch_dca_list(dsn: str, *, q: str = "", alive: str = "true",
-                   sort: str = "w10_xirr", order: str = "desc",
+                   sort: str = "full_xirr", order: str = "desc",
                    min_age: float = 0.0, min_scale: float = 0.0,
                    limit: int = 50, offset: int = 0, fee: str = "gross",
                    equity: bool = True,
@@ -248,10 +245,10 @@ def fetch_dca_list(dsn: str, *, q: str = "", alive: str = "true",
     行内附时机列 dd_current/days_since_peak/dip_band（LEFT JOIN
     fund_dip_timing，非在市/未刷新基金为 NULL——2026-11-17 表格合并，
     定投时机与排行共用一张表）。
-    统计卡同步跟随各筛选与费用口径。sort 非白名单回落 w10_xirr；
+    统计卡同步跟随各筛选与费用口径。sort 非白名单回落 full_xirr；
     fee 选费用口径（gross=不含费 / disc=申购一折 / nom=申购名义，
     白名单外回落 gross），仅切换排序与统计列——行内恒带全部口径字段
-    （w10_xirr / *_disc / *_nom 等），响应回显 fee 与 equity。
+    （full_xirr / *_disc / *_nom 等），响应回显 fee 与 equity。
     """
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
@@ -260,7 +257,7 @@ def fetch_dca_list(dsn: str, *, q: str = "", alive: str = "true",
     suffix = _LIST_FEE_SUFFIX[fee_val]
     if sort == "age_years":            # 运作年限列 field → 排序落库列成立日
         sort = "full_start"
-    sort_base = sort if sort in _SORTABLE else "w10_xirr"
+    sort_base = sort if sort in _SORTABLE else "full_xirr"
     sort_col = _list_sort_col(sort_base, suffix)
     order_dir = "ASC" if order.lower() == "asc" else "DESC"
     alive_clause = ("true" if alive not in ("true", "false")
@@ -300,7 +297,7 @@ def fetch_dca_list(dsn: str, *, q: str = "", alive: str = "true",
                              .replace("{equity_clause}", equity_clause)
                              .replace("{range_clause}", range_clause))
                 stats_sql = (_DCA_STATS_SQL
-                             .replace("{xirr_col}", f"r.w10_xirr{suffix}")
+                             .replace("{xirr_col}", f"r.full_xirr{suffix}")
                              .replace("{rounds_col}", f"r.w10_rounds{suffix}")
                              .replace("{age_clause}", age_clause)
                              .replace("{scale_clause}", scale_clause)
@@ -391,7 +388,7 @@ def fetch_dca_rounds(dsn: str, code: str, fee: str = "nom") -> dict:
 
 def register_fund_dca_routes(app):
     @app.get("/api/funds/dca")
-    def funds_dca(q: str = "", alive: str = "true", sort: str = "w10_xirr",
+    def funds_dca(q: str = "", alive: str = "true", sort: str = "full_xirr",
                   order: str = "desc", min_age: float = 0.0,
                   min_scale: float = 0.0, limit: int = 50, offset: int = 0,
                   fee: str = "gross", equity: str = "true",
@@ -453,7 +450,7 @@ def register_fund_dca_routes(app):
 
     @app.get("/api/funds/dca/tp")
     def funds_dca_tp(tp: str = "0.2", q: str = "", alive: str = "true",
-                     sort: str = "w10_xirr", order: str = "desc",
+                     sort: str = "full_xirr", order: str = "desc",
                      min_age: float = 0.0, min_scale: float = 0.0,
                      limit: int = 50, offset: int = 0, fee: str = "gross",
                      equity: str = "true", method: str = "amount",
@@ -521,7 +518,7 @@ def register_fund_dca_routes(app):
 
     @app.get("/api/funds/dca/timing")
     def funds_dca_timing(tp: str = "0.2", band: str = "25-30", q: str = "",
-                         alive: str = "true", sort: str = "w10_xirr",
+                         alive: str = "true", sort: str = "full_xirr",
                          order: str = "desc", min_age: float = 0.0,
                          min_scale: float = 0.0, limit: int = 50,
                          offset: int = 0, fee: str = "gross",
@@ -582,9 +579,10 @@ def register_fund_dca_routes(app):
 AGE_BANDS = [(0, 1), (1, 3), (3, 5), (5, 10), (10, None)]     # 运作年限段（年）
 SCALE_BANDS = [(0, 1), (1, 10), (10, 100), (100, None)]       # 规模段（亿元）
 
-# 年化口径 → 结果表列名（gross=不含费原口径；disc/nom 含费，赎回费一致）
-_FEE_XIRR_COL = {"gross": "w10_xirr", "disc": "w10_xirr_disc",
-                 "nom": "w10_xirr_nom"}
+# 年化口径 → 结果表列名（gross=不含费原口径；disc/nom 含费，赎回费一致）；
+# 2026-11-25 十七轮起年化统一全史口径（w10 年化指标退役）
+_FEE_XIRR_COL = {"gross": "full_xirr", "disc": "full_xirr_disc",
+                 "nom": "full_xirr_nom"}
 
 
 def _pct(sorted_vals, p):
@@ -657,7 +655,7 @@ def fetch_dca_scatter(dsn: str, fee: str = "nom", equity: bool = True,
     [age, scale, xirr, code, name, fund_type]，规模取对数轴定位由前端处理；
     降级约定同 /api/funds/dca。
     """
-    xirr_col = _FEE_XIRR_COL.get(fee, "w10_xirr_nom")
+    xirr_col = _FEE_XIRR_COL.get(fee, "full_xirr_nom")
     method_val = method if method in DCA_METHODS else "amount"
     tp_val = next((t for t in TP_THRESHOLDS if abs(tp - t) < 1e-9),
                   TAKE_PROFIT)
@@ -717,12 +715,11 @@ def fetch_dca_scatter(dsn: str, fee: str = "nom", equity: bool = True,
 _TP_LIST_SQL = """
 SELECT r.tp, r.code, r.name, r.fund_type, r.alive, r.scale_yi, r.scale_date,
        r.w10_start, r.w10_end, r.w10_months, r.w10_rounds,
-       r.w10_invested, r.w10_final_value, r.w10_profit_rate, r.w10_xirr,
+       r.w10_invested, r.w10_final_value,
        r.full_xirr, r.full_rounds, r.full_profit_rate, r.full_months,
        r.full_start, r.gap_avg_days,
-       r.w10_xirr_disc, r.w10_xirr_nom, r.full_xirr_disc, r.full_xirr_nom,
+       r.full_xirr_disc, r.full_xirr_nom,
        r.w10_rounds_disc, r.w10_rounds_nom, r.full_rounds_disc, r.full_rounds_nom,
-       r.w10_profit_rate_disc, r.w10_profit_rate_nom,
        r.full_profit_rate_disc, r.full_profit_rate_nom,
        r.gap_avg_days_disc, r.gap_avg_days_nom,
        t.dd_current, t.days_since_peak, t.dip_band,
@@ -783,18 +780,12 @@ _TP_LIST_COLS = ["tp"] + _LIST_COLS
 
 _TP_COMPARE_SQL = """
 SELECT tp, count(*),
-       percentile_cont(0.25) WITHIN GROUP (ORDER BY {wx}),
-       percentile_cont(0.5)  WITHIN GROUP (ORDER BY {wx}),
-       percentile_cont(0.75) WITHIN GROUP (ORDER BY {wx}),
-       percentile_cont(0.9)  WITHIN GROUP (ORDER BY {wx}),
-       avg({wx}), avg(({wx} > 0)::int)::float,
-       avg(({wr} > 0)::int)::float, avg({wr}),
        percentile_cont(0.5) WITHIN GROUP (ORDER BY {fx}),
        avg({fx}), avg(({fx} > 0)::int)::float,
-       avg(({fr} > 0)::int)::float,
+       avg(({wr} > 0)::int)::float, avg({wr}),
        avg({gap})
 FROM fund_dca_tp_result
-WHERE alive AND method = %s AND {wx} IS NOT NULL{equity_clause}
+WHERE alive AND method = %s AND {fx} IS NOT NULL{equity_clause}
 GROUP BY tp ORDER BY tp
 """
 
@@ -805,10 +796,8 @@ TP_COMPARE_EQUITY_TYPES = EQUITY_TYPES + ("QDII-商品", "商品")
 # 对比聚合快照（fund_dca_tp_compare，日更导入后 dca_store.rebuild_tp_compare
 # 重建）：值已按现算同精度圆整，读出即返回；computed_at 随行取 max
 _TP_COMPARE_SNAP_SQL = """
-SELECT tp, sample_count, w10_p25, w10_median, w10_p75, w10_p90, w10_mean,
-       w10_positive_share, w10_success_share, w10_avg_rounds,
-       full_median, full_mean, full_positive_share, full_success_share,
-       avg_gap_days, computed_at
+SELECT tp, sample_count, median, mean, positive_share, success_share,
+       avg_rounds, avg_gap_days, computed_at
 FROM fund_dca_tp_compare
 WHERE method = %s AND equity = %s AND fee = %s ORDER BY tp
 """
@@ -830,7 +819,7 @@ def _parse_method(raw) -> str:
 
 
 def fetch_dca_tp_list(dsn: str, *, tp: float = TAKE_PROFIT, q: str = "",
-                      alive: str = "true", sort: str = "w10_xirr",
+                      alive: str = "true", sort: str = "full_xirr",
                       order: str = "desc", min_age: float = 0.0,
                       min_scale: float = 0.0, limit: int = 50, offset: int = 0,
                       fee: str = "gross", equity: bool = True,
@@ -852,7 +841,7 @@ def fetch_dca_tp_list(dsn: str, *, tp: float = TAKE_PROFIT, q: str = "",
     like = f"%{q}%"
     fee_val = fee if fee in _LIST_FEE_SUFFIX else "gross"
     suffix = _LIST_FEE_SUFFIX[fee_val]
-    sort_base = sort if sort in _SORTABLE else "w10_xirr"
+    sort_base = sort if sort in _SORTABLE else "full_xirr"
     sort_col = _list_sort_col(sort_base, suffix)
     order_dir = "ASC" if order.lower() == "asc" else "DESC"
     alive_clause = ("true" if alive not in ("true", "false")
@@ -892,7 +881,7 @@ def fetch_dca_tp_list(dsn: str, *, tp: float = TAKE_PROFIT, q: str = "",
                              .replace("{equity_clause}", equity_clause)
                              .replace("{range_clause}", range_clause))
                 stats_sql = (_TP_STATS_SQL
-                             .replace("{xirr_col}", f"r.w10_xirr{suffix}")
+                             .replace("{xirr_col}", f"r.full_xirr{suffix}")
                              .replace("{rounds_col}", f"r.w10_rounds{suffix}")
                              .replace("{age_clause}", age_clause)
                              .replace("{scale_clause}", scale_clause)
@@ -962,19 +951,15 @@ def fetch_dca_tp_compare(dsn: str, *, fee: str = "nom", equity: bool = True,
     fee_val = fee if fee in _FEE_XIRR_COL else "nom"
     method_val = method if method in DCA_METHODS else "amount"
     suffix = _LIST_FEE_SUFFIX[fee_val]
-    cols = {"wx": f"w10_xirr{suffix}", "fx": f"full_xirr{suffix}",
+    cols = {"fx": f"full_xirr{suffix}",
             "wr": f"w10_rounds{suffix}", "fr": f"full_rounds{suffix}",
             "gap": f"gap_avg_days{suffix}"}
 
     def _snap_rows_to_out(snap):
         return [{"tp": r[0], "count": r[1],
-                 "w10_p25": r[2], "w10_median": r[3],
-                 "w10_p75": r[4], "w10_p90": r[5], "w10_mean": r[6],
-                 "w10_positive_share": r[7], "w10_success_share": r[8],
-                 "w10_avg_rounds": r[9],
-                 "full_median": r[10], "full_mean": r[11],
-                 "full_positive_share": r[12], "full_success_share": r[13],
-                 "avg_gap_days": r[14]} for r in snap]
+                 "median": r[2], "mean": r[3],
+                 "positive_share": r[4], "success_share": r[5],
+                 "avg_rounds": r[6], "avg_gap_days": r[7]} for r in snap]
 
     def run():
         # 快照优先：缺表（部署早期）/库不可达一律回落现算，绝不 500
@@ -988,7 +973,7 @@ def fetch_dca_tp_compare(dsn: str, *, fee: str = "nom", equity: bool = True,
         except psycopg.Error:
             snap = None
         if snap is not None and len(snap) == len(TP_THRESHOLDS):
-            computed = max((r[15] for r in snap if r[15] is not None),
+            computed = max((r[8] for r in snap if r[8] is not None),
                            default=None)
             return {"status": "up", "fee": fee_val, "method": method_val,
                     "equity": bool(equity), "source": "snapshot",
@@ -1002,8 +987,7 @@ def fetch_dca_tp_compare(dsn: str, *, fee: str = "nom", equity: bool = True,
                 if equity:
                     eq_clause = " AND fund_type = ANY(%s)"
                     params.append(list(TP_COMPARE_EQUITY_TYPES))
-                cur.execute(_TP_COMPARE_SQL.replace("{wx}", cols["wx"])
-                            .replace("{fx}", cols["fx"])
+                cur.execute(_TP_COMPARE_SQL.replace("{fx}", cols["fx"])
                             .replace("{wr}", cols["wr"])
                             .replace("{fr}", cols["fr"])
                             .replace("{gap}", cols["gap"])
@@ -1013,19 +997,12 @@ def fetch_dca_tp_compare(dsn: str, *, fee: str = "nom", equity: bool = True,
         for r in rows:
             out.append({
                 "tp": r[0], "count": r[1],
-                "w10_p25": round(r[2], 4) if r[2] is not None else None,
-                "w10_median": round(r[3], 4) if r[3] is not None else None,
-                "w10_p75": round(r[4], 4) if r[4] is not None else None,
-                "w10_p90": round(r[5], 4) if r[5] is not None else None,
-                "w10_mean": round(r[6], 4) if r[6] is not None else None,
-                "w10_positive_share": round(r[7], 4) if r[7] is not None else None,
-                "w10_success_share": round(r[8], 4) if r[8] is not None else None,
-                "w10_avg_rounds": round(r[9], 2) if r[9] is not None else None,
-                "full_median": round(r[10], 4) if r[10] is not None else None,
-                "full_mean": round(r[11], 4) if r[11] is not None else None,
-                "full_positive_share": round(r[12], 4) if r[12] is not None else None,
-                "full_success_share": round(r[13], 4) if r[13] is not None else None,
-                "avg_gap_days": round(r[14], 1) if r[14] is not None else None,
+                "median": round(r[2], 4) if r[2] is not None else None,
+                "mean": round(r[3], 4) if r[3] is not None else None,
+                "positive_share": round(r[4], 4) if r[4] is not None else None,
+                "success_share": round(r[5], 4) if r[5] is not None else None,
+                "avg_rounds": round(r[6], 2) if r[6] is not None else None,
+                "avg_gap_days": round(r[7], 1) if r[7] is not None else None,
             })
         return {"status": "up", "fee": fee_val, "method": method_val,
                 "equity": bool(equity), "source": "live", "computed_at": None,
@@ -1078,9 +1055,7 @@ def fetch_dca_tp_rounds(dsn: str, code: str, fee: str = "nom",
 
 
 _TP_SUMMARY_SQL = """
-SELECT tp, w10_profit_rate, w10_xirr,
-       w10_profit_rate_disc, w10_xirr_disc,
-       w10_profit_rate_nom, w10_xirr_nom, full_start,
+SELECT tp, full_start,
        full_last_tp, full_last_tp_disc, full_last_tp_nom,
        full_cur_invested,
        full_cur_profit_rate, full_cur_profit_rate_disc,
@@ -1092,11 +1067,12 @@ FROM fund_dca_tp_result WHERE code = %s AND method = %s ORDER BY tp
 
 def fetch_dca_tp_summary(dsn: str, code: str,
                          method: str = "amount") -> dict:
-    """单基金全阈值总收益率/年化汇总（fund_dca_tp_result，w10 窗口）。
+    """单基金全阈值窗口信息汇总 +「最近一次止盈后」当前轮（全史窗口）。
 
-    每阈值一行，恒带三口径字段（gross 原列 / _disc / _nom 后缀）——前端
-    弹窗按当前费率口径取值，切口径无需重拉；另附「最近一次止盈后」当前轮
-    十字段（全史窗口，2026-11-19；未止盈基金全 NULL）。method 切定投方式
+    每阈值一行带窗口起始与运作年限；「最近一次止盈后」当前轮十二字段
+    （2026-11-19；未止盈基金全 NULL）。年化/总收益率指标统一全史口径
+    （2026-11-25 十七轮：w10 年化/总收益率指标退役，排序/统计/对比卡/
+    弹窗指标卡取 full_cur_* 与排行 full_* 列）。method 切定投方式
     （DCA_METHODS，前端弹窗跟随页面级 tab）。降级约定同旧端点。
     """
     method_val = method if method in DCA_METHODS else "amount"
@@ -1109,30 +1085,24 @@ def fetch_dca_tp_summary(dsn: str, code: str,
                 cur.execute(_TP_SUMMARY_SQL, (code, method_val))
                 rows = cur.fetchall()
         out = [{"tp": r[0],
-                "w10_profit_rate": round(r[1], 4) if r[1] is not None else None,
-                "w10_xirr": round(r[2], 4) if r[2] is not None else None,
-                "w10_profit_rate_disc": round(r[3], 4) if r[3] is not None else None,
-                "w10_xirr_disc": round(r[4], 4) if r[4] is not None else None,
-                "w10_profit_rate_nom": round(r[5], 4) if r[5] is not None else None,
-                "w10_xirr_nom": round(r[6], 4) if r[6] is not None else None,
-                "w10_start_iso": r[7].isoformat() if r[7] else None,
-                "age_years": (round((ref - r[7]).days / 365.25, 1)
-                              if ref and r[7] else None),
-                "full_last_tp": r[8].isoformat() if r[8] else None,
-                "full_last_tp_disc": r[9].isoformat() if r[9] else None,
-                "full_last_tp_nom": r[10].isoformat() if r[10] else None,
-                "full_cur_invested": r[11],
-                "full_cur_profit_rate": (round(r[12], 4)
-                                         if r[12] is not None else None),
-                "full_cur_profit_rate_disc": (round(r[13], 4)
-                                              if r[13] is not None else None),
-                "full_cur_profit_rate_nom": (round(r[14], 4)
-                                             if r[14] is not None else None),
-                "full_cur_xirr": round(r[15], 4) if r[15] is not None else None,
-                "full_cur_xirr_disc": (round(r[16], 4)
-                                       if r[16] is not None else None),
-                "full_cur_xirr_nom": (round(r[17], 4)
-                                      if r[17] is not None else None)}
+                "w10_start_iso": r[1].isoformat() if r[1] else None,
+                "age_years": (round((ref - r[1]).days / 365.25, 1)
+                              if ref and r[1] else None),
+                "full_last_tp": r[2].isoformat() if r[2] else None,
+                "full_last_tp_disc": r[3].isoformat() if r[3] else None,
+                "full_last_tp_nom": r[4].isoformat() if r[4] else None,
+                "full_cur_invested": r[5],
+                "full_cur_profit_rate": (round(r[6], 4)
+                                         if r[6] is not None else None),
+                "full_cur_profit_rate_disc": (round(r[7], 4)
+                                              if r[7] is not None else None),
+                "full_cur_profit_rate_nom": (round(r[8], 4)
+                                             if r[8] is not None else None),
+                "full_cur_xirr": round(r[9], 4) if r[9] is not None else None,
+                "full_cur_xirr_disc": (round(r[10], 4)
+                                       if r[10] is not None else None),
+                "full_cur_xirr_nom": (round(r[11], 4)
+                                      if r[11] is not None else None)}
                for r in rows]
         return {"status": "up", "code": code, "method": method_val, "rows": out}
     return _safe(run, {"status": "down", "detail": "pg unreachable",
@@ -1143,11 +1113,9 @@ _TIMING_SQL = """
 SELECT t.code, r.name, r.fund_type, r.alive, t.dd_current,
        t.days_since_peak, t.dip_band, r.scale_yi, r.full_start,
        r.w10_start, r.w10_end, r.w10_rounds, r.gap_avg_days,
-       r.w10_xirr, r.full_xirr, r.w10_profit_rate,
+       r.full_xirr,
        r.w10_rounds_disc, r.w10_rounds_nom,
-       r.w10_xirr_disc, r.w10_xirr_nom,
        r.full_xirr_disc, r.full_xirr_nom,
-       r.w10_profit_rate_disc, r.w10_profit_rate_nom,
        r.gap_avg_days_disc, r.gap_avg_days_nom
 FROM fund_dip_timing t
 JOIN fund_dca_tp_result r ON r.code = t.code AND r.tp = %s
@@ -1179,13 +1147,11 @@ _TIMING_BANDS = ("20-25", "25-30", "30+")
 _TIMING_COLS = ["code", "name", "fund_type", "alive", "dd_current",
                 "days_since_peak", "dip_band", "scale_yi", "full_start",
                 "w10_start", "w10_end", "w10_rounds", "gap_avg_days",
-                "w10_xirr", "full_xirr", "w10_profit_rate",
+                "full_xirr",
                 "w10_rounds_disc", "w10_rounds_nom",
-                "w10_xirr_disc", "w10_xirr_nom",
                 "full_xirr_disc", "full_xirr_nom",
-                "w10_profit_rate_disc", "w10_profit_rate_nom",
                 "gap_avg_days_disc", "gap_avg_days_nom"]
-_TIMING_SORTABLE = {"w10_xirr", "full_xirr", "w10_profit_rate",
+_TIMING_SORTABLE = {"full_xirr",
                     "w10_rounds", "gap_avg_days", "dd_current",
                     "days_since_peak", "scale_yi", "code",
                     "full_start", "age_years"}
@@ -1204,7 +1170,7 @@ def _timing_sort_col(sort_base: str, suffix: str) -> str:
 
 
 def fetch_dca_timing(dsn: str, *, tp: float = TAKE_PROFIT, band: str = "25-30",
-                     q: str = "", alive: str = "true", sort: str = "w10_xirr",
+                     q: str = "", alive: str = "true", sort: str = "full_xirr",
                      order: str = "desc", min_age: float = 0.0,
                      min_scale: float = 0.0, limit: int = 50, offset: int = 0,
                      fee: str = "gross", equity: bool = True,
@@ -1227,7 +1193,7 @@ def fetch_dca_timing(dsn: str, *, tp: float = TAKE_PROFIT, band: str = "25-30",
     fee_val = fee if fee in _LIST_FEE_SUFFIX else "gross"
     suffix = _LIST_FEE_SUFFIX[fee_val]
     band_val = band if band in _TIMING_BANDS else ""
-    sort_base = sort if sort in _TIMING_SORTABLE else "w10_xirr"
+    sort_base = sort if sort in _TIMING_SORTABLE else "full_xirr"
     sort_col = _timing_sort_col(sort_base, suffix)
     order_dir = "ASC" if order.lower() == "asc" else "DESC"
     alive_clause = ("true" if alive not in ("true", "false")

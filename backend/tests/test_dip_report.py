@@ -145,10 +145,10 @@ class TestDipReportRoutes:
         import datetime as dt
 
         import app.dca_api as dca_mod
-        # summary SELECT 18 列：tp, w10 收益/年化×三口径, full_start,
-        # 止盈后当前轮十字段（2026-11-19）；fetchone 按调用序返回 ref → summary 行
-        row = (0.20, 0.18, 0.92, 0.175, 0.90, 0.17, 0.88,
-               dt.date(2016, 11, 16),
+        # summary SELECT 12 列：tp, full_start, 止盈后当前轮十字段
+        #（2026-11-19；十七轮起 w10 收益/年化六指标列退役）；
+        # fetchone 按调用序返回 ref → summary 行
+        row = (0.20, dt.date(2016, 11, 16),
                None, None, None, None, None, None, None, None, None, None)
         calls = {"i": 0}
 
@@ -169,7 +169,9 @@ class TestDipReportRoutes:
         r = body["rows"][0]
         assert r["age_years"] == pytest.approx(10.0, abs=0.1)
         assert r["w10_start_iso"] == "2016-11-16"
-        assert r["w10_xirr"] == 0.92 and r["w10_xirr_nom"] == 0.88
+        # w10 年化/总收益率指标键退役不得残留；当前轮字段保留（本 fixture 全 None）
+        assert "w10_xirr" not in r and "w10_profit_rate" not in r
+        assert r["full_cur_xirr"] is None and r["full_cur_xirr_nom"] is None
 
     def test_dip_report_dimension_split(self, client, monkeypatch):
         """groups=SYS/NODIP（bucket='all'）；buckets=DIP 深度桶；
