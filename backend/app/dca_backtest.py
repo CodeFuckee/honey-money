@@ -851,12 +851,16 @@ def run_full_backtest_tp_method(dsn: str, method: str, *, log=print,
             # 快路径）；查库也失败 → 回落全 codes（行级排除兜底）
             try:
                 with conn.cursor() as cur:
+                    # nav_date 是 DATE 列：max-min 直取整数天数（PG 无
+                    # integer >= interval 操作符——旧写法 make_interval
+                    # 比较在真实库必抛 UndefinedFunction 被吞掉回落全
+                    # 市场，二十一轮用户三次反馈的 26832 分母真凶；
+                    # ::date 显式 cast 固定整数天语义，不依赖列类型）
                     cur.execute(
                         "SELECT n.code FROM fund_nav n "
                         "JOIN fund_basic b USING (code) "
                         "WHERE b.fund_type = ANY(%s) GROUP BY n.code HAVING "
-                        "max(n.nav_date) - min(n.nav_date) >= "
-                        "make_interval(days => %s)",
+                        "(max(n.nav_date)::date - min(n.nav_date)::date) >= %s",
                         (list(BACKTEST_UNIVERSE_TYPES), min_span_days))
                     universe = {r[0] for r in cur.fetchall()}
                 codes_all = len(codes)

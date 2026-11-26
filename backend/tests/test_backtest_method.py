@@ -683,6 +683,55 @@ class TestMethodUniverseFilter:
         assert seen[0] == (0, 1) and seen[-1] == (1, 1)
         assert any("GROUP BY n.code" in q for q in seen_sql), seen_sql
 
+    def test_direct_sql_type_safe_shape(self, monkeypatch):
+        """直查 SQL 类型锚（二十一轮真凶回归防）：fund_nav.nav_date 是
+        DATE 列，max-min 得**整数天**——必须 ::date 显式 cast 后与整数
+        参数比较。旧写法 `max-min >= make_interval(days=>%s)` 是
+        integer >= interval，PG 无此操作符 → 真实库必抛 UndefinedFunction
+        → 被 except 吞掉回落全市场分母 26832（用户三次反馈的假修根因：
+        mock 假游标不执行 SQL 抓不住类型错误，只能锚 SQL 文本 + 真库
+        冒烟双保险）。"""
+        from app import dca_backtest as mod, dca_store
+        nav = _synthetic_nav()
+        basic, scale_map = _basic_scale()
+        monkeypatch.setattr(mod, "_load_codes",
+                            lambda conn: ["000001", "000002"])
+        monkeypatch.setattr(mod, "_load_basic",
+                            lambda conn, codes: basic.loc[list(codes)])
+        monkeypatch.setattr(mod, "_load_scale", lambda conn: scale_map)
+        monkeypatch.setattr(
+            mod, "_load_nav",
+            lambda conn, codes: nav[nav["code"].isin(list(codes))]
+            .reset_index(drop=True))
+        monkeypatch.setattr(dca_store, "load_fingerprints",
+                            lambda conn: ({}, "vTEST"))   # fp 表空 → 直查分支
+
+        seen = []
+
+        class _SqlCur(_NullCur):
+            def execute(self, q, p=None):
+                seen.append((q, p))
+            def fetchall(self):
+                return [("000001",)]
+
+        class _SqlCtx(_Ctx):
+            def cursor(self):
+                return _SqlCur()
+
+        monkeypatch.setattr(mod.psycopg, "connect",
+                            lambda *a, **k: _SqlCtx())
+        monkeypatch.setattr(mod, "_chunk_size", lambda: 250)
+        monkeypatch.setattr(mod, "_worker_count", lambda: 1)
+        mod.run_full_backtest_tp_method(
+            "postgresql://fake", "pl_ladder", log=lambda *_: None)
+        direct = [(q, p) for q, p in seen if "GROUP BY n.code" in q]
+        assert direct, seen
+        sql, params = direct[0]
+        assert "(max(n.nav_date)::date - min(n.nav_date)::date) >= %s" in sql
+        assert "make_interval" not in sql              # 旧写法禁止回潮
+        assert params[0] == list(mod.BACKTEST_UNIVERSE_TYPES)
+        assert params[1] == 90                          # 缺省运作期限下限
+
     def test_direct_sql_failure_falls_back_to_all_codes(self, monkeypatch):
         """直接查库也失败（库异常）→ 回落全 codes（不因口径丢基金，
         worker 层规则兜底行级排除）。"""
