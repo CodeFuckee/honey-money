@@ -103,8 +103,29 @@ def mock_dca(page):
 
     def handler(route):
         url = route.request.url
-        if "/api/funds/dca/scatter" in url or re.search(r"/api/funds/dca/[^/?]+/rounds", url):
+        # 子资源端点放行走真后端（死 DSN → down，卡片如实隐藏）：散点/轮次
+        # 由各自 mock 接管；时机/断缴/起点条件三卡不拦（拦了会用列表体
+        # 污染 dip-report/pause-experiment，渲染出干扰 dca-matrix 表——
+        # 二十二轮 glob 升 ** 后子路径全被盖到才暴露）
+        if re.search(r"/api/funds/dca/(scatter|[^/?]+/rounds|dip-report"
+                     r"|pause-experiment|bear-pause|timing)", url):
             route.continue_()
+            return
+        # 对比卡端点返回 8 档聚合体（旧桩把列表体回给 /tp/compare 会让
+        # 对比行 r.tp=undefined → 点击行把 dcaTp 置 undefined 触发
+        # tp=undefined 列表请求——二十二轮单一数据源后 mock 需按端点分形）
+        if "/tp/compare" in url:
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"status": "up", "fee": "gross",
+                                           "rows": [{"tp": t, "median": 0.2,
+                                                     "mean": 0.2,
+                                                     "positive_share": 1.0,
+                                                     "take_profit_share": 1.0,
+                                                     "avg_rounds": 4,
+                                                     "avg_gap_days": 90}
+                                                    for t in (0.05, 0.10, 0.15,
+                                                              0.20, 0.25, 0.30,
+                                                              0.35, 0.40)]}))
             return
         calls.append(url)
         from urllib.parse import urlparse, parse_qs
@@ -112,7 +133,7 @@ def mock_dca(page):
         route.fulfill(status=200, content_type="application/json",
                       body=json.dumps(_list_body_for(fee)))
 
-    page.route("**/api/funds/dca*", handler)
+    page.route("**/api/funds/dca**", handler)
     return calls
 
 
@@ -228,7 +249,7 @@ def mock_dca_equity(page):
 
     # 两个 glob 注册同一 handler：Playwright 的 * 不跨 /，「dca*」匹配不到
     # 「dca/scatter」——散点 URL 需自己的 glob（后注册者优先命中）
-    page.route("**/api/funds/dca*", handler)
+    page.route("**/api/funds/dca**", handler)
     page.route("**/api/funds/dca/scatter*", handler)
     return list_calls, scatter_calls
 
@@ -342,15 +363,15 @@ class TestFundDcaPage:
         # 伪 3D 散点 canvas 渲染
         expect(page.locator(".dca-scatter-chart canvas")).to_have_count(1)
         # 均值分箱表：≥10 年表头与 900 只格子（:not 排除中位表——两表同格数）
-        expect(page.locator(".dca-matrix:not(.dca-median) th",
+        expect(page.locator(".dca-matrix:not(.dca-median):not(.tp-compare) th",
               has_text="≥10 年")).to_have_count(1)
-        expect(page.locator(".dca-matrix:not(.dca-median) td",
+        expect(page.locator(".dca-matrix:not(.dca-median):not(.tp-compare) td",
               has_text="900 只")).to_have_count(1)
         # 中位分箱表：同格数、中位值与均值不同；默认名义口径（×0.92）下
         # mock ≥10年×<1亿 均值 0.076→7.0%、中位 0.065→6.0%
         expect(page.locator(".dca-median th", has_text="≥10 年")).to_have_count(1)
         expect(page.locator(".dca-median td", has_text="900 只")).to_have_count(1)
-        expect(page.locator(".dca-matrix:not(.dca-median) td",
+        expect(page.locator(".dca-matrix:not(.dca-median):not(.tp-compare) td",
               has_text="7.0%")).to_have_count(1)
         expect(page.locator(".dca-median td", has_text="6.0%")).to_have_count(1)
 
@@ -456,7 +477,7 @@ class TestFundDcaPage:
                          "osc_per_year": 2.3456, "osc_regularity": 0.8125,
                          "osc_pctile": 0.7777, "as_of": "2026-10-23",
                          "computed_at": "2026-11-17T06:00:00"}})))
-        page.route("**/api/funds/dca/019387/rounds*", lambda route: (
+        page.route("**/api/funds/dca/tp/019387/rounds*", lambda route: (
             calls.append(route.request.url),
             route.fulfill(status=200, content_type="application/json", body=json.dumps({
                 "status": "up", "code": "019387", "fee": "nom",
@@ -510,7 +531,7 @@ class TestFundDcaPage:
     def test_detail_button_opens_dialog(self, servers, page, mock_dca):
         """E2E-415：排行行「详情」按钮 → 打开同款止盈明细弹窗（不触发行点击两次）。"""
         calls = []
-        page.route("**/api/funds/dca/019387/rounds*", lambda route: (
+        page.route("**/api/funds/dca/tp/019387/rounds*", lambda route: (
             calls.append(route.request.url),
             route.fulfill(status=200, content_type="application/json", body=json.dumps({
                 "status": "up", "code": "019387", "fee": "nom", "rounds": [],
@@ -525,14 +546,17 @@ class TestFundDcaPage:
         row.locator("button.detail-btn").click()
         expect(page.locator(".p-dialog")).to_be_visible()
         expect(page.locator(".p-dialog")).to_contain_text("没有止盈记录")
-        assert len(calls) == 1, calls
+        # 弹窗本体请求（fee=nom & tp=0.2）恰一次；其余为全档轮次图请求
+        # （loadDcaRoundsAll 逐档拉轮次，二十二轮起同 URL 模式）
+        dialog_calls = [u for u in calls if "tp=0.2&" in u and "fee=nom" in u]
+        assert len(dialog_calls) >= 1, calls   # 全档图与弹窗共用同参数请求
 
     def test_dialog_uniform_margins(self, servers, page, mock_dca):
         """E2E-443：详情弹窗四边边距统一（2026-11-18 用户反馈「四边距统一
         大小、左右两边太空」）——尺寸 100vw-10vh × 90vh，遮罩内居中后四边
         gap 同为 5vh；弹窗内止盈线/费率两段按钮组保持同行
         （.dca-rounds-body 为 flex column，子元素会被块化，回归守护）。"""
-        page.route("**/api/funds/dca/019387/rounds*", lambda route: route.fulfill(
+        page.route("**/api/funds/dca/tp/019387/rounds*", lambda route: route.fulfill(
             status=200, content_type="application/json", body=json.dumps({
                 "status": "up", "code": "019387", "fee": "nom", "rounds": [],
                 "totals": {"rounds": 0, "invested": 0, "net_profit": 0,
@@ -571,7 +595,7 @@ class TestFundDcaPage:
     def test_no_rounds_dialog_still_shows_nav_chart(self, servers, page, mock_dca):
         """E2E-417：从未止盈的基金 → 弹窗仍渲染复权净值曲线（无止盈点/图例），
         空态文案与曲线说明并存。"""
-        page.route("**/api/funds/dca/019387/rounds*", lambda route: route.fulfill(
+        page.route("**/api/funds/dca/tp/019387/rounds*", lambda route: route.fulfill(
             status=200, content_type="application/json", body=json.dumps({
                 "status": "up", "code": "019387", "fee": "nom", "rounds": [],
                 "totals": {"rounds": 0, "invested": 0, "net_profit": 0,
@@ -599,7 +623,7 @@ class TestFundDcaPage:
         """E2E-416：点击分箱格 → 格内基金清单（client 端过滤散点点集）；
         清单内「明细」再开该基金止盈明细弹窗。"""
         mock_scatter(page)
-        page.route("**/api/funds/dca/019387/rounds*", lambda route: route.fulfill(
+        page.route("**/api/funds/dca/tp/019387/rounds*", lambda route: route.fulfill(
             status=200, content_type="application/json", body=json.dumps({
                 "status": "up", "code": "019387", "fee": "nom", "rounds": [],
                 "totals": {"rounds": 0, "invested": 0, "net_profit": 0,
@@ -608,8 +632,10 @@ class TestFundDcaPage:
         open_dca(page, frontend_port)
         # mock 散点 3 点中仅中欧时代共赢（age 2.9, scale 1.2）落在 1-3 年 × 1-10 亿
         # 均值表：行 = 表头/<1亿/1-10亿/...，列 = 0-1年/1-3年/... → tr.nth(2).td.nth(1)
-        cell = page.locator(".dca-matrix:not(.dca-median) tr").nth(2) \
+        cell = page.locator(".dca-matrix:not(.dca-median):not(.tp-compare) tr").nth(2) \
             .locator("td").nth(1)
+        cell.scroll_into_view_if_needed()
+        page.wait_for_timeout(300)
         cell.click()
         dlg = page.locator(".p-dialog", has_text="基金清单")
         expect(dlg).to_be_visible()
@@ -673,7 +699,7 @@ class TestDcaRiskColumns:
                     "meta": None}
             route.fulfill(status=200, content_type="application/json",
                           body=json.dumps(body))
-        page.route("**/api/funds/dca*", handler)
+        page.route("**/api/funds/dca**", handler)
         _, frontend_port = servers
         page.goto(f"http://127.0.0.1:{frontend_port}/data/fund-dca")
         expect(page.locator(".browse-pv .browse-empty")).to_contain_text("暂无回测数据")

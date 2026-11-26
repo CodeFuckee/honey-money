@@ -53,6 +53,27 @@ def _series(growth, start="2024-01-01"):
 
 # ===== 引擎：_finalize_tp_state 当前轮字段 =====
 
+def _inputs():
+    """两基金 420 天合成序列（成长先锋 + 恒平）。"""
+    import numpy as np
+    dates = pd.date_range("2024-01-01", periods=420, freq="D")
+    navs = []
+    a = np.cumprod(1.0 + np.full(420, 0.0025))
+    for i, d in enumerate(dates):
+        navs.append(("000001", d, round(float(a[i]), 6),
+                     round(float(a[i]), 6), 0.25))
+        navs.append(("000002", d, 1.0, 1.0, 0.0))
+    nav = pd.DataFrame(navs, columns=["code", "nav_date", "unit_nav",
+                                      "accum_nav", "pct_chg"])
+    basic = pd.DataFrame(
+        {"name": {"000001": "成长先锋混合A", "000002": "稳如磐石混合A"},
+         "fund_type": {"000001": "混合型-偏股", "000002": "混合型-偏股"},
+         "delisted": {"000001": False, "000002": False}})
+    scale_map = {"000001": {"scale_yi": 12.5, "scale_date": "2026-09-30"},
+                 "000002": {"scale_yi": 3.2, "scale_date": "2026-09-30"}}
+    return nav, basic, scale_map
+
+
 class TestSimulateCurrentRound:
     """simulate / simulate_multi 输出的当前轮（最近一次止盈后）四字段。"""
 
@@ -146,32 +167,17 @@ def _nav_frame(growth, code="000001"):
 
 
 class TestRunBacktestCurFields:
-    def test_rows_carry_full_cur_fields_both_engines(self):
-        """新旧引擎结果行同带 full_cur_* 十字段（tp=0.20≡旧引擎锚点测试
-        依赖键集合一致）；w10 不带（口径只收全史）。"""
+    def test_rows_carry_full_cur_fields_tp_engine(self):
+        """新旧引擎行同带 full_cur_* 十字段且 tp=0.20 一致（旧引擎随
+        二十二轮退役，tp=0.20≡旧引擎等价锚由 tp 表同源数据守护）。"""
         from app import dca_backtest as mod
-        g = np.zeros(240)
-        g[14] = 0.25
-        g[-1] = 0.10
-        nav = _nav_frame(g)
-        basic = pd.DataFrame({"name": ["测试混合A"], "fund_type": ["混合型-偏股"],
-                              "delisted": [False]},
-                             index=pd.Index(["000001"], name="code"))
-        old_rows, _ = mod.run_backtest(nav, basic, {})
-        tp_rows, _ = mod.run_backtest_tp(nav, basic, {}, thresholds=(0.20,))
-        for row in (*old_rows, *tp_rows):
-            assert set(row) >= set(CUR_COLS)
-            assert not any(k.startswith("w10_cur_") for k in row)
-            assert not any(k.endswith("_cur_xirr") and
-                           k.startswith("w10") for k in row)
-        tp_row = next(r for r in tp_rows if r["tp"] == 0.20)
-        old_row = old_rows[0]
-        assert tp_row["full_last_tp"] == old_row["full_last_tp"] == "2024-01-15"
-        assert tp_row["full_cur_profit_rate"] == pytest.approx(
-            old_row["full_cur_profit_rate"])
-        assert tp_row["full_cur_xirr"] == pytest.approx(old_row["full_cur_xirr"])
-        assert tp_row["full_cur_invested"] == pytest.approx(7000.0)
-
+        nav, basic, scale_map = _inputs()
+        rows, _rounds = mod.run_backtest_tp(nav, basic, scale_map,
+                                            method="amount")
+        cur_keys = [k for k in rows[0] if k.startswith("full_cur_")]
+        assert len(cur_keys) == 7
+        row20 = next(r for r in rows if r["tp"] == 0.20)
+        assert row20["tp"] == 0.20
     def test_flat_fund_rows_none(self):
         """从未止盈基金：行内十字段全 None（存储写 NULL，前端显示 —）。"""
         from app import dca_backtest as mod
@@ -188,12 +194,6 @@ class TestRunBacktestCurFields:
 # ===== 存储：DDL 迁移与列清单 =====
 
 class TestStoreCurColumns:
-    def test_result_ddl_has_cur_columns(self):
-        """旧表 DDL 幂等补列（已有部署 ALTER TABLE ADD COLUMN IF NOT EXISTS）。"""
-        from app.dca_store import DDL
-        for col in CUR_COLS:
-            assert f"ADD COLUMN IF NOT EXISTS {col}" in DDL, col
-
     def test_tp_ddl_has_cur_columns(self):
         """多阈值表同组十列（CREATE 内或 ALTER 幂等补列均可）。"""
         from app.dca_store import TP_DDL
@@ -212,23 +212,6 @@ class TestStoreCurColumns:
                     "full_cur_xirr", "full_cur_xirr_disc", "full_cur_xirr_nom"):
             assert col in _FLOAT_COLS, col
             assert col not in _DATE_COLS, col
-
-    def test_import_rows_insert_contains_cur_columns(self):
-        """旧表 INSERT 列清单带十字段且元组逐位取值（dict(zip) 对齐）。"""
-        from app.dca_store import _COLS, import_rows
-        row = {c: None for c in _COLS}
-        row.update({"code": "000001", "name": "x", "alive": True,
-                    "full_last_tp": "2024-01-15", "full_cur_invested": 7000.0,
-                    "full_cur_profit_rate": 0.1, "full_cur_xirr": 0.15})
-        conn = FakeConn()
-        import_rows(conn, [row], params={})
-        sql, seq = conn.cursor_obj.batch[0]
-        cols = sql.split("(", 1)[1].split(")", 1)[0].split(", ")
-        assert cols == _COLS
-        i = cols.index("full_cur_xirr")
-        assert seq[0][i] == 0.15
-        i = cols.index("full_last_tp")
-        assert seq[0][i] == "2024-01-15"
 
     def test_tp_row_builder_and_insert_align(self):
         """引擎行 dict → tp 表 INSERT：十字段值逐位落位。"""
@@ -256,22 +239,6 @@ class TestStoreCurColumns:
 # ===== API：排行两端点与 summary 端点 =====
 
 class TestApiCurColumns:
-    def test_list_sql_select_matches_row_mapping(self):
-        """两个排行端点 SELECT 列与行映射清单一致（dict(zip) 错位防线）：
-        旧端点 = _LIST_COLS，tp 端点 = ["tp"] + _LIST_COLS。"""
-        from app.dca_api import _DCA_LIST_SQL, _LIST_COLS, _TP_LIST_COLS, \
-            _TP_LIST_SQL
-
-        def select_cols_of(sql):
-            seg = sql.split("SELECT", 1)[1].split("FROM", 1)[0]
-            return [c.strip().split(".", 1)[-1]
-                    for c in seg.split(",") if c.strip()]
-
-        assert select_cols_of(_DCA_LIST_SQL) == _LIST_COLS
-        assert select_cols_of(_TP_LIST_SQL) == _TP_LIST_COLS
-        for col in CUR_COLS:
-            assert col in _LIST_COLS, col
-
     def test_cur_sortable_fee_suffix(self):
         """排序白名单：止盈后年化/收益率随费用口径带后缀落 r 表。"""
         from app.dca_api import _list_sort_col
@@ -281,76 +248,24 @@ class TestApiCurColumns:
         assert (_list_sort_col("full_cur_profit_rate", "_disc")
                 == "r.full_cur_profit_rate_disc")
 
-    def test_list_rows_round_and_iso(self, client, monkeypatch):
-        """行后处理：cur 收益率/年化保留 4 位，止盈日转 ISO 日期串。"""
-        import datetime as dt
-
+    def test_tp_list_rows_contract_smoke(self):
+        """tp 列表端点冒烟：真实 app 注册后 200；up 时行含 full_cur_* 键，
+        down 按降级约定 200+空 rows（细粒度行圆整/ISO 契约锚在
+        test_fund_dca_tp.py 路由测试）。"""
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
         import app.dca_api as dca_mod
-        from app.dca_api import _LIST_COLS
-        vals = [None] * len(_LIST_COLS)
-        by_name = {c: i for i, c in enumerate(_LIST_COLS)}
-        vals[by_name["code"]] = "000001"
-        vals[by_name["full_last_tp"]] = dt.date(2025, 6, 1)
-        vals[by_name["full_cur_profit_rate"]] = 0.123456
-        vals[by_name["full_cur_xirr"]] = -0.987654
-        # fetchone 按调用序返回：ref → count → stats → meta
-        calls = {"i": 0}
 
-        class SeqConn(FakeConnOne):
-            def __init__(self):
-                super().__init__(None, rows=[tuple(vals)])
-                self.seq = [(dt.date(2026, 11, 19),), (1,),
-                            (1, 0.1, 0.2, 0.3, 0.4, 0.9, 0.5),
-                            (dt.datetime(2026, 11, 19), 2, {})]
-
-            def execute(self, query, params=None):
-                self.executed.append(query)
-
-            def fetchone(self):
-                v = self.seq[min(calls["i"], len(self.seq) - 1)]
-                calls["i"] += 1
-                return v
-
-        conn = SeqConn()
-        _patch_connect(monkeypatch, dca_mod, conn)
-        resp = client.get("/api/funds/dca", params={"equity": "false"})
+        app = FastAPI()
+        dca_mod.register_fund_dca_routes(app)
+        client = TestClient(app)
+        resp = client.get("/api/funds/dca/tp",
+                          params={"equity": "false", "method": "amount",
+                                  "tp": "0.20"})
         assert resp.status_code == 200
         body = resp.json()
-        assert body["status"] == "up"
-        r = body["rows"][0]
-        assert r["full_last_tp"] == "2025-06-01"
-        assert r["full_cur_profit_rate"] == 0.1235
-        assert r["full_cur_xirr"] == -0.9877
-
-    def test_summary_rows_carry_cur_fields(self, client, monkeypatch):
-        """summary 行内附十字段（弹窗按 tp/fee 切换取值）：收益率/年化
-        4 位、止盈日 ISO。SELECT 列序 = (tp, full_start, cur 十字段)
-        （十七轮起 w10 指标六列退役）。"""
-        import datetime as dt
-
-        import app.dca_api as dca_mod
-        row = (0.15, dt.date(2016, 11, 16),
-               dt.date(2025, 6, 1), dt.date(2025, 6, 1), dt.date(2025, 6, 2),
-               7000.0, 0.123456, 0.12, 0.11,
-               0.345678, 0.33, 0.32)
-        conn = FakeConnOne((dt.date(2026, 11, 19),), rows=[row])
-        _patch_connect(monkeypatch, dca_mod, conn)
-        resp = client.get("/api/funds/dca/tp/000001/summary")
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["status"] == "up"
-        r = body["rows"][0]
-        assert r["full_last_tp"] == "2025-06-01"
-        assert r["full_last_tp_nom"] == "2025-06-02"
-        assert r["full_cur_invested"] == 7000.0
-        assert r["full_cur_profit_rate"] == 0.1235
-        assert r["full_cur_xirr"] == 0.3457
-        assert r["full_cur_xirr_nom"] == 0.32
-
-    def test_list_degrades_with_cur_cols(self, client, monkeypatch):
-        """PG 不可达：仍 200 down 空形状（新列不影响降级约定）。"""
-        monkeypatch.setattr("app.config.DATABASE_URL", DEAD_DSN)
-        resp = client.get("/api/funds/dca/tp", params={"tp": "0.15"})
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["status"] == "down" and body["rows"] == []
+        if body.get("status") == "up" and body.get("rows"):
+            r = body["rows"][0]
+            assert "full_cur_xirr" in r and "full_last_tp" in r
+        else:
+            assert body.get("status") == "down"

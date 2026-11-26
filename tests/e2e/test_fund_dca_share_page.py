@@ -23,7 +23,15 @@
 - E2E-463 浮盈阶梯深链接：?mode=profit_dd_ladder → tab 激活且首请求即带参；
 - E2E-479 盈亏阶梯切换：切「盈亏阶梯」→ 列表/散点请求带 method=pl_ladder，
   悬停 title 携带盈亏阶梯口径（浮盈 ≥20% 停投），表格行渲染；
-- E2E-480 盈亏阶梯深链接：?mode=pl_ladder → tab 激活且首请求即带参。
+- E2E-480 盈亏阶梯深链接：?mode=pl_ladder → tab 激活且首请求即带参；
+- E2E-488 盈亏阶梯深档切换：切「盈亏阶梯深档」→ 列表/散点请求带
+  method=pl_ladder_deep，悬停 title 携带深档口径，表格行渲染；
+- E2E-489 盈亏阶梯深档深链接：?mode=pl_ladder_deep → tab 激活且首请求
+  即带参；
+- E2E-493 盈亏阶梯即停切换：切「盈亏阶梯即停」→ 列表/散点请求带
+  method=pl_ladder_stop，悬停 title 携带即停口径，表格行渲染；
+- E2E-494 盈亏阶梯即停深链接：?mode=pl_ladder_stop → tab 激活且首请求
+  即带参。
 运行：python -m pytest tests/e2e/test_fund_dca_share_page.py
 """
 
@@ -245,20 +253,20 @@ class TestDcaShareMode:
                         if re.search(r"/api/funds/dca/tp/[^/?]+/rounds", u)]
         assert rounds_calls and "method=share" in rounds_calls[0], mock_share
 
-    def test_switch_back_amount_uses_legacy_endpoint(self, servers, page,
-                                                     mock_dca, mock_share,
-                                                     mock_navs):
-        """E2E-447：share → 等额定投后，最后列表请求为旧端点（无 method/tp）。"""
+    def test_switch_back_amount_uses_tp_endpoint(self, servers, page,
+                                                 mock_dca, mock_share,
+                                                 mock_navs):
+        """E2E-447（二十二轮重锚）：share → 等额定投后，列表与其他组合
+        一致走 tp 端点（method=amount&tp=0.2——兼容分支已退役）。"""
         _, frontend_port = servers
         open_dca(page, frontend_port)
         _switch_share(page)
         page.locator('button[data-mode="amount"]').click()
         expect(page.locator('button[data-mode="amount"]')
               ).to_have_class(re.compile("active"), timeout=10_000)
-        list_calls = [u for u in mock_dca if re.search(r"/api/funds/dca\?", u)]
-        assert list_calls, "应回落旧端点"
-        assert "method=" not in list_calls[-1] and "tp=" not in list_calls[-1], \
-            list_calls[-1]
+        list_calls = [u for u in mock_share if re.search(r"/api/funds/dca/tp\?", u)]
+        assert list_calls and "method=amount" in list_calls[-1]
+        assert "tp=0.2&" in list_calls[-1], list_calls[-1]
 
     def test_mode_deeplink(self, servers, page, mock_dca, mock_share,
                            mock_navs):
@@ -275,14 +283,16 @@ class TestDcaShareMode:
 
     def test_mode_deeplink_invalid_ignored(self, servers, page, mock_dca,
                                            mock_share, mock_navs):
-        """E2E-449：?mode=dca 非白名单 → 回落等额走旧端点（无 method）。"""
+        """E2E-449（二十二轮重锚）：?mode=dca 非白名单 → 回落等额，
+        走 tp 端点（method=amount&tp=0.2）。"""
         _, frontend_port = servers
         page.goto(f"http://127.0.0.1:{frontend_port}/data/fund-dca?mode=dca")
         expect(page.get_by_role("heading", name="定投止盈回测")).to_be_visible()
         expect(page.locator('button[data-mode="amount"]')
               ).to_have_class(re.compile("active"), timeout=10_000)
-        list_calls = [u for u in mock_dca if re.search(r"/api/funds/dca\?", u)]
-        assert list_calls and "method=" not in list_calls[0], mock_dca
+        list_calls = [u for u in mock_share if re.search(r"/api/funds/dca/tp\?", u)]
+        assert list_calls and "method=amount" in list_calls[0]
+        assert "tp=0.2&" in list_calls[0], list_calls
 
     def test_share_with_tp_combined(self, servers, page, mock_dca, mock_share,
                                     mock_navs):
@@ -312,9 +322,9 @@ class TestDcaShareMode:
         assert tab_y < metrics.bounding_box()["y"], \
             "定投方式 tab 应在统计卡之前"
         # 唯一性：筛选面板里没有第二组 data-mode（已从面板移除）；
-        # 十九轮起七枚：等额/等份额/回撤加码/深回撤加码/浮盈阶梯/盈亏阶梯/
-        # 盈亏阶梯深档
-        assert page.locator("button[data-mode]").count() == 7
+        # 二十三轮起八枚：等额/等份额/回撤加码/深回撤加码/浮盈阶梯/盈亏阶梯/
+        # 盈亏阶梯深档/盈亏阶梯即停
+        assert page.locator("button[data-mode]").count() == 8
         # 深链接形态同样置顶
         page.goto(f"http://127.0.0.1:{frontend_port}/data/fund-dca?mode=share")
         expect(page.locator('button[data-mode="share"]')
@@ -570,9 +580,47 @@ class TestDcaShareMode:
         assert list_calls and "method=pl_ladder_deep" in list_calls[0], \
             mock_share
 
+    def test_pl_ladder_stop_switch_and_request(self, servers, page, mock_dca,
+                                               mock_share, mock_navs,
+                                               mock_share_scatter):
+        """E2E-493：切「盈亏阶梯即停」→ 列表/散点请求带
+        method=pl_ladder_stop，悬停 title 携带即停口径（浮盈 >0% 就整期
+        停投），表格行渲染。"""
+        _, frontend_port = servers
+        open_dca(page, frontend_port)
+        page.locator('button[data-mode="pl_ladder_stop"]').click()
+        expect(page.locator('button[data-mode="pl_ladder_stop"]')
+              ).to_have_class(re.compile("active"), timeout=10_000)
+        list_calls = [u for u in mock_share
+                      if "/rounds" not in u and "/compare" not in u
+                      and "/summary" not in u]
+        assert list_calls and "method=pl_ladder_stop" in list_calls[-1], \
+            mock_share
+        expect(page.locator('button[data-mode="pl_ladder_stop"]')
+              ).to_have_attribute("title", re.compile("浮盈 >0% 就整期停投"))
+        expect(page.locator(".browse-pv tbody tr", has_text="019387")
+              ).to_contain_text("+74.0%")     # mock 回显行
+        assert any("method=pl_ladder_stop" in u
+                   for u in mock_share_scatter), mock_share_scatter
+
+    def test_pl_ladder_stop_deeplink(self, servers, page, mock_dca,
+                                     mock_share, mock_navs):
+        """E2E-494：?mode=pl_ladder_stop 深链接 → tab 激活且首请求即带参。"""
+        _, frontend_port = servers
+        page.goto(f"http://127.0.0.1:{frontend_port}/data/fund-dca"
+                  f"?mode=pl_ladder_stop")
+        expect(page.get_by_role("heading", name="定投止盈回测")).to_be_visible()
+        expect(page.locator('button[data-mode="pl_ladder_stop"]')
+              ).to_have_class(re.compile("active"), timeout=10_000)
+        list_calls = [u for u in mock_share
+                      if "/rounds" not in u and "/compare" not in u
+                      and "/summary" not in u]
+        assert list_calls and "method=pl_ladder_stop" in list_calls[0], \
+            mock_share
+
     def test_mode_help_popover_and_titles(self, servers, page, mock_dca,
                                           mock_share, mock_navs):
-        """E2E-459：点「?」→ 弹出七种方式完整说明（含各自 detail 关键词），
+        """E2E-459：点「?」→ 弹出八种方式完整说明（含各自 detail 关键词），
         再点收起；悬停各按钮 title 携带对应方式详情；口径副标题已删。"""
         _, frontend_port = servers
         open_dca(page, frontend_port)
@@ -587,7 +635,9 @@ class TestDcaShareMode:
               ).to_have_attribute("title", re.compile("0\\.5 倍"))
         expect(page.locator('button[data-mode="pl_ladder_deep"]')
               ).to_have_attribute("title", re.compile("更深的亏损才出手"))
-        # 点 ? 开：面板含七种方式与关键口径词
+        expect(page.locator('button[data-mode="pl_ladder_stop"]')
+              ).to_have_attribute("title", re.compile("浮盈 >0% 就整期停投"))
+        # 点 ? 开：面板含八种方式与关键口径词
         page.locator('[data-mode-help]').click()
         pop = page.locator('[data-mode-help-pop]')
         expect(pop).to_be_visible()
@@ -603,6 +653,8 @@ class TestDcaShareMode:
         expect(pop).to_contain_text("浮盈≥20% 停投")
         expect(pop).to_contain_text("盈亏阶梯深档")
         expect(pop).to_contain_text("更深的亏损才出手")
+        expect(pop).to_contain_text("盈亏阶梯即停")
+        expect(pop).to_contain_text("浮盈>0% 即停投")
         # 再点 ? 关
         page.locator('[data-mode-help]').click()
         expect(pop).to_have_count(0, timeout=10_000)

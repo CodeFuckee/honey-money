@@ -16,7 +16,12 @@ from pathlib import Path
 
 import psycopg  # noqa: F401  （占位：调用方负责连接；本模块只做导出编排）
 
-from .dca_api import fetch_dca_list, fetch_dca_scatter
+from .dca_api import fetch_dca_scatter, fetch_dca_tp_list
+
+# 静态站快照口径（2026-11-26 二十二轮单一数据源）：等额定投 × 20% 止盈
+# （原「等额+20% 走旧表」兼容视图的数据内容，文件名/结构保持前端兼容）
+_STATIC_METHOD = "amount"
+_STATIC_TP = 0.20
 
 PAGE = 200
 FEES = ("gross", "disc", "nom")
@@ -41,7 +46,8 @@ def export_list(dsn: str, out_dir: Path, *, log=print) -> dict:
     rows, stats, meta, total = [], None, None, 0
     offset = 0
     while True:
-        body = fetch_dca_list(dsn, limit=PAGE, offset=offset, equity=False)
+        body = fetch_dca_tp_list(dsn, method=_STATIC_METHOD, tp=_STATIC_TP,
+                                 limit=PAGE, offset=offset, equity=False)
         if body.get("status") != "up":
             raise RuntimeError(f"DB 不可达：{body.get('detail')}")
         rows.extend(body["rows"])
@@ -60,7 +66,8 @@ def export_list(dsn: str, out_dir: Path, *, log=print) -> dict:
 def export_scatter(dsn: str, out_dir: Path, *, log=print) -> None:
     for fee in FEES:
         # equity=False 恒导全市场散点（含分箱），权益过滤在客户端做
-        body = fetch_dca_scatter(dsn, fee=fee, equity=False)
+        body = fetch_dca_scatter(dsn, fee=fee, equity=False,
+                                 method=_STATIC_METHOD, tp=_STATIC_TP)
         if body.get("status") != "up":
             raise RuntimeError(f"scatter {fee} 失败：{body.get('detail')}")
         _write_json(out_dir / "funds" / "dca" / f"scatter.{fee}.json", body)
@@ -74,7 +81,9 @@ def export_rounds(dsn: str, out_dir: Path, *, log=print) -> int:
             cur.execute("""
                 SELECT code, fee, seq, tp_date, round_days, gap_days, profit,
                        tp_nav, invested, sub_fee, redeem_fee, net_profit
-                FROM fund_dca_rounds ORDER BY code, fee, seq""")
+                FROM fund_dca_tp_rounds
+                WHERE method = %s AND tp = %s
+                ORDER BY code, fee, seq""", (_STATIC_METHOD, _STATIC_TP))
             cur_code, rounds, totals = None, {}, {}
 
             def flush(code):
@@ -122,7 +131,9 @@ def export_navs(dsn: str, out_dir: Path, *, log=print) -> int:
     with psycopg.connect(dsn, connect_timeout=10) as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT code, tp_date FROM fund_dca_rounds WHERE tp_date IS NOT NULL")
+                "SELECT code, tp_date FROM fund_dca_tp_rounds "
+                "WHERE tp_date IS NOT NULL AND method = %s AND tp = %s",
+                (_STATIC_METHOD, _STATIC_TP))
             for code, d in cur:
                 tp_ord.setdefault(code, set()).add(d.toordinal())
             cur.execute("SELECT max(nav_date) FROM fund_nav")
@@ -140,7 +151,9 @@ def export_navs(dsn: str, out_dir: Path, *, log=print) -> int:
         out_dir = Path(out_dir) / "funds" / "dca" / "navs"
         n = 0
         with conn.cursor() as cur:
-            cur.execute("SELECT code FROM fund_dca_result ORDER BY code")
+            cur.execute("SELECT code FROM fund_dca_tp_result "
+                        "WHERE method = %s AND tp = %s ORDER BY code",
+                        (_STATIC_METHOD, _STATIC_TP))
             codes = [r[0] for r in cur.fetchall()]
             for i, code in enumerate(codes, 1):
                 cur.execute(nav_sql, (code, cutoff))

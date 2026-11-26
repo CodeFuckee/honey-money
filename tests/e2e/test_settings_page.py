@@ -15,14 +15,14 @@
   detail 文案；清空输入 → 前端拦截提示、不发包（PUT 次数不增）；
 - E2E-473 P1 深链 /settings 直达 + down 降级（不 mock，走 conftest 坏
   DSN 真后端 →「设置数据不可用」占位；
-- E2E-474 P0 立即运行主流程：按钮 → 确认框含时间文案「约 6~10 小时」
+- E2E-474 P0 立即运行主流程：按钮 → 确认框含时间文案「约 8~14 小时」
   → 确认 → POST /api/tasks/7/run 契约命中 + 「已触发」提示 + 按钮转
   运行中禁用；
 - E2E-475 P1 取消不发包 + 409 已在运行分支错误提示；
 - E2E-476 P1 运行中状态：mock GET running=true → 按钮禁用 + 运行中
   状态可见；
-- E2E-481 P0 单策略全量主流程（2026-11-25 九轮）：策略选择器六枚、默认
-  选中「盈亏阶梯」→ 切「深回撤加码」→ 运行按钮 → 确认框含「10 分钟~
+- E2E-481 P0 单策略全量主流程（2026-11-25 九轮；二十三轮起选择器八枚、
+  缺省「盈亏阶梯即停」）→ 切「深回撤加码」→ 运行按钮 → 确认框含「10 分钟~
   2 小时」与策略名 → 确认 → POST /api/settings/backtest-method-run
   载荷 {"method":"dd_ladder_deep"} + POST /api/tasks/9/run + 已触发提示
   + 按钮转禁用；
@@ -157,7 +157,7 @@ class TestRunBacktestButton:
         btn.click()
         expect(page.locator("[data-run-confirm]")).to_be_visible()
         expect(page.locator("[data-run-confirm-time]")
-              ).to_contain_text("约 7~12 小时")
+              ).to_contain_text("约 8~14 小时")
         page.locator("[data-run-confirm-ok]").click()
         expect(page.locator("[data-run-backtest-triggered]")
               ).to_contain_text("已触发", timeout=10_000)
@@ -259,19 +259,20 @@ class TestBacktestProgress:
 
 
 class TestRunMethodButton:
-    """单策略全量运行按钮（2026-11-25 九轮）：六策略选择器 + 前置校验 +
-    任务系统触发。"""
+    """单策略全量运行按钮（2026-11-25 九轮）：策略选择器（二十三轮起八枚） +
+    前置校验 + 任务系统触发。"""
 
     def test_run_method_main_flow(self, servers, page):
-        """E2E-481：选择器默认「盈亏阶梯深档」→ 切「深回撤加码」→ 确认框
-        （耗时文案 + 策略名）→ 确认 → 前置 POST 载荷 {"method":…} +
-        POST /api/tasks/9/run + 已触发提示 + 按钮转禁用。"""
+        """E2E-481：选择器默认「盈亏阶梯即停」（二十三轮起缺省最新）→
+        切「深回撤加码」→ 确认框（耗时文案 + 策略名）→ 确认 → 前置 POST
+        载荷 {"method":…} + POST /api/tasks/9/run + 已触发提示 + 按钮转
+        禁用。"""
         calls = _install_mock(page)
         _, frontend_port = servers
         page.goto(f"http://127.0.0.1:{frontend_port}/settings")
         seg = page.locator("[data-method-target-seg]")
-        expect(seg.locator("button")).to_have_count(7)   # 七种全可选
-        expect(page.locator('[data-method-target="pl_ladder_deep"]')
+        expect(seg.locator("button")).to_have_count(8)   # 八种全可选
+        expect(page.locator('[data-method-target="pl_ladder_stop"]')
               ).to_have_class(re.compile("active"))      # 缺省最新策略
         page.locator('[data-method-target="dd_ladder_deep"]').click()
         expect(page.locator('[data-method-target="dd_ladder_deep"]')
@@ -553,8 +554,9 @@ class TestMethodFullDates:
     """各策略最近全量成功显示（2026-11-26 二十一轮）。"""
 
     def test_method_full_dates_render(self, servers, page):
-        """E2E-492：设置页「各策略最近全量成功」——7 策略各占一项，有
-        日期的绿显日期、null 显「—」，悬停 title 携带完整时间。"""
+        """E2E-492：设置页「各策略最近全量成功」——8 策略各占一项（二十三
+        轮起八档），有日期的绿显日期、null 显「—」，悬停 title 携带完整
+        时间。"""
         _install_mock(page)
 
         methods = {"amount": "2026-11-26T03:55:00+00:00",
@@ -563,7 +565,8 @@ class TestMethodFullDates:
                    "dd_ladder_deep": "2026-11-26T04:35:00+00:00",
                    "profit_dd_ladder": None,
                    "pl_ladder": "2026-11-25T12:25:00+00:00",
-                   "pl_ladder_deep": "2026-11-26T03:40:00+00:00"}
+                   "pl_ladder_deep": "2026-11-26T03:40:00+00:00",
+                   "pl_ladder_stop": None}
 
         def _route(route):
             route.fulfill(status=200, content_type="application/json",
@@ -576,7 +579,7 @@ class TestMethodFullDates:
         page.goto(f"http://127.0.0.1:{frontend_port}/settings")
         block = page.locator("[data-method-full-dates]")
         expect(block).to_be_visible()
-        expect(block.locator("[data-mfd]")).to_have_count(7)
+        expect(block.locator("[data-mfd]")).to_have_count(8)
         expect(block.locator('[data-mfd="amount"]')).to_contain_text("2026-11-26")
         expect(block.locator('[data-mfd="pl_ladder"]')).to_contain_text("2026-11-25")
         expect(block.locator('[data-mfd="profit_dd_ladder"]')

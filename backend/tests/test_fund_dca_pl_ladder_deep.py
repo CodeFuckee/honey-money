@@ -68,12 +68,13 @@ def _round_restart_nav():
 
 class TestSimulatePlLadderDeep:
     def test_methods_pin_values(self):
-        """定投方式口径锚：七档（十九轮 pl_ladder_deep 盈亏阶梯深档追加，
-        见本文件）。"""
+        """定投方式口径锚：八档（二十三轮 pl_ladder_stop 盈亏阶梯即停追加，
+        见 test_fund_dca_pl_ladder_stop.py）。"""
         from app.dca_backtest import DCA_METHODS
         assert DCA_METHODS == ("amount", "share", "dd_ladder",
                                "dd_ladder_deep", "profit_dd_ladder",
-                               "pl_ladder", "pl_ladder_deep")
+                               "pl_ladder", "pl_ladder_deep",
+                               "pl_ladder_stop")
 
     def test_pl_deep_constants_pinned(self):
         """档位契约：浮亏 (-20% → 1.5×, -30% → 2×)、浮盈半边复用
@@ -84,7 +85,8 @@ class TestSimulatePlLadderDeep:
                                       PL_PROFIT_LADDER, PROFIT_LADDERS)
         assert PL_LOSS_LADDER_DEEP == ((-0.20, 1.5), (-0.30, 2.0))
         assert PL_LOSS_LADDERS == {"pl_ladder": PL_LOSS_LADDER,
-                                   "pl_ladder_deep": PL_LOSS_LADDER_DEEP}
+                                   "pl_ladder_deep": PL_LOSS_LADDER_DEEP,
+                                   "pl_ladder_stop": PL_LOSS_LADDER}
         assert PROFIT_LADDERS["pl_ladder_deep"] == PL_PROFIT_LADDER
         assert "pl_ladder_deep" not in DD_LADDERS   # 深档盈亏阶梯无回撤半边
 

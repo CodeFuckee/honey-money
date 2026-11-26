@@ -233,7 +233,18 @@ class TestRunFullBacktestSettings:
         monkeypatch.setattr(mod, "_load_scale", lambda conn: {})
         monkeypatch.setattr(mod, "_load_nav", lambda conn, codes: nav)
         monkeypatch.setattr(mod.psycopg, "connect", lambda *a, **k: _Ctx())
-        _, _, tp_rows, _, _, _, _ = mod.run_full_backtest_tp("postgresql://fake")
+        # dirty 编排需要输入指纹（87 天窗基金在宇宙内）+ prev 空 → 全量
+        fps = {"000009": (2, "2024-01-01", "2024-03-28", "1.0", "1.0",
+                          "0.5", "短窗测试混合A", "混合型-偏股", False,
+                          None, None)}
+        monkeypatch.setattr(mod, "load_input_fingerprints",
+                            lambda conn: fps)
+        from app import dca_store
+        monkeypatch.setattr(dca_store, "load_fingerprints",
+                            lambda conn: (None, None))
+        _tp, _tr, _ti, _ri, _stats, _fps = \
+            mod.run_full_backtest_tp_dirty("postgresql://fake")
+        tp_rows = _tp
         assert calls and calls[0] == 90        # 缺省参数传的是引擎常量 90
         assert all(r["full_xirr"] is not None for r in tp_rows)
 

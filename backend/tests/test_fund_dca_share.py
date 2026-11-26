@@ -49,12 +49,13 @@ class TestSimulateShare:
     def test_methods_pin_values(self):
         """定投方式口径锚定：等额 amount / 等份额 share（2026-11-23 定案）；
         四轮追加 dd_ladder、六轮 dd_ladder_deep、七轮 profit_dd_ladder、
-        八轮 pl_ladder、十九轮 pl_ladder_deep（见
-        test_fund_dca_pl_ladder_deep.py）。"""
+        八轮 pl_ladder、十九轮 pl_ladder_deep、二十三轮 pl_ladder_stop（见
+        test_fund_dca_pl_ladder_stop.py）。"""
         from app.dca_backtest import DCA_METHODS
         assert DCA_METHODS == ("amount", "share", "dd_ladder",
                                "dd_ladder_deep", "profit_dd_ladder",
-                               "pl_ladder", "pl_ladder_deep")
+                               "pl_ladder", "pl_ladder_deep",
+                               "pl_ladder_stop")
 
     def test_amount_method_equals_default(self):
         """method='amount' 与缺省调用逐字段一致（等额行为零回归锚）。"""
@@ -215,61 +216,6 @@ class TestRunBacktestTpShare:
 
 # ===== run_full_backtest_tp：日更双 method 编排 =====
 
-class TestRunFullBacktestShare:
-    def _run(self, monkeypatch, nav):
-        from app import dca_backtest as mod
-        _, basic, scale_map = _synthetic_inputs()
-
-        monkeypatch.setattr(mod, "_load_codes",
-                            lambda conn: sorted(nav["code"].unique()))
-        monkeypatch.setattr(mod, "_load_basic",
-                            lambda conn, codes: basic.loc[codes])
-        monkeypatch.setattr(mod, "_load_scale", lambda conn: scale_map)
-        monkeypatch.setattr(mod, "_load_nav",
-                            lambda conn, codes:
-                            nav[nav["code"].isin(codes)].reset_index(drop=True))
-
-        class _Ctx:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *exc):
-                return False
-
-        monkeypatch.setattr(mod.psycopg, "connect",
-                            lambda *a, **k: _Ctx())
-        return mod.run_full_backtest_tp("postgresql://fake")
-
-    def test_tp_rows_cover_both_methods(self, monkeypatch):
-        """日更产出双 method：tp 行数 = 基金×阈值×2，旧口径行仍按
-        amount 派生且不带 method 键。"""
-        from app import dca_backtest as mod
-        nav, _, _ = _synthetic_inputs()
-        old_rows, old_rounds, tp_rows, tp_rounds, _t, _r, stats = \
-            self._run(monkeypatch, nav)
-        assert len(tp_rows) == 2 * len(mod.TP_THRESHOLDS) * len(mod.DCA_METHODS)
-        methods = {r["method"] for r in tp_rows
-                   if r["code"] == "000001" and r["tp"] == 0.20}
-        assert methods == set(mod.DCA_METHODS)
-        assert stats["methods"] == list(mod.DCA_METHODS)
-        # 旧口径：amount、tp=0.20 派生，剥掉 method 键（旧表无此列）
-        assert len(old_rows) == 2
-        assert all("method" not in r and "tp" not in r for r in old_rows)
-        # 旧轮次元组剥掉 method/tp 后形状不变：(code, fee, seq, *ev) 共 12 位
-        assert all(len(t) == 12 for t in old_rounds)
-        assert all(t[1] in ("gross", "disc", "nom") for t in old_rounds)
-
-    def test_share_rows_get_alive_flag(self, monkeypatch):
-        """alive（基金级）对两 method 行同一份。"""
-        from app import dca_backtest as mod
-        nav, _, _ = _synthetic_inputs()
-        _old, _or, tp_rows, _tr, _t, _r, _s = self._run(monkeypatch, nav)
-        by = {(r["code"], r["method"]): r["alive"] for r in tp_rows}
-        for code in ("000001", "000002"):
-            assert by[(code, "amount")] == by[(code, "share")]
-
-
-# ===== 存储：method 列迁移 + 写入 + 间隔聚合 =====
 
 class FakeCursor:
     def __init__(self, conn):
@@ -333,7 +279,7 @@ class TestShareStore:
     def test_ensure_tp_schema_method_migration(self):
         """迁移三件套：两表 ALTER 加 method 列（存量行归 amount，不丢数据）、
         PK 就地纳入 method（守护式，新装表天然含）、method 维度索引。"""
-        from app.dca_store import ensure_tp_schema
+        from app.dca_store import ensure_tp_schema, _TP_ROUNDS_COLS
         conn = FakeStoreConn()
         ensure_tp_schema(conn)
         ddl = [sql for sql, _ in conn.cursor_obj.executed][0]
@@ -363,9 +309,8 @@ class TestShareStore:
     def test_tp_rounds_cols_align_with_engine_tuple(self):
         """列序守护：INSERT 列清单与引擎元组 (code, method, tp, fee, seq,
         *ev) 逐位对齐——错位会被 PG 隐式类型转换'成功'吞掉。"""
-        from app.dca_store import _TP_ROUNDS_COLS, _ROUNDS_COLS
+        from app.dca_store import _TP_ROUNDS_COLS
         assert _TP_ROUNDS_COLS[:3] == ["code", "method", "tp"]
-        assert _TP_ROUNDS_COLS[3:] == _ROUNDS_COLS[1:]
         assert len(_TP_ROUNDS_COLS) == 14
 
     def test_import_tp_rows_carries_method(self):
@@ -508,7 +453,8 @@ class TestShareRoutes:
         from app.dca_backtest import DCA_METHODS
         assert dca_mod.DCA_METHODS == DCA_METHODS == \
             ("amount", "share", "dd_ladder", "dd_ladder_deep",
-             "profit_dd_ladder", "pl_ladder", "pl_ladder_deep")
+             "profit_dd_ladder", "pl_ladder", "pl_ladder_deep",
+             "pl_ladder_stop")
 
 
 class TestShareScatter:
@@ -527,19 +473,19 @@ class TestShareScatter:
         assert "method = %s" in " ".join(conn.executed)
         assert any("share" in (p or ()) for p in conn.params), conn.params
 
-    def test_scatter_amount_keeps_legacy_table(self, client, monkeypatch):
-        """缺省/amount/乱值三种都走旧表（fund_dca_result，零回归）。"""
+    def test_scatter_amount_hits_tp_table(self, client, monkeypatch):
+        """缺省/amount/乱值三种恒走 tp 表（二十二轮单一数据源）。"""
         import app.dca_api as dca_mod
         conn = FakeConnOne((None,), rows=[])
         _patch_connect(monkeypatch, dca_mod, conn)
         client.get("/api/funds/dca/scatter")
         client.get("/api/funds/dca/scatter", params={"method": "amount"})
         client.get("/api/funds/dca/scatter", params={"method": "bogus"})
-        # 每次请求 = ref 查询 + 主查询共 2 条；主查询恒走旧表
+        # 每次请求 = ref 查询 + 主查询共 2 条；主查询恒走 tp 表
         main_sqls = [s for s in conn.executed if s.startswith("SELECT code,")]
         assert len(main_sqls) == 3
-        assert all("fund_dca_tp_result" not in s for s in main_sqls)
-        assert all("FROM fund_dca_result" in s for s in main_sqls)
+        assert all("fund_dca_tp_result" in s for s in main_sqls)
+        assert all("FROM fund_dca_tp_result" in s for s in main_sqls)
 
     def test_scatter_degrades_with_method_echo(self, client, monkeypatch):
         monkeypatch.setattr("app.config.DATABASE_URL", DEAD_DSN)
@@ -567,25 +513,6 @@ class TestShareScatter:
         main2 = [s for s in conn2.executed if s.startswith("SELECT code,")][-1]
         assert "FROM fund_dca_tp_result" in main2
         assert any(0.15 in (p or ()) for p in conn2.params), conn2.params
-
-    def test_scatter_tp_fallback_keeps_legacy(self, client, monkeypatch):
-        """乱值 tp 回落 0.2：amount → 旧表；share → tp 表 0.2 档。"""
-        import app.dca_api as dca_mod
-        conn = FakeConnOne((None,), rows=[])
-        _patch_connect(monkeypatch, dca_mod, conn)
-        resp = client.get("/api/funds/dca/scatter", params={"tp": "0.99"})
-        assert resp.json()["tp"] == 0.2
-        main = [s for s in conn.executed if s.startswith("SELECT code,")][-1]
-        assert "FROM fund_dca_result" in main and "tp = %s" not in main
-
-        conn2 = FakeConnOne((None,), rows=[])
-        _patch_connect(monkeypatch, dca_mod, conn2)
-        client.get("/api/funds/dca/scatter",
-                   params={"tp": "abc", "method": "share"})
-        main2 = [s for s in conn2.executed if s.startswith("SELECT code,")][-1]
-        assert "FROM fund_dca_tp_result" in main2 and "tp = %s" in main2
-        assert any(0.2 in (p or ()) and "share" in (p or ())
-                   for p in conn2.params), conn2.params
 
 
 class TestUniverseAliasSingleSource:

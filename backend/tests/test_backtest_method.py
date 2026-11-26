@@ -1,6 +1,7 @@
 """单策略全量回测（backtest_method，2026-11-25 九轮用户定案）测试。
 
-口径定案（三问澄清）：设置页六种策略全可选；运行记录进任务系统（预置
+口径定案（三问澄清）：设置页全部策略（DCA_METHODS 事实源，二十三轮起
+八种）全可选；运行记录进任务系统（预置
 手动任务「单策略全量回测」，source='backtest_method'，mode 列携带目标
 策略，crawl_run 同 source 隔离日更快照判定）；日更运行中直接 409 拒绝。
 
@@ -263,7 +264,7 @@ class TestChunkWorkerMethods:
                                          ("000001", "000002"), 90,
                                          None, None, None,
                                          methods=("pl_ladder",))
-        _old_rows, _old_rounds, tp_rows, tp_rounds, _t, _r = out
+        tp_rows, tp_rounds, _t, _r = out
         assert tp_rows
         assert {r["method"] for r in tp_rows} == {"pl_ladder"}
         assert len(tp_rows) == 2 * len(mod.TP_THRESHOLDS)
@@ -274,7 +275,7 @@ class TestChunkWorkerMethods:
         self._patch_loaders(monkeypatch)
         out = mod._backtest_chunk_worker("postgresql://fake",
                                          ("000001",), 90, None, None, None)
-        _o, _or, tp_rows, _tr, _t, _r = out
+        tp_rows, _tr, _t, _r = out
         assert {r["method"] for r in tp_rows} == set(mod.DCA_METHODS)
 
 
@@ -325,7 +326,7 @@ class TestRunFullBacktestTpMethod:
             seen["workers"] = workers
             rows = [_tp_row(code="000001", alive=False),
                     _tp_row(code="000002", alive=False)]
-            return [([], [], rows, [], [], [])]
+            return [(rows, [], [], [])]
 
         monkeypatch.setattr(mod, "_run_chunk_tasks", fake_run_tasks)
         monkeypatch.setattr(mod, "_chunk_size", lambda: 1)
@@ -551,8 +552,8 @@ class TestJobProgressWiring:
         def fake_engine(dsn, progress=None, cur_fps=None):
             captured["progress"] = progress
             captured["cur_fps"] = cur_fps
-            return ([], [], [], [], [], [],
-                    {"fund_count": 2, "round_count": 0, "tp_round_count": 0,
+            return ([], [], [], [],
+                    {"fund_count": 2, "tp_round_count": 0,
                      "timing_count": 0, "risk_count": 0, "thresholds": [],
                      "methods": [], "window_end": "2026-11-21",
                      "engine": "vTEST", "dirty": ["000001"], "gone": []},
@@ -628,7 +629,7 @@ class TestMethodUniverseFilter:
             for a in args:
                 for c in tuple(a[1]):
                     on_done(0)
-                    out.append(([], [], rows_by_code.get(c, []), [], [], []))
+                    out.append((rows_by_code.get(c, []), [], [], []))
             return out
 
         monkeypatch.setattr(mod, "_run_chunk_tasks", fake_dispatch)
@@ -847,7 +848,7 @@ class TestSideTablesFlag:
             seen["methods"] = [a[6] for a in args]
             if on_done:
                 on_done(0)
-            return [([], [], [_tp_row("000001", alive=True)], [], [], [])]
+            return [([_tp_row("000001", alive=True)], [], [], [])]
 
         monkeypatch.setattr(mod, "_run_chunk_tasks", fake_dispatch)
         _rows, _rounds, stats = mod.run_full_backtest_tp_method(
@@ -858,9 +859,6 @@ class TestSideTablesFlag:
 
     def test_side_tables_and_cutoff_plumbed(self, monkeypatch):
         mod = self._patch(monkeypatch)
-        old_row = {"code": "000001", "name": "测试基金",
-                   "fund_type": "混合型-偏股", "full_end": "2026-11-21",
-                   "alive": False}
         timing = ("000001", -0.22, 12, "20-25", "2026-11-21")
         risk = ("000001", 0.18, 0.12, -0.35, 0.9)
 
@@ -869,10 +867,7 @@ class TestSideTablesFlag:
             seen["cutoffs"] = [a[3] for a in args]
             if on_done:
                 on_done(0)
-            return [([dict(old_row)], [("000001", 3)],
-                     [_tp_row("000001", alive=True)], [("000001", 1, 0.2,
-                                                        "gross", 1, *([0] * 9))],
-                     [timing], [risk])]
+            return [([_tp_row("000001", alive=True)], [], [timing], [risk])]
 
         fake_dispatch.seen = {}
         monkeypatch.setattr(mod, "_run_chunk_tasks", fake_dispatch)
@@ -881,9 +876,6 @@ class TestSideTablesFlag:
             with_side_tables=True, cutoff_iso="2025-10-07")
         assert fake_dispatch.seen["cutoffs"] == ["2025-10-07"]
         side = stats["side"]
-        assert side["old_rows"][0]["code"] == "000001"
-        assert side["old_rows"][0]["alive"] is True    # 父进程按 cutoff 重盖
-        assert side["old_rounds"] == [("000001", 3)]
         assert side["timing_rows"] == [timing]
         assert side["risk_rows"] == [risk]
 
@@ -893,9 +885,7 @@ class TestSideTablesFlag:
         def fake_dispatch(args, workers, on_done=None):
             if on_done:
                 on_done(0)
-            return [([{"code": "000001", "full_end": "2026-11-21",
-              "alive": False}], [("000001", 3)],
-                     [_tp_row("000001")], [], [("000001", None, None,
+            return [([_tp_row("000001")], [], [("000001", None, None,
                                                 "none", None)],
                      [("000001", None, None, None, None)])]
 
@@ -903,12 +893,9 @@ class TestSideTablesFlag:
         _rows, _rounds, stats = mod.run_full_backtest_tp_method(
             "postgresql://fake", "pl_ladder", log=lambda *_: None,
             with_side_tables=True)
-        # 编排层只搬运 worker 产出（旧口径仅 amount 非空的派生语义锚在
-        # worker 层测试）；alive 重盖照常应用
+        # 编排层只搬运 worker 产出；alive 重盖照常应用
         assert "side" in stats
-        assert stats["side"]["old_rows"][0]["alive"] is True
-        assert set(stats["side"]) == {"old_rows", "old_rounds",
-                                      "timing_rows", "risk_rows"}
+        assert set(stats["side"]) == {"timing_rows", "risk_rows"}
 
 
 class TestDirtyCurFpsParam:
@@ -931,10 +918,10 @@ class TestDirtyCurFpsParam:
         monkeypatch.setattr(mod, "_chunk_codes", lambda codes, size: [])
         rows = mod.run_full_backtest_tp_dirty(
             "postgresql://fake", log=lambda *_: None, cur_fps=fps)
-        stats = rows[6]
+        stats = rows[4]
         assert stats["full_run"] is True          # prev None → 全量
         assert stats["dirty"] == ["000001", "000002"]
-        assert rows[7] is fps                     # 指纹原样返回（收尾落库用）
+        assert rows[5] is fps                     # 指纹原样返回（收尾落库用）
 
 
 # ===== 日更逐方法分阶段（2026-11-26 二十轮根治项）测试共用锚 =====
@@ -1001,10 +988,6 @@ class TestStagedDailyJob:
                      "chunks": 1, "thresholds": [0.2]}
             if with_side_tables:
                 stats["side"] = {
-                    "old_rows": [{"code": "000001", "name": "测试基金",
-                                  "fund_type": "混合型-偏股",
-                                  "full_end": "2025-06-01", "alive": True}],
-                    "old_rounds": [("000001", 3)],
                     "timing_rows": [("000001", -0.22, 12, "20-25", _WE)],
                     "risk_rows": [("000001", 0.18, 0.12, -0.35, 0.9)]}
             return ([_tp_row("000001", method=method, alive=True)],
@@ -1012,8 +995,7 @@ class TestStagedDailyJob:
 
         monkeypatch.setattr(dca_backtest, "run_full_backtest_tp_method",
                             fake_method)
-        side_calls = {"merge_rows": [], "merge_rounds": [], "merge_timing": [],
-                      "merge_risk": []}
+        side_calls = {"merge_timing": [], "merge_risk": []}
 
         def _rec(key):
             def _f(conn, *a, **k):
@@ -1021,8 +1003,6 @@ class TestStagedDailyJob:
                 return 0
             return _f
 
-        monkeypatch.setattr(dca_store, "merge_rows", _rec("merge_rows"))
-        monkeypatch.setattr(dca_store, "merge_rounds", _rec("merge_rounds"))
         monkeypatch.setattr(dca_store, "merge_timing", _rec("merge_timing"))
         monkeypatch.setattr(dca_store, "merge_risk", _rec("merge_risk"))
         monkeypatch.setattr(dca_store, "rebuild_tp_compare",
@@ -1059,8 +1039,7 @@ class TestStagedDailyJob:
                  if "INSERT INTO fund_dca_method_meta" in s]
         assert [m[1][0] for m in marks] == list(DCA_METHODS)
         assert all(m[1][1] == _eng() and m[1][2] == _WE for m in marks)
-        # amount 搭车：side tables 同事务合并（各一次）
-        assert len(r["side"]["merge_rows"]) == 1
+        # amount 搭车：时机/风险同事务合并（各一次）
         assert len(r["side"]["merge_timing"]) == 1
         # 收尾：指纹落库 + 全局 alive 兜底 + meta 戳
         assert any("DELETE FROM fund_dca_fp" in s
@@ -1074,11 +1053,9 @@ class TestStagedDailyJob:
 
     def test_side_tables_merged_with_amount_not_per_method(self,
                                                            monkeypatch):
-        """时机/风险/旧口径只在 amount 首班次合并一次（其余方法班次零
-        side 调用）——新鲜度与 amount 戳绑定，中断不留半套。"""
+        """时机/风险只在 amount 首班次合并一次（其余方法班次零 side 调用）
+        ——新鲜度与 amount 戳绑定，中断不留半套。"""
         r = self._drive(monkeypatch)
-        assert len(r["side"]["merge_rows"]) == 1
-        assert len(r["side"]["merge_rounds"]) == 1
         assert len(r["side"]["merge_timing"]) == 1
         assert len(r["side"]["merge_risk"]) == 1
 
@@ -1091,9 +1068,9 @@ class TestStagedDailyJob:
                                    ("share", _eng(), _WE)])
         assert r["called"]["methods"] == list(DCA_METHODS)[2:]
         assert "amount" not in r["called"]["methods"]
-        assert len(r["side"]["merge_rows"]) == 0     # amount 班次没跑
-        # 进度分母 = 5 待算方法 × 1 宇宙基金
-        assert r["called"]["prog"][-1] == (5, 5)
+        assert len(r["side"]["merge_timing"]) == 0   # amount 班次没跑
+        # 进度分母 = 6 待算方法（二十三轮起八方式）× 1 宇宙基金
+        assert r["called"]["prog"][-1] == (6, 6)
         assert r["summary"]["aborted"] is False
 
     def test_engine_change_recomputes_all(self, monkeypatch):

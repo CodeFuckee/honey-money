@@ -271,11 +271,6 @@ async def _run_backtest_job(dsn: str, task: dict, progress,
                            if force or method_meta.get(m)
                            != (engine_str, window_end)]
                 total_funds = len(pending) * universe
-                params_legacy = {
-                    "amount": 1000.0, "take_profit": 0.2,
-                    "frequency": "monthly", "window_end": window_end,
-                    "min_age_years": None, "scale_min_yi": None,
-                    "source": "scheduler/backtest", "engine": engine_str}
                 tp_params = {"amount": 1000.0, "frequency": "monthly",
                              "thresholds": [float(t) for t in
                                             dca_backtest.TP_THRESHOLDS],
@@ -318,15 +313,8 @@ async def _run_backtest_job(dsn: str, task: dict, progress,
                                                        method)
                         side = stats_m.get("side")
                         if with_side and side is not None:
-                            # 时机/风险/旧口径与 amount 戳同事务绑定
-                            # （新鲜度一致，中断不留半套）
-                            dca_store.merge_rows(conn, side["old_rows"],
-                                                 all_codes,
-                                                 fund_count=len(
-                                                     side["old_rows"]),
-                                                 params=params_legacy)
-                            dca_store.merge_rounds(conn, side["old_rounds"],
-                                                   all_codes)
+                            # 时机/风险与 amount 戳同事务绑定（新鲜度一致，
+                            # 中断不留半套）
                             dca_store.merge_timing(conn, side["timing_rows"],
                                                    computed_at=window_end)
                             dca_store.merge_risk(conn, side["risk_rows"],
@@ -377,8 +365,8 @@ async def _run_backtest_job(dsn: str, task: dict, progress,
                       f"指纹已落库（次晚起回归脏检测快路径），"
                       f"窗口截至 {window_end}")
             else:
-                old_rows, old_rounds, tp_rows, tp_rounds, timing_rows, \
-                    risk_rows, stats, fingerprints = await loop.run_in_executor(
+                tp_rows, tp_rounds, timing_rows, risk_rows, stats, \
+                    fingerprints = await loop.run_in_executor(
                         pool, functools.partial(
                             dca_backtest.run_full_backtest_tp_dirty, dsn,
                             progress=progress_cb, cur_fps=cur_fps))
@@ -388,21 +376,15 @@ async def _run_backtest_job(dsn: str, task: dict, progress,
                         store.finish_run(
                             conn, run_id, total_stocks=stats["fund_count"],
                             ok_stocks=0, failed_stocks=0,
-                            bars_upserted=stats["round_count"], failures=[],
+                            bars_upserted=stats["tp_round_count"], failures=[],
                             aborted=True)
                         conn.commit()
                     return {"total": stats["fund_count"], "ok": 0,
-                            "failed": 0, "bars": stats["round_count"],
+                            "failed": 0, "bars": stats["tp_round_count"],
                             "failures": [], "aborted": True, "stopped": True,
                             "error": False}
                 # 引擎末块已把进度写到满格（total/total）——此处不再写占位，merge 段
                 # 保持 100% 至 finish 清除
-                params = {"amount": 1000.0, "take_profit": 0.2,
-                          "frequency": "monthly",
-                          "window_end": stats.get("window_end"),
-                          "min_age_years": None, "scale_min_yi": None,
-                          "source": "scheduler/backtest",
-                          "engine": stats.get("engine")}
                 tp_params = {"amount": 1000.0, "frequency": "monthly",
                              "thresholds": stats.get("thresholds", []),
                              "window_end": stats.get("window_end"),
@@ -418,10 +400,6 @@ async def _run_backtest_job(dsn: str, task: dict, progress,
                 with psycopg.connect(dsn) as conn:
                     dca_store.ensure_tp_schema(conn)     # 多阈值新表 + 波动指标表幂等建表
                     dca_store.ensure_fp_schema(conn)     # 输入指纹表幂等建表
-                    dca_store.merge_rows(conn, old_rows, dirty_codes,
-                                         fund_count=stats["fund_count"],
-                                         params=params)
-                    dca_store.merge_rounds(conn, old_rounds, dirty_codes)
                     dca_store.merge_tp_rows(conn, tp_rows, dirty_codes,
                                             fund_count=stats["fund_count"],
                                             params=tp_params)
@@ -437,19 +415,19 @@ async def _run_backtest_job(dsn: str, task: dict, progress,
                                      total_stocks=stats["fund_count"],
                                      ok_stocks=stats["fund_count"],
                                      failed_stocks=0,
-                                     bars_upserted=stats["round_count"],
+                                     bars_upserted=stats["tp_round_count"],
                                      failures=[], aborted=False)
                     conn.commit()
                 print(f"[backtest] 日更完成：基金 {stats['fund_count']:,} 只（重算 "
                       f"{stats.get('dirty_count', 0):,} / 跳过 "
                       f"{stats.get('skipped_count', 0):,} / 清理 "
                       f"{stats.get('gone_count', 0):,}，引擎 {stats.get('engine')}）/ "
-                      f"旧口径轮次 {stats['round_count']:,} 行 / 多阈值轮次 "
-                      f"{stats['tp_round_count']:,} 行 / 风险行 {stats['risk_count']:,}，"
+                      f"多阈值轮次 {stats['tp_round_count']:,} 行 / "
+                      f"风险行 {stats['risk_count']:,}，"
                       f"窗口截至 {stats.get('window_end')}")
                 summary = {"total": stats["fund_count"],
                            "ok": stats["fund_count"], "failed": 0,
-                           "bars": stats["round_count"], "failures": [],
+                           "bars": stats["tp_round_count"], "failures": [],
                            "aborted": False, "stopped": False, "error": False}
     except Exception as exc:
         _abort(exc)
@@ -484,85 +462,6 @@ async def _run_backtest_job(dsn: str, task: dict, progress,
     else:
         print("[backtest] 未配置 PAGES_REPO_URL，跳过 Pages 发布")
     return summary
-
-    # 引擎末块已把进度写到满格（total/total）——此处不再写占位，merge 段
-    # 保持 100% 至 finish 清除
-    params = {"amount": 1000.0, "take_profit": 0.2, "frequency": "monthly",
-              "window_end": stats.get("window_end"), "min_age_years": None,
-              "scale_min_yi": None, "source": "scheduler/backtest",
-              "engine": stats.get("engine")}
-    tp_params = {"amount": 1000.0, "frequency": "monthly",
-                 "thresholds": stats.get("thresholds", []),
-                 "window_end": stats.get("window_end"),
-                 "source": "scheduler/backtest",
-                 "engine": stats.get("engine")}
-    # 脏检测合并导入：只替换本次重算（∪ gone 清理）的基金行，未变基金
-    # 原行保留；alive/时机表/横截面分位为全局派生，每晚集合 SQL 刷新
-    dirty_codes = sorted(set(stats.get("dirty", []))
-                         | set(stats.get("gone", [])))
-    cutoff = (dt.date.fromisoformat(str(stats["window_end"])[:10])
-              - dt.timedelta(days=dca_backtest._ALIVE_WINDOW_DAYS)) \
-        if stats.get("window_end") else None
-    with psycopg.connect(dsn) as conn:
-        dca_store.ensure_tp_schema(conn)          # 多阈值新表 + 波动指标表幂等建表
-        dca_store.ensure_fp_schema(conn)          # 输入指纹表幂等建表
-        dca_store.merge_rows(conn, old_rows, dirty_codes,
-                             fund_count=stats["fund_count"], params=params)
-        dca_store.merge_rounds(conn, old_rounds, dirty_codes)
-        dca_store.merge_tp_rows(conn, tp_rows, dirty_codes,
-                                fund_count=stats["fund_count"],
-                                params=tp_params)
-        dca_store.merge_tp_rounds(conn, tp_rounds, dirty_codes)
-        dca_store.refresh_alive(conn, cutoff)     # 全表刷新（跳过基金也随窗口翻转）
-        dca_store.merge_timing(conn, timing_rows,
-                               computed_at=str(stats["window_end"])[:10]
-                               if stats.get("window_end") else None)
-        dca_store.merge_risk(conn, risk_rows, dirty_codes)
-        dca_store.replace_fingerprints(conn, fingerprints, stats["engine"])
-        store.finish_run(conn, run_id, total_stocks=stats["fund_count"],
-                         ok_stocks=stats["fund_count"], failed_stocks=0,
-                         bars_upserted=stats["round_count"], failures=[],
-                         aborted=False)
-        conn.commit()
-    print(f"[backtest] 日更完成：基金 {stats['fund_count']:,} 只（重算 "
-          f"{stats.get('dirty_count', 0):,} / 跳过 "
-          f"{stats.get('skipped_count', 0):,} / 清理 "
-          f"{stats.get('gone_count', 0):,}，引擎 {stats.get('engine')}）/ "
-          f"旧口径轮次 {stats['round_count']:,} 行 / 多阈值轮次 "
-          f"{stats['tp_round_count']:,} 行 / 风险行 {stats['risk_count']:,}，"
-          f"窗口截至 {stats.get('window_end')}")
-
-    # 对比快照重建（独立事务，失败只告警——派生聚合不回滚日更导入，缺行
-    # 时对比 API 回落现算聚合，夜间任务次日自愈；见 dca_store.rebuild_tp_compare）
-    try:
-        with psycopg.connect(dsn) as conn:
-            n_cmp = dca_store.rebuild_tp_compare(
-                conn, equity_types=TP_COMPARE_EQUITY_TYPES)
-            conn.commit()
-        print(f"[backtest] 对比快照重建：{n_cmp} 行"
-              f"（method×equity×fee×tp，对比卡毫秒级取数）")
-    except Exception as exc:      # noqa: BLE001 —— 快照失败不影响日更交付
-        print(f"[backtest] 对比快照重建失败（对比卡暂回落现算，次日重试）: "
-              f"{type(exc).__name__}: {str(exc)[:180]}")
-
-    # Pages 自动发布（可选）：PAGES_REPO_URL 配置了含 token 的仓库 URL 才启用；
-    # 失败只告警不回滚——回测结果是主交付物，公开页保持上一份快照次日自愈
-    pages_url = os.environ.get("PAGES_REPO_URL", "")
-    if pages_url:
-        work_dir = os.environ.get("PAGES_WORKDIR", "/srv/pages")
-        try:
-            from . import pages_publish
-            pub = await asyncio.to_thread(
-                pages_publish.publish, dsn, pages_url, work_dir)
-            print(f"[backtest] Pages 发布：{'已推送' if pub.get('pushed') else '快照无变更'}"
-                  f"（排行 {pub.get('rows', 0):,} 行 / 轮次基金 {pub.get('round_funds', 0):,} 只）")
-        except Exception as exc:      # noqa: BLE001 —— 发布失败不影响回测交付
-            print(f"[backtest] Pages 发布失败（不影响回测结果，次日自愈）: {exc}")
-    else:
-        print("[backtest] 未配置 PAGES_REPO_URL，跳过 Pages 发布")
-    return {"total": stats["fund_count"], "ok": stats["fund_count"],
-            "failed": 0, "bars": stats["round_count"], "failures": [],
-            "aborted": False, "stopped": False, "error": False}
 
 
 async def _run_backtest_method_job(dsn: str, task: dict, progress,

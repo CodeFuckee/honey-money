@@ -39,7 +39,7 @@ class TestDcaMergedTable:
         expect(page.locator(".browse-pv th", has_text="当前回撤")
               ).to_have_class(re.compile("p-datatable-column-sorted"),
                               timeout=10_000)
-        assert any("sort=dd_current" in u for u in mock_dca), mock_dca
+        assert any("sort=dd_current" in u for u in mock_tp), mock_tp
 
     def test_range_filters_apply_to_unified_table(self, servers, page,
                                                   mock_dca, mock_tp):
@@ -55,9 +55,9 @@ class TestDcaMergedTable:
         page.locator(".timing-filter button", has_text="应用筛选").click()
         expect(page.locator(".timing-filter button", has_text="清除筛选")
               ).to_be_visible(timeout=10_000)
-        assert any("xirr_min=0.3" in u for u in mock_dca), mock_dca
+        assert any("xirr_min=0.3" in u for u in mock_tp), mock_tp
         page.locator(".timing-filter button", has_text="清除筛选").click()
-        assert "xirr_min" not in mock_dca[-1], mock_dca
+        assert "xirr_min" not in mock_tp[-1], mock_tp
 
     def test_column_visibility_toggle(self, servers, page, mock_dca, mock_tp):
         """E2E-437：列显示过滤（MultiSelect）——取消勾选「类型」→ 表头

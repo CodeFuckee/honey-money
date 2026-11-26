@@ -197,47 +197,6 @@ def _old_row(code="000001"):
 
 
 class TestMergeImports:
-    def test_merge_rows_scoped_delete_and_meta_count(self):
-        rows = [_old_row("000001")]
-        conn = FakeConn()
-        n = dca_store.merge_rows(conn, rows, ["000001", "000009"],
-                                 fund_count=26677,
-                                 params={"engine": "v1"})
-        assert n == 1
-        sqls = [sql for sql, _ in conn.cursor_obj.executed]
-        assert sqls[0].startswith("DELETE FROM fund_dca_result")
-        assert conn.cursor_obj.executed[0][1] == ("{000001,000009}",)
-        assert any("fund_dca_meta" in s for s in sqls)
-        meta_call = [p for s, p in conn.cursor_obj.executed
-                     if "fund_dca_meta" in s][0]
-        assert meta_call[0] == 26677 and "engine" in meta_call[1]
-        assert "INSERT INTO fund_dca_result" in conn.cursor_obj.batch[0][0]
-
-    def test_merge_rows_empty_codes_keeps_all_rows(self):
-        """周末快路径：rows/codes 皆空 → 只刷 meta，不动任何数据行。"""
-        conn = FakeConn()
-        dca_store.merge_rows(conn, [], [], fund_count=26677)
-        assert conn.cursor_obj.batch == []
-        sqls = [sql for sql, _ in conn.cursor_obj.executed]
-        assert not any(s.startswith("DELETE FROM fund_dca_result")
-                       for s in sqls)
-
-    def test_merge_rounds_gap_scoped_not_whole_table(self):
-        """间隔聚合只对范围内基金 NULL 化 + 重聚合（绝不全表 RESET）。"""
-        conn = FakeConn()
-        dca_store.merge_rounds(conn, [("000001", "gross", 1, "2024-03-01",
-                                       30, 10, 200.0, 1.1, 1000.0, 0.0,
-                                       0.0, 200.0)], ["000001"])
-        sqls = [s.strip() for s, _ in conn.cursor_obj.executed]
-        assert any(s.startswith("DELETE FROM fund_dca_rounds")
-                   and "ANY(%s)" in s for s in sqls)
-        resets = [s for s in sqls
-                  if s.startswith("UPDATE fund_dca_result SET gap_avg_days")]
-        assert len(resets) == 1 and "ANY(%s)" in resets[0]
-        applies = [s for s in sqls
-                   if s.startswith("UPDATE fund_dca_result r SET")]
-        assert len(applies) == 1 and "ANY(%s)" in applies[0]
-
     def test_merge_tp_rows_and_rounds_scoped(self):
         conn = FakeConn()
         tp_row = {**_old_row("000001"), "tp": 0.2, "method": "amount"}
@@ -258,16 +217,38 @@ class TestMergeImports:
                      if "fund_dca_tp_meta" in s][0]
         assert meta_call[0] == 5
 
-    def test_refresh_alive_both_tables_and_str_cutoff(self):
-        conn = FakeConn()
-        dca_store.refresh_alive(conn, "2026-10-10")
-        sqls = [sql for sql, _ in conn.cursor_obj.executed]
-        assert len(sqls) == 2
-        assert all("SET alive =" in s for s, _ in
-                   [(s, p) for s, p in conn.cursor_obj.executed])
-        assert all(p[0] == dt.date(2026, 10, 10)
-                   for _, p in conn.cursor_obj.executed)
+    def test_refresh_alive_tp_table_and_str_cutoff(self):
+        """refresh_alive 刷 tp 表 alive（旧表已退役；str cutoff 自动转 date）。"""
+        from app import dca_store
 
+        class FakeCursor:
+            def __init__(self, conn):
+                self.conn = conn
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def execute(self, query, params=None):
+                self.conn.executed.append(query)
+                self.conn.params.append(params)
+
+        class FakeConn:
+            def __init__(self):
+                self.executed: list = []
+                self.params: list = []
+
+            def cursor(self):
+                return FakeCursor(self)
+
+        conn = FakeConn()
+        dca_store.refresh_alive(conn, "2024-02-24")
+        assert len(conn.executed) == 1
+        assert "fund_dca_tp_result" in conn.executed[0]
+        assert "fund_dca_result SET" not in conn.executed[0]
+        assert conn.params[0] == (dt.date(2024, 2, 24),)
     def test_refresh_alive_none_noop(self):
         conn = FakeConn()
         dca_store.refresh_alive(conn, None)
@@ -353,18 +334,16 @@ class TestRunFullBacktestTpDirty:
                             lambda conn: (prev_fps, prev_engine))
         _patch_connect(monkeypatch, mod, FakeConn())
         out = mod.run_full_backtest_tp_dirty("postgresql://fake")
-        assert len(out) == 8
+        assert len(out) == 6
         return out, calls
 
     def test_zero_dirty_weekend_fast_path(self, monkeypatch):
         """指纹无变化：不加载任何净值、不产生结果行，stats 全跳。"""
         fps = {"000001": _fp(), "000002": _fp(nav_count=420, s_unit="3.2")}
-        (old_rows, old_rounds, tp_rows, tp_rounds, timing_rows, risk_rows,
-         stats, fingerprints), calls = self._run(
+        (tp_rows, tp_rounds, timing_rows, risk_rows, stats, fingerprints), calls = self._run(
             monkeypatch, fps, fps, "vTEST")
         assert calls["nav"] == [] and calls["basic"] == []
-        assert (old_rows, old_rounds, tp_rows, tp_rounds, timing_rows,
-                risk_rows) == ([], [], [], [], [], [])
+        assert (tp_rows, tp_rounds, timing_rows, risk_rows) == ([], [], [], [])
         assert stats["full_run"] is False and stats["dirty_count"] == 0
         assert stats["skipped_count"] == 2 and stats["fund_count"] == 2
         assert fingerprints is fps or fingerprints == fps
@@ -374,7 +353,7 @@ class TestRunFullBacktestTpDirty:
         fps = {"000001": _fp(max_date="2024-02-24"),
                "000002": _fp(max_date="2024-02-24", s_unit="3.2"),
                "000003": _fp(nav_count=1, max_date="2024-06-01")}
-        (_rows, _r, _tp, _tpr, _ti, _ri, stats, _fps), _ = self._run(
+        (_tp, _tr, _ti, _ri, stats, _fps), _ = self._run(
             monkeypatch, fps, fps, "vTEST")
         assert stats["window_end"] == "2024-02-24"
 
@@ -382,22 +361,21 @@ class TestRunFullBacktestTpDirty:
         """仅 B 指纹变：只加载/重算 B；消失基金进 gone。"""
         cur = {"000001": _fp(), "000002": _fp(s_unit="9.9")}
         prev = {"000001": _fp(), "000002": _fp(), "000009": _fp()}
-        (old_rows, _o, tp_rows, _t, _ti, risk_rows, stats, _fps), calls = \
+        (tp_rows, _tr, _ti, risk_rows, stats, _fps), calls = \
             self._run(monkeypatch, cur, prev, "vTEST")
         assert calls["nav"] == [["000002"]]
         # skipped = cur 全集 2 - 重算 1（gone 基金不计入 cur 全集）
         assert stats["dirty_count"] == 1 and stats["skipped_count"] == 1
         assert stats["gone_count"] == 1 and stats["gone"] == ["000009"]
         assert stats["full_run"] is False
-        assert {r["code"] for r in old_rows} == {"000002"}
         assert {r["code"] for r in tp_rows} == {"000002"}
         assert {r[0] for r in risk_rows} == {"000002"}
-        assert all("alive" in r for r in old_rows)
+        assert all("alive" in r for r in tp_rows)
 
     def test_engine_change_full_run(self, monkeypatch):
         """引擎版本变化（如设置页口径调整）：全部基金重算。"""
         cur = {"000001": _fp(), "000002": _fp(s_unit="3.2")}
-        (_rows, _o, _tp, _t, _ti, _ri, stats, _fps), calls = self._run(
+        (_tp, _tr, _ti, _ri, stats, _fps), calls = self._run(
             monkeypatch, cur, cur, "vOLD")
         assert stats["full_run"] is True
         assert stats["dirty_count"] == 2 and stats["skipped_count"] == 0
@@ -407,7 +385,7 @@ class TestRunFullBacktestTpDirty:
         """BACKTEST_FORCE_FULL=1：无视相同指纹与版本，强制全量。"""
         monkeypatch.setenv("BACKTEST_FORCE_FULL", "1")
         fps = {"000001": _fp(), "000002": _fp(s_unit="3.2")}
-        (_rows, _o, _tp, _t, _ti, _ri, stats, _fps), calls = self._run(
+        (_tp, _tr, _ti, _ri, stats, _fps), calls = self._run(
             monkeypatch, fps, fps, "vTEST")
         assert stats["full_run"] is True
         assert sorted(calls["nav"][0]) == ["000001", "000002"]
@@ -477,7 +455,7 @@ class TestWorkerCountAndChunkSize:
 class TestParallelDispatch:
     def _run_parallel(self, monkeypatch, chunk_results):
         """patch 派发缝为 fake（不真拉池），验证切块数/合并完整性/全局锚。
-        chunk_results 按 (首代码 → 6 元组) 索引，fake 严格按 args 逐块返回。"""
+        chunk_results 按 (首代码 → 4 元组) 索引，fake 严格按 args 逐块返回。"""
         from app import dca_backtest as mod
         monkeypatch.setenv("BACKTEST_WORKERS", "4")
         monkeypatch.setenv("BACKTEST_CHUNK_SIZE", "1")   # 每块一基金 → 2 块
@@ -505,20 +483,20 @@ class TestParallelDispatch:
 
     def test_merge_and_stats(self, monkeypatch):
         from app import dca_backtest as mod
-        r1 = ([{"code": "000001", "full_end": "2023-11-01"}],   # 早于 cutoff → 死
-              [], [{"code": "000001", "tp": 0.2, "method": "amount"}], [], [], [])
-        r2 = ([{"code": "000002", "full_end": "2024-02-24"}],
-              [], [{"code": "000002", "tp": 0.2, "method": "amount"}], [], [], [])
-        (old_rows, old_rounds, tp_rows, tp_rounds, timing_rows, risk_rows,
+        r1 = ([{"code": "000001", "tp": 0.2, "method": "amount",
+                "full_end": "2023-11-01"}], [], [], [])
+        r2 = ([{"code": "000002", "tp": 0.2, "method": "amount",
+                "full_end": "2024-02-24"}], [], [], [])
+        (tp_rows, tp_rounds, timing_rows, risk_rows,
          stats, _fps), recorded = self._run_parallel(
             monkeypatch, {("000001",): r1, ("000002",): r2})
-        assert {r["code"] for r in old_rows} == {"000001", "000002"}
-        alive = {r["code"]: r["alive"] for r in old_rows}
+        assert stats["fund_count"] >= 0
+        alive = {r["code"]: r["alive"] for r in tp_rows}
         # cutoff = window_end 2024-02-24 - 45d = 2024-01-10
         assert alive == {"000001": False, "000002": True}
         # worker 数被块数截断：min(env 4, 2 块) = 2
         assert stats["chunks"] == 2 and stats["workers"] == 2
-        assert stats["round_count"] == 0
+        assert stats["tp_round_count"] == 0
         # 全局锚点下传：两块同 end_ts/computed_at/cutoff
         for (dsn, codes, span, cutoff_iso, computed_at, end_ts) \
                 in recorded["args"]:
@@ -538,9 +516,8 @@ class TestParallelDispatch:
 
         def fake_dispatch(args, workers):
             captured["workers"] = workers
-            return [([{"code": "000001", "full_end": "2024-02-24"}], [],
-                     [{"code": "000001", "tp": 0.2, "method": "amount"}],
-                     [], [], [])]
+            return [([{"code": "000001", "tp": 0.2, "method": "amount",
+                       "full_end": "2024-02-24"}], [], [], [])]
 
         monkeypatch.setattr(mod, "_run_chunk_tasks", fake_dispatch)
         monkeypatch.setattr(mod, "engine_version", lambda *a: "vTEST")
@@ -550,7 +527,7 @@ class TestParallelDispatch:
                             lambda conn: (fps, "vOLD"))
         _patch_connect(monkeypatch, mod, FakeConn())
         out = mod.run_full_backtest_tp_dirty("postgresql://fake")
-        assert captured["workers"] == 1 and out[6]["workers"] == 1
+        assert captured["workers"] == 1 and out[4]["workers"] == 1
 
 
 class TestChunkWorkerInline:
@@ -576,11 +553,11 @@ class TestChunkWorkerInline:
         out = mod._backtest_chunk_worker("postgresql://fake",
                                          ("000001", "000002"), 90,
                                          None, None, None)
-        old_rows, old_rounds, tp_rows, tp_rounds, timing_rows, risk_rows = out
+        tp_rows, tp_rounds, timing_rows, risk_rows = out
         assert len(tp_rows) == (2 * len(mod.DCA_METHODS)
                                 * len(mod.TP_THRESHOLDS))
-        assert {r["code"] for r in old_rows} == {"000001", "000002"}
-        assert all(r["alive"] is False for r in old_rows)   # cutoff None → 全死
+        assert {r["code"] for r in tp_rows} == {"000001", "000002"}
+        assert all(r["alive"] is False for r in tp_rows)   # cutoff None → 全死
         assert timing_rows == []                            # alive 门控
         assert {r[0] for r in risk_rows} == {"000001", "000002"}
 
@@ -591,7 +568,7 @@ class TestChunkWorkerInline:
         out = mod._backtest_chunk_worker("postgresql://fake",
                                          ("000001", "000002"), 90,
                                          None, None, None)
-        _, _, tp_rows, tp_rounds, _t, _r = out
+        tp_rows, tp_rounds, _t, _r = out
         for method in mod.DCA_METHODS:
             seq_rows, seq_rounds = mod.run_backtest_tp(
                 nav, basic, scale_map, mod.TP_THRESHOLDS, method=method)
@@ -612,8 +589,8 @@ class TestChunkWorkerInline:
                                          ("000001", "000002"), 90,
                                          "2025-01-01", "2025-02-23",
                                          "2025-02-23")
-        old_rows, _o, _tp, _tpr, timing_rows, _r = out
-        assert all(r["alive"] is True for r in old_rows)
+        tp_rows, tp_rounds, timing_rows, risk_rows = out
+        assert all(r["alive"] is True for r in tp_rows)
         assert {t[0] for t in timing_rows} == {"000001", "000002"}
         assert all(t[4] == "2025-02-23" for t in timing_rows)
 
@@ -703,7 +680,7 @@ class TestDirtyProgressCallback:
         _patch_connect(monkeypatch, mod, FakeConn())
         # worker 打桩（进度测试只看回调序列，不算真净值）
         monkeypatch.setattr(mod, "_backtest_chunk_worker",
-                            lambda *a: ([], [], [], [], [], []))
+                            lambda *a: ([], [], [], []))
         seen = []
         mod.run_full_backtest_tp_dirty(
             "postgresql://fake", log=lambda *_: None,
@@ -726,7 +703,7 @@ class TestDirtyProgressCallback:
 
         def fake_dispatch(args, workers, on_done=None):
             captured["on_done"] = on_done
-            return [([], [], [], [], [], [])]
+            return [([], [], [], [])]
 
         monkeypatch.setattr(mod, "_run_chunk_tasks", fake_dispatch)
         _patch_connect(monkeypatch, mod, FakeConn())
@@ -842,11 +819,11 @@ class TestBacktestUniverse:
 
         def fake_dispatch(args, workers, on_done=None):
             captured["on_done"] = on_done
-            return [([], [], [], [], [], [])]
+            return [([], [], [], [])]
 
         monkeypatch.setattr(mod, "_run_chunk_tasks", fake_dispatch)
         _patch_connect(monkeypatch, mod, FakeConn())
-        _s, _o, _t, _tr, _ti, _r, stats, _fps = mod.run_full_backtest_tp_dirty(
+        _s, _t, _tr, _r, stats, _fps = mod.run_full_backtest_tp_dirty(
             "postgresql://fake", log=lambda *_: None)
         assert stats["universe_count"] == 2
         assert stats["excluded_count"] == 1
@@ -865,7 +842,7 @@ class TestBacktestUniverse:
                             lambda conn: (fps, "vOLD"))
         _patch_connect(monkeypatch, mod, FakeConn())
         monkeypatch.setattr(mod, "_backtest_chunk_worker",
-                            lambda *a: ([], [], [], [], [], []))
+                            lambda *a: ([], [], [], []))
         captured = {}
 
         def fake_dispatch(args, workers, on_done=None):
@@ -874,7 +851,7 @@ class TestBacktestUniverse:
             for a in args:
                 if on_done:
                     on_done(0)
-                out.append(([], [], [], [], [], []))
+                out.append(([], [], [], []))
             return out
 
         monkeypatch.setattr(mod, "_run_chunk_tasks", fake_dispatch)

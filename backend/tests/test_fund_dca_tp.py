@@ -158,29 +158,6 @@ class TestRunBacktestTp:
         codes = {t[0] for t in rounds}
         assert codes == {"000001"}          # B 从未止盈 → 无轮次行
 
-    def test_tp20_matches_legacy_run_backtest(self):
-        """关键一致性：amount 且 tp=0.20 结果行/轮次行 ≡ 旧 run_backtest
-        输出（method 维度加入后旧口径派生不变）。"""
-        from app import dca_backtest as mod
-        nav, basic, scale_map = _synthetic_inputs()
-        old_rows, old_rounds = mod.run_backtest(nav, basic, scale_map)
-        tp_rows, tp_rounds = mod.run_backtest_tp(nav, basic, scale_map)
-        old_by_code = {r["code"]: r for r in old_rows}
-        new_by_code = {r["code"]: r for r in tp_rows
-                       if r["tp"] == 0.20 and r["method"] == "amount"}
-        for code, orow in old_by_code.items():
-            nrow = new_by_code[code]
-            assert set(orow) == (set(nrow) - {"tp", "method"})
-            for k, v in orow.items():
-                if v is None and nrow[k] is None:
-                    continue
-                assert nrow[k] == v, (code, k)
-        # 轮次行：旧 (code, fee, seq, *ev) ≡ 新 amount+tp=0.20 去掉两位
-        old_r = [t for t in old_rounds if t[0] == "000001"]
-        new_r = [t[:1] + t[3:] for t in tp_rounds
-                 if t[0] == "000001" and t[1] == "amount" and t[2] == 0.20]
-        assert old_r == new_r
-
     def test_rounds_profit_respects_threshold(self):
         """轮次市值口径收益 ≥ 对应阈值（跳空越过如实记录）。"""
         from app import dca_backtest as mod
@@ -206,68 +183,6 @@ class TestRunBacktestTp:
 
 # ===== run_full_backtest_tp：日更编排（修 use-before-def + 风险行产出） =====
 
-class TestRunFullBacktestTp:
-    """日更编排全函数（离线：_load_* 全部打桩）。
-
-    回归锚点：时机行块曾被置于 alive_by_code/all_end 定义之前，引用未定义
-    变量 NameError 使日更整轮崩溃（9b181f39 引入，2026-11-17 修正）——
-    本用例任何成功断言即证明顺序已修复。"""
-
-    def _run(self, monkeypatch, nav):
-        from app import dca_backtest as mod
-        _, basic, scale_map = _synthetic_inputs()
-
-        def fake_codes(conn):
-            return sorted(nav["code"].unique())
-
-        def fake_basic(conn, codes):
-            return basic.loc[codes]
-
-        def fake_scale(conn):
-            return scale_map
-
-        def fake_nav(conn, codes):
-            return nav[nav["code"].isin(codes)].reset_index(drop=True)
-
-        monkeypatch.setattr(mod, "_load_codes", fake_codes)
-        monkeypatch.setattr(mod, "_load_basic", fake_basic)
-        monkeypatch.setattr(mod, "_load_scale", fake_scale)
-        monkeypatch.setattr(mod, "_load_nav", fake_nav)
-        _patch_connect(monkeypatch, mod, FakeConn())
-        return mod.run_full_backtest_tp("postgresql://fake")
-
-    def test_seven_tuple_with_risk_rows(self, monkeypatch):
-        from app import dca_backtest as mod
-        nav, _, _ = _synthetic_inputs()
-        out = self._run(monkeypatch, nav)
-        assert len(out) == 7
-        old_rows, old_rounds, tp_rows, tp_rounds, timing_rows, risk_rows, \
-            stats = out
-        assert stats["fund_count"] == 2
-        assert stats["risk_count"] == 2
-        assert {r[0] for r in risk_rows} == {"000001", "000002"}
-        assert all(len(r) == 1 + 22 for r in risk_rows)   # code + ROW_FIELDS
-        # 平躺基金：恒定净值 → vol_all=0.0、sharpe None（None 行照常落库）
-        flat = [r for r in risk_rows if r[0] == "000002"][0]
-        assert flat[1] == 0.0                             # vol_1y
-        assert flat[4] is None                            # sharpe_1y
-
-    def test_timing_rows_alive_only_risk_rows_all(self, monkeypatch):
-        """B 截去尾部 60 天 → 不在市：时机行只收 A，风险行两只都算
-        （退市基金波动回顾仍有意义）。"""
-        from app import dca_backtest as mod
-        nav, _, _ = _synthetic_inputs()
-        b_idx = nav.index[nav["code"] == "000002"]
-        nav = nav.drop(b_idx[-60:]).reset_index(drop=True)
-        _old, _rounds, _tp, _tp_rounds, timing_rows, risk_rows, stats = \
-            self._run(monkeypatch, nav)
-        assert {t[0] for t in timing_rows} == {"000001"}
-        assert {r[0] for r in risk_rows} == {"000001", "000002"}
-        # 时机行 computed_at = 数据集最新净值日（列序与 _TIMING_COLS 对齐）
-        assert timing_rows[0][4] == str(stats["window_end"])[:10]
-
-
-# ===== 存储：三新表 DDL/写入/间隔聚合 =====
 
 class FakeCursor:
     def __init__(self, conn):
@@ -399,10 +314,11 @@ class TestTpStore:
         """列序守护：INSERT 列清单必须与引擎元组 (code, method, tp, fee,
         seq, *ev) 逐位对齐——错位会被 PG 隐式类型转换'成功'吞掉（'000001'
         →1.0），只能靠列清单与元组序一致防错（2026-11-15 生产实跑事故）。"""
-        from app.dca_store import _TP_ROUNDS_COLS, _ROUNDS_COLS
-        assert _TP_ROUNDS_COLS[:3] == ["code", "method", "tp"]
-        assert _TP_ROUNDS_COLS[3:] == _ROUNDS_COLS[1:]
-        assert len(_TP_ROUNDS_COLS) == 14
+        from app.dca_store import _TP_ROUNDS_COLS
+        assert _TP_ROUNDS_COLS == ["code", "method", "tp", "fee", "seq",
+                                   "tp_date", "round_days", "gap_days",
+                                   "profit", "tp_nav", "invested",
+                                   "sub_fee", "redeem_fee", "net_profit"]
         # 引擎轮次元组同长度（元素序 (code, method, tp, fee, seq, *ev) 由
         # run_backtest_tp 的 append 处锚定，另有 tp=0.20≡旧引擎测试守护）
 

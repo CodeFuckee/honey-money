@@ -89,13 +89,15 @@ def _round_restart_nav():
 
 class TestSimulateDdLadder:
     def test_methods_pin_values(self):
-        """定投方式口径锚：七档（四轮 dd_ladder、六轮 dd_ladder_deep、
+        """定投方式口径锚：八档（四轮 dd_ladder、六轮 dd_ladder_deep、
         七轮 profit_dd_ladder 浮盈阶梯、八轮 pl_ladder 盈亏阶梯、十九轮
-        pl_ladder_deep 盈亏阶梯深档，见 test_fund_dca_pl_ladder_deep.py）。"""
+        pl_ladder_deep 盈亏阶梯深档、二十三轮 pl_ladder_stop 盈亏阶梯
+        即停，见 test_fund_dca_pl_ladder_stop.py）。"""
         from app.dca_backtest import DCA_METHODS
         assert DCA_METHODS == ("amount", "share", "dd_ladder",
                                "dd_ladder_deep", "profit_dd_ladder",
-                               "pl_ladder", "pl_ladder_deep")
+                               "pl_ladder", "pl_ladder_deep",
+                               "pl_ladder_stop")
 
     def test_ladder_constant_pinned(self):
         """档位契约：-10% → 1.5×、-20% → 2×（防悄悄改坏）。"""
@@ -416,34 +418,6 @@ class TestRunBacktestDdLadder:
         assert rows and all(r["method"] == "dd_ladder" for r in rows)
         assert all(t[1] == "dd_ladder" for t in rounds)
 
-    def test_full_backtest_covers_five_methods(self, monkeypatch):
-        from app import dca_backtest as mod
-        nav, basic, scale_map = _inputs()
-
-        class _Ctx:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *exc):
-                return False
-
-        monkeypatch.setattr(mod, "_load_codes",
-                            lambda conn: sorted(nav["code"].unique()))
-        monkeypatch.setattr(mod, "_load_basic",
-                            lambda conn, codes: basic.loc[codes])
-        monkeypatch.setattr(mod, "_load_scale", lambda conn: scale_map)
-        monkeypatch.setattr(mod, "_load_nav",
-                            lambda conn, codes:
-                            nav[nav["code"].isin(codes)].reset_index(drop=True))
-        monkeypatch.setattr(mod.psycopg, "connect",
-                            lambda *a, **k: _Ctx())
-        old_rows, _or, tp_rows, _tr, _t, _r, stats = \
-            mod.run_full_backtest_tp("postgresql://fake")
-        methods = {r["method"] for r in tp_rows}
-        assert methods == set(mod.DCA_METHODS)
-        assert stats["methods"] == list(mod.DCA_METHODS)
-        # 旧口径行仍由 amount 派生
-        assert len(old_rows) == 2
 
 
 def _inputs():

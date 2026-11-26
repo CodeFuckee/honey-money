@@ -43,7 +43,7 @@ def fake_dsn(monkeypatch):
                 self._rows = tp_rows
             elif "max(nav_date)" in sql:
                 self._rows = [(date(2020, 12, 31),)]
-            elif "FROM fund_dca_result" in sql:
+            elif "FROM fund_dca_tp_result" in sql:
                 self._rows = [("000001",)]
             elif "FROM fund_nav" in sql:
                 self._rows = nav_rows
@@ -80,7 +80,8 @@ def fake_dsn(monkeypatch):
     return "postgresql://fake"
 
 
-def _fake_list(dsn, *, limit=0, offset=0, equity=True):
+def _fake_list(dsn, *, limit=0, offset=0, equity=True, method="amount",
+               tp=0.20):
     if offset:
         return {"status": "up", "total": 1, "rows": [], "stats": None,
                 "meta": {"generated_at": "2026-11-01T00:00:00+00:00"}}
@@ -94,7 +95,8 @@ def _fake_list(dsn, *, limit=0, offset=0, equity=True):
             "meta": {"generated_at": "2026-11-01T00:00:00+00:00"}}
 
 
-def _fake_scatter(dsn, *, fee="disc", equity=True):
+def _fake_scatter(dsn, *, fee="disc", equity=True, method="amount",
+                  tp=0.20):
     return {"status": "up", "fee": fee, "equity": equity,
             "points": [[1.0, 1.0, 0.2, "000001"]],
             "age_bands": [], "scale_bands": [], "matrix": []}
@@ -103,7 +105,7 @@ def _fake_scatter(dsn, *, fee="disc", equity=True):
 class TestExportAll:
     def test_export_shapes(self, tmp_path, monkeypatch, fake_dsn):
         import app.pages_export as pe
-        monkeypatch.setattr(pe, "fetch_dca_list", _fake_list)
+        monkeypatch.setattr(pe, "fetch_dca_tp_list", _fake_list)
         monkeypatch.setattr(pe, "fetch_dca_scatter", _fake_scatter)
         stats = export_all(fake_dsn, tmp_path, log=lambda *a: None)
         assert stats["rows"] == 1
@@ -142,7 +144,7 @@ class TestExportAll:
             seen.append(kw.get("equity"))
             return _fake_scatter(dsn, fee=kw.get("fee", "disc"))
 
-        monkeypatch.setattr(pe, "fetch_dca_list", _list)
+        monkeypatch.setattr(pe, "fetch_dca_tp_list", _list)
         monkeypatch.setattr(pe, "fetch_dca_scatter", _scatter)
         export_all(fake_dsn, tmp_path, log=lambda *a: None)
         assert seen, "未捕获到任何导出调用"
@@ -157,7 +159,7 @@ class TestPublish:
     def test_publish_commit_and_push(self, tmp_path, monkeypatch, fake_dsn):
         import app.pages_publish as pp
         monkeypatch.setattr(pp, "export_all", _fake_list and export_all)
-        monkeypatch.setattr("app.pages_export.fetch_dca_list", _fake_list)
+        monkeypatch.setattr("app.pages_export.fetch_dca_tp_list", _fake_list)
         monkeypatch.setattr("app.pages_export.fetch_dca_scatter", _fake_scatter)
         repo_url = f"file://{tmp_path / 'origin.git'}"
 

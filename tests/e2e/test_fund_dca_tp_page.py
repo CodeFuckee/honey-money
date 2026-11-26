@@ -41,7 +41,8 @@ TP_LIST_BODY = {
          "w10_rounds": 11, "w10_invested": 36000, "w10_final_value": 42120,
          "w10_profit_rate": 0.17, "w10_xirr": 0.92, "gap_avg_days": 82.1,
          "full_xirr": 0.92, "full_rounds": 11, "full_profit_rate": 0.17,
-         "full_months": 36},
+         "full_months": 36, "dd_current": -0.2712, "days_since_peak": 340,
+         "dip_band": "25-30"},
         {"tp": 0.15, "code": "161725", "name": "招商中证白酒指数(LOF)A",
          "fund_type": "指数型-股票", "alive": True, "scale_yi": 209.0,
          "scale_date": "2026-09-30", "age_years": 10.4,
@@ -240,23 +241,23 @@ class TestDcaTp:
         # 弹窗打开会并发拉全档位 rounds；只断言“存在当前档位请求”
         assert any("tp=0.15" in u for u in rounds_calls), mock_tp
 
-    def test_switch_back_uses_legacy_endpoint(self, servers, page, mock_dca,
-                                              mock_tp, mock_rounds_navs):
-        """E2E-428：15% → 20% 后，最后列表请求为旧端点（无 tp 参数）。"""
+    def test_switch_back_amount_uses_tp_endpoint(self, servers, page,
+                                                 mock_dca, mock_tp):
+        """E2E-428（二十二轮重锚）：切回等额 + 20% → 与其他组合一致走
+        tp 端点（method=amount&tp=0.2——兼容分支已退役，单一数据源）。"""
         _, frontend_port = servers
         open_dca(page, frontend_port)
-        page.locator('button[data-tp="0.15"]').click()
-        expect(page.locator(".tp-compare tr.tp-row-active")
-              ).to_contain_text("15%", timeout=10_000)
-        page.locator('button[data-tp="0.2"]').click()
-        expect(page.locator(".tp-compare tr.tp-row-active")
-              ).to_contain_text("20%", timeout=10_000)
-        list_calls = [u for u in mock_dca
-                      if "/api/funds/dca?" in u or
-                      re.search(r"/api/funds/dca\?", u)]
-        assert list_calls, "应回落旧端点"
-        assert "tp=" not in list_calls[-1], list_calls[-1]
-
+        page.locator('button[data-mode="share"]').click()
+        expect(page.locator('button[data-mode="share"]')
+              ).to_have_class(re.compile("active"), timeout=10_000)
+        page.locator('button[data-mode="amount"]').click()
+        expect(page.locator('button[data-mode="amount"]')
+              ).to_have_class(re.compile("active"), timeout=10_000)
+        list_calls = [u for u in mock_tp
+                      if "/rounds" not in u and "/compare" not in u
+                      and "/summary" not in u]
+        assert list_calls and "method=amount" in list_calls[-1]
+        assert "tp=0.2&" in list_calls[-1], list_calls
     def test_tp_deeplink(self, servers, page, mock_dca, mock_tp):
         """E2E-429：?tp=0.25 深链接 → 首个列表请求即带 tp=0.25。"""
         _, frontend_port = servers

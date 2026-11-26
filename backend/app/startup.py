@@ -35,7 +35,8 @@ def run_schema_inits(connect, task_store=None, dsn: str | None = None,
         ("任务运行态表", (runtime or TaskRuntime(dsn, connect=connect)).ensure_schema),
         ("基金表", FundStore().init_schema),
         ("全量回测表", backtest_full.ensure_schema),
-        ("定投回测表", dca_store.ensure_schema),
+        # （旧口径表 fund_dca_result/rounds 已退役——2026-11-26 二十二轮
+        #  单一数据源，启动清单不再建表；生产旧表由运维 DROP）
         ("多阈值回测表", dca_store.ensure_tp_schema),
         ("回测指纹表", dca_store.ensure_fp_schema),
         ("基金波动表", dca_store.ensure_risk_schema),
