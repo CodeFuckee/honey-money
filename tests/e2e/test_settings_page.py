@@ -1,6 +1,10 @@
 """设置页 E2E（2026-11-24）：回测年化运作期限下限（app_settings 表）。
 
 用例表（确认门 1）：
+- E2E-490 日更日历（二十轮）：设置页当月网格渲染，成功/中断/跳过三态
+  着色，悬停 title 携带当天运行明细；
+- E2E-491 月份导航 ‹ ›：切上月无数据（全 none 格），切回当月三态恢复；
+  导航纯本地重排不回源（calendar 请求只发一次）；
 - E2E-471 P0 主流程：侧栏第 6 项「设置」→ 页面渲染（h2「设置」）→ 输入框
   回显当前值 90（mock GET /api/settings）→ 改 120 → 保存 → PUT
   /api/settings/backtest-min-span 请求体 {"value":120} → 成功提示
@@ -26,6 +30,7 @@
 运行：python -m pytest tests/e2e/test_settings_page.py
 """
 
+import datetime as dt
 import json
 import re
 
@@ -440,3 +445,103 @@ class TestMethodProgressBar:
         expect(page.locator("[data-run-method-progress]")).to_be_visible()
         expect(page.locator("[data-run-method-progress-text]")
               ).to_contain_text("指纹比对阶段尚无基金级进度", timeout=10_000)
+
+
+def _install_calendar_mock(page, days=None):
+    """拦截 /api/settings/backtest-calendar（须在 _install_mock 之后注册
+    ——Playwright 后注册者优先，覆盖其 **/api/settings** 通配）。"""
+    if days is None:
+        today = dt.date.today()
+        ym = f"{today.year:04d}-{today.month:02d}"
+        days = [
+            {"date": f"{ym}-03", "status": "ok",
+             "runs": [{"mode": "daily",
+                       "started_at": f"{ym}-02T23:00:00+08:00",
+                       "finished_at": f"{ym}-03T03:55:00+08:00",
+                       "aborted": False, "skipped": None,
+                       "total_stocks": 13441, "ok_stocks": 13441}]},
+            {"date": f"{ym}-10", "status": "fail",
+             "runs": [{"mode": "daily",
+                       "started_at": f"{ym}-10T23:00:00+08:00",
+                       "finished_at": f"{ym}-11T02:00:00+08:00",
+                       "aborted": True, "skipped": None,
+                       "total_stocks": 0, "ok_stocks": 0}]},
+            {"date": f"{ym}-15", "status": "skip",
+             "runs": [{"mode": "daily",
+                       "started_at": f"{ym}-15T23:00:00+08:00",
+                       "finished_at": f"{ym}-15T23:01:00+08:00",
+                       "aborted": False, "skipped": "单策略回测running中",
+                       "total_stocks": 0, "ok_stocks": 0}]},
+        ]
+    calls = []
+
+    def _route(route):
+        calls.append(route.request.url)
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"status": "up", "days": days,
+                                       "server_now":
+                                       "2026-11-26T12:00:00+00:00"}))
+
+    page.route("**/api/settings/backtest-calendar**", _route)
+    days_calls = (days, calls)
+    return days_calls
+
+
+class TestBacktestCalendar:
+    """日更日历（2026-11-26 二十轮）：哪天成功/中断/跳过一目了然。"""
+
+    def test_backtest_calendar_renders(self, servers, page):
+        """E2E-490：设置页日更日历——当月网格渲染，成功/中断/跳过三态
+        着色（data-status），悬停 title 携带当天运行明细。"""
+        _install_mock(page)
+        days, _calls = _install_calendar_mock(page)
+        _, frontend_port = servers
+        page.goto(f"http://127.0.0.1:{frontend_port}/settings")
+        expect(page.locator("[data-calendar] .cal-grid")).to_be_visible()
+        ym = days[0]["date"][:7]
+        y, m = ym.split("-")
+        expect(page.locator("[data-cal-label]")
+              ).to_contain_text(f"{int(y)} 年 {int(m)} 月")
+        ok_cell = page.locator('[data-cal-cell][data-status="ok"]')
+        expect(ok_cell).to_have_count(1)
+        expect(ok_cell).to_have_text(str(int(days[0]["date"][8:])))
+        expect(page.locator('[data-cal-cell][data-status="fail"]')
+              ).to_have_count(1)
+        expect(page.locator('[data-cal-cell][data-status="skip"]')
+              ).to_have_count(1)
+        expect(ok_cell).to_have_attribute("title",
+                                          re.compile("成功 13441 只"))
+        expect(page.locator('[data-cal-cell][data-status="skip"]')
+              ).to_have_attribute("title",
+                                  re.compile("跳过（单策略回测running中）"))
+        expect(page.locator('[data-cal-cell][data-status="fail"]')
+              ).to_have_attribute("title", re.compile("中断"))
+
+    def test_backtest_calendar_month_nav(self, servers, page):
+        """E2E-491：月份导航 ‹ ›——切上月无数据（全 none 格），切回当月
+        三态恢复；导航纯本地重排不回源（calendar 请求只发一次）。"""
+        _install_mock(page)
+        days, calls = _install_calendar_mock(page)
+        _, frontend_port = servers
+        page.goto(f"http://127.0.0.1:{frontend_port}/settings")
+        expect(page.locator("[data-calendar] .cal-grid")).to_be_visible()
+        ym = days[0]["date"][:7]
+        y, m = ym.split("-")
+        expect(page.locator("[data-cal-label]")
+              ).to_contain_text(f"{int(y)} 年 {int(m)} 月")
+        page.locator("[data-cal-prev]").click()
+        py, pm = (int(y), int(m) - 1) if int(m) > 1 else (int(y) - 1, 12)
+        expect(page.locator("[data-cal-label]")
+              ).to_contain_text(f"{py} 年 {pm} 月")
+        expect(page.locator('[data-cal-cell][data-status="ok"]')
+              ).to_have_count(0)
+        import calendar as _cal
+        n_prev = _cal.monthrange(py, pm)[1]
+        expect(page.locator('[data-cal-cell][data-status="none"]')
+              ).to_have_count(n_prev)
+        page.locator("[data-cal-next]").click()
+        expect(page.locator("[data-cal-label]")
+              ).to_contain_text(f"{int(y)} 年 {int(m)} 月")
+        expect(page.locator('[data-cal-cell][data-status="ok"]')
+              ).to_have_count(1)
+        assert len(calls) == 1, calls      # 导航纯本地重排，不回源

@@ -866,6 +866,64 @@ def refresh_alive_method(conn, cutoff, method: str) -> None:
                     "WHERE method = %s", (cutoff, method))
 
 
+# ===== 方法级新鲜度（2026-11-26 二十轮，日更逐方法分阶段根治项） =====
+# 每方法一行 (engine, window_end) 戳：日更全量路径逐方法「算完即合并即盖
+# 戳」，被中断的夜晚已合并方法保留并标记新鲜，次晚跳过它们接着算剩余方法
+# ——无论夜窗多短，最多几个晚上必然收敛到全部方法新鲜后一次性落指纹，
+# 回归分钟级脏检测快路径（旧：末尾一次性合并，中断=整晚白跑+指纹永不
+# 落地+每晚全量的恶性循环，见 crawl_run 147~165 六连 aborted 实证）。
+
+_METHOD_META_DDL = """
+CREATE TABLE IF NOT EXISTS fund_dca_method_meta (
+  method      VARCHAR(16) PRIMARY KEY,
+  engine      TEXT NOT NULL,
+  window_end  DATE,
+  computed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+"""
+
+
+def ensure_method_meta_schema(conn) -> None:
+    """方法新鲜度表幂等建表。"""
+    with conn.cursor() as cur:
+        cur.execute(_METHOD_META_DDL)
+
+
+def load_method_meta(conn) -> dict[str, tuple[str, str | None]]:
+    """读全表：{method: (engine, window_end_iso|None)}；缺表（首次升级）
+    建表后返回空 dict 不炸（调用方按全部待算处理）。"""
+    ensure_method_meta_schema(conn)
+    out: dict[str, tuple[str, str | None]] = {}
+    with conn.cursor() as cur:
+        cur.execute("SELECT method, engine, window_end "
+                    "FROM fund_dca_method_meta")
+        for method, engine, window_end in cur.fetchall():
+            out[str(method)] = (str(engine),
+                                str(window_end) if window_end else None)
+    return out
+
+
+def mark_method_fresh(conn, method: str, engine: str,
+                      window_end: str | None) -> None:
+    """盖方法新鲜度戳（该方法的合并事务内调用——戳与行同事务原子生效）；
+    window_end 为 ISO 日期串。事务由调用方提交。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO fund_dca_method_meta (method, engine, window_end) "
+            "VALUES (%s, %s, %s::date) "
+            "ON CONFLICT (method) DO UPDATE SET engine = EXCLUDED.engine, "
+            "window_end = EXCLUDED.window_end, computed_at = now()",
+            (method, engine, window_end))
+
+
+def touch_tp_meta(conn, fund_count: int, params: dict | None = None) -> None:
+    """fund_dca_tp_meta 全表新鲜度戳补写（分阶段路径不经 merge_tp_rows，
+    收尾事务直接 upsert——与旧全量路径的 meta 语义一致）。"""
+    with conn.cursor() as cur:
+        cur.execute(_TP_META_UPSERT,
+                    (fund_count, json.dumps(params or {}, ensure_ascii=False)))
+
+
 def merge_timing(conn, rows: list[tuple], *, computed_at) -> int:
     """时机表合并：①清理已不在市基金的行（时机=「当前时机」语义，表内容
     恒等于 alive 集合；须在 refresh_alive 之后调用）→ ②插入本次重算的

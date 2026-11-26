@@ -199,7 +199,12 @@ class Store:
 
     def finish_run(self, conn, run_id: int, *, total_stocks: int, ok_stocks: int,
                    failed_stocks: int, bars_upserted: int, failures: list[str],
-                   aborted: bool = False) -> None:
+                   aborted: bool = False,
+                   detail: dict | None = None) -> None:
+        """detail：自定义运行详情（2026-11-26 二十轮——日更退让落
+        {"skipped": 原因}、分阶段全量落逐方法摘要；缺省保持
+        {"failures": failures} 原语义）。"""
+        payload = detail if detail is not None else {"failures": failures}
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -209,5 +214,5 @@ class Store:
                 WHERE id = %s
                 """,
                 (total_stocks, ok_stocks, failed_stocks, bars_upserted, aborted,
-                 json.dumps({"failures": failures}), run_id),
+                 json.dumps(payload), run_id),
             )

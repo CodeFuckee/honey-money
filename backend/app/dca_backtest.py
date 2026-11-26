@@ -768,8 +768,11 @@ def run_full_backtest(dsn: str, *, log=print) -> tuple[list[dict], list[tuple], 
 
 
 def run_full_backtest_tp_method(dsn: str, method: str, *, log=print,
-                                progress=None) -> tuple[list[dict],
-                                                        list[tuple], dict]:
+                                progress=None,
+                                with_side_tables: bool = False,
+                                cutoff_iso: str | None = None
+                                ) -> tuple[list[dict],
+                                           list[tuple], dict]:
     """单策略全市场重算（设置页「运行单策略全量」按钮的执行体，2026-11-25
     九轮）：复用脏检测版的分片并行机制，但只算选定 method——新策略上线后
     不必等日更全量即可单独出数（其余方法结果不受影响）。
@@ -786,6 +789,18 @@ def run_full_backtest_tp_method(dsn: str, method: str, *, log=print,
       下发全局锚，理由同脏检测版）；
     - alive 由本结果集窗口末派生 45 天 cutoff 重盖（合并后调用方再做
       method 域集合刷新兜底）。
+
+    with_side_tables（2026-11-26 二十轮，日更逐方法分阶段根治项）：True 时
+    保留 worker 顺带算好的旧口径/时机/风险行挂 stats["side"] 返回——三者
+    与 method 无关，分阶段日更由 amount 首班次搭车产出（worker 本来就算、
+    原实现丢弃，零额外计算）；旧口径行仅 method="amount" 非空（派生自
+    amount+tp=TAKE_PROFIT），调用方负责在**同一事务**内合并（时机/风险
+    表的新鲜度与 amount 方法戳绑定，中断不留半套）。缺省 False 不含
+    "side" 键——单策略按钮 job 兼容零改动。
+    cutoff_iso：alive 45 天锚（ISO 日期）。None（缺省，原行为）= worker
+    按全死标注、父进程以本结果集窗口末重盖；提供时下传 worker 让 alive
+    门控在计算期真实生效（**时机行=仅 alive 基金**，不给 cutoff 时机行
+    恒空——搭车产时机行必须给），父进程重盖同源基准。
 
     返回 (tp_rows, tp_rounds, stats)；合并导入（merge_tp_*_method method
     域替换 + refresh_alive_method + 对比快照重建）由调用方完成。
@@ -855,7 +870,7 @@ def run_full_backtest_tp_method(dsn: str, method: str, *, log=print,
     chunks = _chunk_codes(codes, _chunk_size())
     workers = min(_worker_count(), len(chunks)) or 1
     log(f"并行重算：{len(chunks)} 块 × ≤{_chunk_size()} 只 / {workers} worker")
-    args = [(dsn, tuple(c), min_span_days, None, None,
+    args = [(dsn, tuple(c), min_span_days, cutoff_iso, None,
              str(end_ts) if end_ts else None, (method,)) for c in chunks]
     # 基金级进度（2026-11-25 十轮，与脏检测版同通道）
     on_done = None
@@ -871,15 +886,27 @@ def run_full_backtest_tp_method(dsn: str, method: str, *, log=print,
                if on_done else _run_chunk_tasks(args, workers))
     tp_rows: list[dict] = []
     tp_rounds: list[tuple] = []
-    for _c_old, _c_old_rounds, c_tp, c_tp_rounds, _c_timing, _c_risk in results:
+    old_rows: list[dict] = []
+    old_rounds: list[tuple] = []
+    timing_rows: list[tuple] = []
+    risk_rows: list[tuple] = []
+    for c_old, c_old_rounds, c_tp, c_tp_rounds, c_timing, c_risk in results:
         tp_rows.extend(c_tp)
         tp_rounds.extend(c_tp_rounds)
+        old_rows.extend(c_old)
+        old_rounds.extend(c_old_rounds)
+        timing_rows.extend(c_timing)
+        risk_rows.extend(c_risk)
     # alive：本结果集窗口末（max full_end）派生 45 天 cutoff 重盖（worker
-    # 传 cutoff None 已标全死，此处为权威值）
+    # 传 cutoff None 已标全死，此处为权威值）；调用方下发 cutoff_iso 时
+    # 同源基准（worker 计算期门控与父进程重盖逐位一致，见 docstring）
     all_end = max((r["full_end"] for r in tp_rows if r["full_end"]),
                   default=None)
-    cutoff = (pd.Timestamp(all_end) - pd.Timedelta(days=_ALIVE_WINDOW_DAYS)) \
-        if all_end else None
+    if cutoff_iso:
+        cutoff = pd.Timestamp(cutoff_iso)
+    else:
+        cutoff = (pd.Timestamp(all_end) - pd.Timedelta(days=_ALIVE_WINDOW_DAYS)) \
+            if all_end else None
     for r in tp_rows:
         r["alive"] = bool(cutoff and r["full_end"]
                           and pd.Timestamp(r["full_end"]) >= cutoff)
@@ -889,6 +916,15 @@ def run_full_backtest_tp_method(dsn: str, method: str, *, log=print,
              "window_end": str(all_end) if all_end else None,
              "engine": engine_version(min_span_days),
              "workers": workers, "chunks": len(chunks)}
+    if with_side_tables:
+        # 旧口径行 alive 同款重盖（worker 端 cutoff=None 时标全死）；时机
+        # 行由 worker 按 alive 门控产出——cutoff_iso 缺省 None 时恒空，
+        # 搭车产时机行必须下发 cutoff_iso（docstring 契约）
+        for r in old_rows:
+            r["alive"] = bool(cutoff and r["full_end"]
+                              and pd.Timestamp(r["full_end"]) >= cutoff)
+        stats["side"] = {"old_rows": old_rows, "old_rounds": old_rounds,
+                         "timing_rows": timing_rows, "risk_rows": risk_rows}
     log(f"单策略重算完成：{method} / {stats['fund_count']:,} 只 / "
         f"轮次 {stats['tp_round_count']:,} 行 / {workers} worker × "
         f"{len(chunks)} 块，窗口截至 {all_end}")
@@ -1237,7 +1273,9 @@ def _backtest_chunk_worker(dsn: str, codes, min_span_days: int,
 
 
 def run_full_backtest_tp_dirty(dsn: str, *, log=print,
-                               progress=None) -> tuple[
+                               progress=None,
+                               cur_fps: dict[str, tuple] | None = None
+                               ) -> tuple[
         list[dict], list[tuple], list[dict], list[tuple], list[tuple],
         list[tuple], dict, dict[str, tuple]]:
     """日更全量回测（脏检测版）：逐基金比对输入指纹，只重算"净值或基础
@@ -1250,6 +1288,11 @@ def run_full_backtest_tp_dirty(dsn: str, *, log=print,
     functools.partial(task_runtime.write_progress, dsn, task_id) 跨 spawn
     池落库 task_runtime.progress。
 
+    cur_fps：调用方预计算的全市场指纹（2026-11-26 二十轮——日更 job 为
+    分支判定/收尾落库已先做过 ~10 分钟全市场 GROUP BY 聚合，传入复用，
+    避免同一夜晚重复聚合两次；None（缺省）引擎内部计算，既有调用方
+    （脚本/旧测试）零改动。
+
     返回 (old_rows, old_rounds, tp_rows, tp_rounds, timing_rows, risk_rows,
     stats, fingerprints)——结果行只含 dirty 基金；stats 同
     run_full_backtest_tp 并增补 engine/dirty_count/skipped_count/gone_count/
@@ -1259,7 +1302,8 @@ def run_full_backtest_tp_dirty(dsn: str, *, log=print,
     在单事务内完成；纯 CPU，调用方放子进程跑。"""
     from . import dca_store          # 惰性导入：引擎不依赖存储的依赖方向
     with psycopg.connect(dsn, connect_timeout=10) as conn:
-        cur_fps = load_input_fingerprints(conn)
+        if cur_fps is None:
+            cur_fps = load_input_fingerprints(conn)
         prev_fps, prev_engine = dca_store.load_fingerprints(conn)
         # 运作期限下限随设置页（与 run_full_backtest_tp 同款读取与回退）：
         # DB 值不进代码常量哈希，须作为 extra 纳入版本串

@@ -1638,6 +1638,66 @@ const runConfirmShow = ref(false)
 const runStarting = ref(false)
 const runBacktestMsg = ref('')
 const runBacktestError = ref('')
+// 日更日历（2026-11-26 二十轮）：crawl_run 按日聚合（绿=成功 红=中断
+// 黄=退让跳过），月份网格 + 悬停明细；一次拉 120 天（~4 个月），月份
+// 切换纯本地重排不回源
+const calDays = ref([])
+const calMonth = ref('')            // 'YYYY-MM'，默认当月
+const CAL_STATUS_COLOR = { ok: '#1a7f37', fail: '#c9313d', skip: '#b58900' }
+const CAL_WEEKDAYS = ['一', '二', '三', '四', '五', '六', '日']
+const calByDate = computed(() => {
+  const m = {}
+  for (const d of calDays.value) m[d.date] = d
+  return m
+})
+const calLabel = computed(() => {
+  if (!calMonth.value) return ''
+  const [y, mo] = calMonth.value.split('-').map(Number)
+  return `${y} 年 ${mo} 月`
+})
+const calCells = computed(() => {
+  if (!calMonth.value) return []
+  const [y, mo] = calMonth.value.split('-').map(Number)
+  const first = new Date(Date.UTC(y, mo - 1, 1))
+  const lead = (first.getUTCDay() + 6) % 7      // 周一开头
+  const nDays = new Date(Date.UTC(y, mo, 0)).getUTCDate()
+  const cells = []
+  for (let i = 0; i < lead; i++) cells.push(null)
+  for (let d = 1; d <= nDays; d++) {
+    const date = `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`
+    const info = calByDate.value[date]
+    cells.push({ date, day: d, status: info ? info.status : 'none', info })
+  }
+  return cells
+})
+function calShiftMonth(delta) {
+  if (!calMonth.value) return
+  const [y, mo] = calMonth.value.split('-').map(Number)
+  const nt = new Date(Date.UTC(y, mo - 1 + delta, 1))
+  calMonth.value = `${nt.getUTCFullYear()}-${String(nt.getUTCMonth() + 1).padStart(2, '0')}`
+}
+function calTooltip(cell) {
+  if (!cell || !cell.info) return ''
+  const t = iso => (iso ? iso.slice(5, 16).replace('T', ' ') : '')
+  return cell.info.runs.map(r => {
+    if (r.skipped) return `${t(r.started_at)} 跳过（${r.skipped}）`
+    if (r.aborted) return `${t(r.started_at)} ~ ${t(r.finished_at)} 中断`
+    return `${t(r.started_at)} ~ ${t(r.finished_at)} 成功 ${r.ok_stocks} 只`
+  }).join('\n')
+}
+async function loadCalendar() {
+  try {
+    const resp = await fetch('/api/settings/backtest-calendar?days=120')
+    const body = await resp.json()
+    if (body.status === 'up') {
+      calDays.value = body.days || []
+      if (!calMonth.value) {
+        const today = new Date()
+        calMonth.value = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`
+      }
+    }
+  } catch (e) { /* 日历缺失不拖垮设置页 */ }
+}
 // 进度推算（2026-11-24）：引擎在 spawn 子进程内计算、期间无库上进度信号，
 // 进度条按「已运行时长 / 预估耗时」推算渲染（时间基准用服务端 server_now
 // 校正客户端时钟偏差；full 按 8 小时、dirty 按 10 分钟），每秒走表、
@@ -1917,7 +1977,7 @@ async function loadBacktestMinSpan() {
 watch(activeNav, (nav, prev) => {
   if (nav === 'funds') loadFunds()
   if (nav === 'fundDca') { loadDca(); loadDcaScatter(); loadDcaTpCompare(); loadDcaDipReport(); loadDcaPauseExperiment(); loadBacktestMinSpan() }
-  if (nav === 'settings') loadSettings()
+  if (nav === 'settings') { loadSettings(); loadCalendar() }
   if (nav === 'market') loadMarketCompare()
   if (nav === 'crises') loadMarketCrises()
   if (nav === 'fund' && fund.value) {
@@ -4463,6 +4523,31 @@ watch(
                 style="margin: 6px 0 0; color: #1a7f37">{{ runBacktestMsg }}</p>
               <p v-if="runBacktestError" class="note" data-run-backtest-error
                 style="margin: 6px 0 0; color: #c9313d">{{ runBacktestError }}</p>
+              <!-- 日更日历（2026-11-26 二十轮）：哪天成功/中断/跳过一目了然；
+                   分阶段编排下中断只丢未完成方法、次日自动续跑 -->
+              <div data-calendar
+                style="margin-top: 14px; padding-top: 14px; border-top: 1px solid #e0e0e0">
+                <label class="settings-label"><b>日更日历</b>
+                  <span class="settings-hint">每日回测运行结果：<span style="color:#1a7f37">绿=成功</span> · <span style="color:#c9313d">红=中断</span> · <span style="color:#b58900">黄=跳过</span>；悬停看当天明细。分阶段编排下中断只丢未完成方法、次日自动续跑</span>
+                </label>
+                <div class="cal-head">
+                  <button class="btn" data-cal-prev
+                    style="padding: 2px 10px" @click="calShiftMonth(-1)">‹</button>
+                  <span data-cal-label style="font-weight: 600">{{ calLabel }}</span>
+                  <button class="btn" data-cal-next
+                    style="padding: 2px 10px" @click="calShiftMonth(1)">›</button>
+                </div>
+                <div class="cal-grid">
+                  <span v-for="w in CAL_WEEKDAYS" :key="w" class="cal-wd">{{ w }}</span>
+                  <template v-for="(c, i) in calCells" :key="i">
+                    <span v-if="c === null" class="cal-cell cal-empty"></span>
+                    <span v-else class="cal-cell" data-cal-cell
+                      :data-status="c.status"
+                      :style="{ background: CAL_STATUS_COLOR[c.status] || 'transparent' }"
+                      :title="calTooltip(c)">{{ c.day }}</span>
+                  </template>
+                </div>
+              </div>
               <div class="settings-row" data-run-method-row
                 style="margin-top: 14px; padding-top: 14px; border-top: 1px solid #e0e0e0">
                 <label class="settings-label"><b>运行单个策略全量回测</b>
@@ -5948,6 +6033,16 @@ body {
 }
 /* 设置页（2026-11-24）：单条设置一行式（标签+说明在左、输入+保存在右） */
 .settings-row { display: flex; align-items: flex-start; gap: 18px; flex-wrap: wrap; }
+/* 日更日历（2026-11-26 二十轮）：月份网格 */
+.cal-head { display: flex; align-items: center; gap: 10px; margin: 8px 0 6px; }
+.cal-grid { display: grid; grid-template-columns: repeat(7, 30px); gap: 4px; }
+.cal-wd { font-size: 11px; color: #666; text-align: center; }
+.cal-cell { width: 30px; height: 26px; display: inline-flex; align-items: center;
+  justify-content: center; font-size: 12px; border-radius: 4px;
+  border: 1px solid #e0e0e0; color: #333; cursor: default; }
+.cal-cell[data-status="ok"], .cal-cell[data-status="fail"],
+.cal-cell[data-status="skip"] { color: #fff; border-color: transparent;
+  font-weight: 600; }
 .settings-label { flex: 1 1 260px; min-width: 0; font-size: 13px; }
 .settings-hint { display: block; color: #525252; font-size: 12px;
   margin-top: 4px; line-height: 1.5; }

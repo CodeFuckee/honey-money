@@ -95,6 +95,56 @@ def register_settings_routes(app, connect) -> None:
         return {"status": "up", "task_id": task_id, "method": method,
                 "note": "目标策略已更新，触发经任务系统执行"}
 
+    @app.get("/api/settings/backtest-calendar")
+    def backtest_calendar(days: int = 120):
+        """日更日历数据源（2026-11-26 二十轮）：crawl_run source='backtest'
+        按自然日聚合——日状态 成功>中断>跳过（同日多跑，如夜间中断后白天
+        手动补跑成功则该日=成功）；runs 明细供 tooltip。days 钳制 1~365。
+        DB down 降级 200 空形状（沿设置端点惯例，日历缺失不拖垮设置页）。"""
+        n_days = max(1, min(365, int(days or 120)))
+        try:
+            with connect(_dsn()) as conn, conn.cursor() as cur:
+                cur.execute(
+                    "SELECT (started_at AT TIME ZONE 'Asia/Shanghai')::date "
+                    "AS day, count(*), "
+                    "count(*) FILTER (WHERE finished_at IS NOT NULL "
+                    "AND NOT aborted "
+                    "AND COALESCE(detail->>'skipped','') = ''), "
+                    "count(*) FILTER (WHERE aborted), "
+                    "count(*) FILTER (WHERE "
+                    "COALESCE(detail->>'skipped','') <> '') "
+                    "FROM crawl_run WHERE source = 'backtest' "
+                    "GROUP BY day ORDER BY day DESC LIMIT %s", (n_days,))
+                day_rows = cur.fetchall()
+                run_rows = []
+                if day_rows:
+                    cur.execute(
+                        "SELECT (started_at AT TIME ZONE 'Asia/Shanghai')"
+                        "::date, mode, started_at, finished_at, aborted, "
+                        "COALESCE(detail->>'skipped',''), total_stocks, "
+                        "ok_stocks FROM crawl_run WHERE source = 'backtest' "
+                        "AND (started_at AT TIME ZONE 'Asia/Shanghai')::date "
+                        "= ANY(%s::date[]) ORDER BY started_at",
+                        ([str(r[0]) for r in day_rows],))
+                    run_rows = cur.fetchall()
+        except Exception:
+            return {"status": "down", "days": []}
+        runs_by_day: dict = {}
+        for (day, mode, started, finished, aborted, skipped, total,
+             ok) in run_rows:
+            runs_by_day.setdefault(str(day), []).append({
+                "mode": mode, "started_at": _iso(started),
+                "finished_at": _iso(finished), "aborted": bool(aborted),
+                "skipped": skipped or None, "total_stocks": total,
+                "ok_stocks": ok})
+        days = [{"date": str(day),
+                 "status": ("ok" if ok else "fail" if fail
+                            else "skip" if skip else "none"),
+                 "runs": runs_by_day.get(str(day), [])}
+                for (day, _n, ok, fail, skip) in day_rows]
+        return {"status": "up", "days": days,
+                "server_now": _iso(dt.datetime.now(dt.timezone.utc))}
+
     @app.put("/api/settings/backtest-min-span")
     def put_min_span_days(body: dict):
         """修改运作期限下限（整数 90~3650）；下一次回测生效（存量行不重算）。"""

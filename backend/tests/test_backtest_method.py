@@ -524,12 +524,17 @@ class TestJobProgressWiring:
 
     def test_dirty_job_passes_picklable_progress(self, monkeypatch):
         from app import dca_backtest, dca_store, scheduler, task_runtime
+        from app.dca_backtest import engine_version
 
         conn = FakeConn()
-        conn.cursor_obj.fetchone_rows = [(dt.date(2026, 11, 21),), (2,)]
+        # fetchone 队列：净值预检 → 退让检查 → start_run RETURNING
+        conn.cursor_obj.fetchone_rows = [(dt.date(2026, 11, 21),),
+                                         (None, 0), (7,)]
         rt_conn = FakeConn()
         # 同上：scheduler/task_runtime 共享全局 psycopg 模块对象，按调用序
-        # 路由（第 1 次=job 主连接，含净值新鲜度预检 + start_run）
+        # 路由（第 1 次=job 主连接；其后=min_span 设置读 + 合并事务 +
+        # 进度落库全落 rt_conn）
+        rt_conn.cursor_obj.fetchone_rows = [(90,)]
         calls = {"n": 0}
 
         def fake_connect(*a, **kwargs):
@@ -538,15 +543,20 @@ class TestJobProgressWiring:
 
         monkeypatch.setattr(scheduler.psycopg, "connect", fake_connect)
         captured = {}
+        fps = {"000001": ("fp",)}
+        # 指纹前置（二十轮）：job 池内聚合一次；prev 引擎匹配 → 脏快路径
+        monkeypatch.setattr(scheduler, "_fps_worker",
+                            lambda dsn: (fps, fps, engine_version(90)))
 
-        def fake_engine(dsn, progress=None):
+        def fake_engine(dsn, progress=None, cur_fps=None):
             captured["progress"] = progress
+            captured["cur_fps"] = cur_fps
             return ([], [], [], [], [], [],
                     {"fund_count": 2, "round_count": 0, "tp_round_count": 0,
                      "timing_count": 0, "risk_count": 0, "thresholds": [],
                      "methods": [], "window_end": "2026-11-21",
                      "engine": "vTEST", "dirty": ["000001"], "gone": []},
-                    {"000001": ("fp",)})
+                    fps)
 
         monkeypatch.setattr(dca_backtest, "run_full_backtest_tp_dirty",
                             fake_engine)
@@ -562,6 +572,7 @@ class TestJobProgressWiring:
             progress=lambda c, t: None, stop_event=asyncio.Event()))
         cb = captured["progress"]
         assert callable(cb)
+        assert captured["cur_fps"] is fps   # job 预聚合指纹传入复用（不重算）
         cb(5, 26548)
         assert any("UPDATE task_runtime SET progress" in s
                    for s in rt_conn.cursor_obj.executed)
@@ -721,3 +732,390 @@ class TestMethodUniverseFilter:
             "postgresql://fake", "pl_ladder", log=lambda *_: None,
             progress=lambda d, t: seen.append((d, t)))
         assert seen[0] == (0, 2) and seen[-1] == (2, 2)
+
+
+class TestMethodMetaStore:
+    """方法级新鲜度表（2026-11-26 二十轮，日更逐方法分阶段根治项）：
+    fund_dca_method_meta 记录每方法的 (engine, window_end) 戳——中断续跑
+    的跳过判定事实源；DDL 幂等、load 空、mark upsert、touch_tp_meta
+    （收尾事务补全局 meta 戳——merge_tp_rows_method 刻意不触 meta）。"""
+
+    def test_ddl_idempotent(self):
+        from app import dca_store
+        conn = FakeConn()
+        dca_store.ensure_method_meta_schema(conn)
+        dca_store.ensure_method_meta_schema(conn)
+        ddl = [c for c in conn.cursor_obj.executed
+               if "CREATE TABLE IF NOT EXISTS fund_dca_method_meta" in c]
+        assert len(ddl) == 2
+        assert "VARCHAR(16) PRIMARY KEY" in ddl[0]
+        assert "TEXT NOT NULL" in ddl[0]
+        assert "DATE" in ddl[0] and "window_end" in ddl[0]
+
+    def test_load_empty_and_mark_roundtrip(self):
+        from app import dca_store
+        conn = FakeConn()
+        dca_store.ensure_method_meta_schema(conn)
+        assert dca_store.load_method_meta(conn) == {}
+        dca_store.mark_method_fresh(conn, "pl_ladder", "vTEST", "2026-11-25")
+        upserts = [(s, p) for s, p in conn.cursor_obj.execute_calls
+                   if "INSERT INTO fund_dca_method_meta" in s]
+        assert upserts and "ON CONFLICT (method) DO UPDATE" in upserts[0][0]
+        assert upserts[0][1][:3] == ("pl_ladder", "vTEST", "2026-11-25")
+
+    def test_touch_tp_meta(self):
+        from app import dca_store
+        conn = FakeConn()
+        dca_store.touch_tp_meta(conn, 13441, {"engine": "vTEST"})
+        ups = [(s, p) for s, p in conn.cursor_obj.execute_calls
+               if "INSERT INTO fund_dca_tp_meta" in s]
+        assert ups and ups[0][1][0] == 13441
+
+
+class TestSideTablesFlag:
+    """run_full_backtest_tp_method 的 with_side_tables / cutoff_iso
+    （2026-11-26 二十轮）：日更分阶段全量的 amount 首班차搭车产旧口径/
+    时机/风险行（worker 本来就算、原实现丢弃）；cutoff_iso 下传 worker
+    让 alive 门控真实生效（否则时机行恒空）+ 父进程重盖基准同源。缺省
+    调用 stats 无 side 键——单策略按钮 job 兼容零改动。"""
+
+    def _patch(self, monkeypatch):
+        from app import dca_backtest as mod, dca_store
+        monkeypatch.setattr(mod, "_load_codes", lambda conn: ["000001"])
+        monkeypatch.setattr(mod, "_chunk_size", lambda: 250)
+        monkeypatch.setattr(mod, "_worker_count", lambda: 1)
+        monkeypatch.setattr(dca_store, "load_fingerprints",
+                            lambda conn: ({}, "vTEST"))
+        monkeypatch.setattr(mod.psycopg, "connect", lambda *a, **k: _Ctx())
+        return mod
+
+    def test_default_has_no_side_key(self, monkeypatch):
+        mod = self._patch(monkeypatch)
+        seen = {}
+
+        def fake_dispatch(args, workers, on_done=None):
+            seen["cutoffs"] = [a[3] for a in args]
+            seen["methods"] = [a[6] for a in args]
+            if on_done:
+                on_done(0)
+            return [([], [], [_tp_row("000001", alive=True)], [], [], [])]
+
+        monkeypatch.setattr(mod, "_run_chunk_tasks", fake_dispatch)
+        _rows, _rounds, stats = mod.run_full_backtest_tp_method(
+            "postgresql://fake", "pl_ladder", log=lambda *_: None)
+        assert "side" not in stats
+        assert seen["cutoffs"] == [None]      # 缺省 cutoff_iso=None（原行为）
+        assert seen["methods"] == [("pl_ladder",)]
+
+    def test_side_tables_and_cutoff_plumbed(self, monkeypatch):
+        mod = self._patch(monkeypatch)
+        old_row = {"code": "000001", "name": "测试基金",
+                   "fund_type": "混合型-偏股", "full_end": "2026-11-21",
+                   "alive": False}
+        timing = ("000001", -0.22, 12, "20-25", "2026-11-21")
+        risk = ("000001", 0.18, 0.12, -0.35, 0.9)
+
+        def fake_dispatch(args, workers, on_done=None):
+            seen = fake_dispatch.seen
+            seen["cutoffs"] = [a[3] for a in args]
+            if on_done:
+                on_done(0)
+            return [([dict(old_row)], [("000001", 3)],
+                     [_tp_row("000001", alive=True)], [("000001", 1, 0.2,
+                                                        "gross", 1, *([0] * 9))],
+                     [timing], [risk])]
+
+        fake_dispatch.seen = {}
+        monkeypatch.setattr(mod, "_run_chunk_tasks", fake_dispatch)
+        _rows, _rounds, stats = mod.run_full_backtest_tp_method(
+            "postgresql://fake", "amount", log=lambda *_: None,
+            with_side_tables=True, cutoff_iso="2025-10-07")
+        assert fake_dispatch.seen["cutoffs"] == ["2025-10-07"]
+        side = stats["side"]
+        assert side["old_rows"][0]["code"] == "000001"
+        assert side["old_rows"][0]["alive"] is True    # 父进程按 cutoff 重盖
+        assert side["old_rounds"] == [("000001", 3)]
+        assert side["timing_rows"] == [timing]
+        assert side["risk_rows"] == [risk]
+
+    def test_side_tables_only_kept_when_requested(self, monkeypatch):
+        mod = self._patch(monkeypatch)
+
+        def fake_dispatch(args, workers, on_done=None):
+            if on_done:
+                on_done(0)
+            return [([{"code": "000001", "full_end": "2026-11-21",
+              "alive": False}], [("000001", 3)],
+                     [_tp_row("000001")], [], [("000001", None, None,
+                                                "none", None)],
+                     [("000001", None, None, None, None)])]
+
+        monkeypatch.setattr(mod, "_run_chunk_tasks", fake_dispatch)
+        _rows, _rounds, stats = mod.run_full_backtest_tp_method(
+            "postgresql://fake", "pl_ladder", log=lambda *_: None,
+            with_side_tables=True)
+        # 编排层只搬运 worker 产出（旧口径仅 amount 非空的派生语义锚在
+        # worker 层测试）；alive 重盖照常应用
+        assert "side" in stats
+        assert stats["side"]["old_rows"][0]["alive"] is True
+        assert set(stats["side"]) == {"old_rows", "old_rounds",
+                                      "timing_rows", "risk_rows"}
+
+
+class TestDirtyCurFpsParam:
+    """run_full_backtest_tp_dirty 的 cur_fps 可选参数（2026-11-26 二十轮）：
+    日更 job 分支判定已先算全市场指纹（约 10 分钟 GROUP BY），传入复用
+    避免同夜重复聚合；缺省 None 保持引擎内算（既有测试/脚本零改动）。"""
+
+    def test_cur_fps_reused_and_returned(self, monkeypatch):
+        from app import dca_backtest as mod, dca_store
+
+        fps = {"000001": _fp(), "000002": _fp()}
+        monkeypatch.setattr(mod, "load_input_fingerprints",
+                            lambda conn: (_ for _ in ()).throw(
+                                AssertionError("不应重复聚合指纹")))
+        monkeypatch.setattr(dca_store, "load_fingerprints",
+                            lambda conn: (None, None))
+        monkeypatch.setattr(mod.settings_store, "get_min_span_days",
+                            lambda conn, default=90: default)
+        monkeypatch.setattr(mod.psycopg, "connect", lambda *a, **k: _Ctx())
+        monkeypatch.setattr(mod, "_chunk_codes", lambda codes, size: [])
+        rows = mod.run_full_backtest_tp_dirty(
+            "postgresql://fake", log=lambda *_: None, cur_fps=fps)
+        stats = rows[6]
+        assert stats["full_run"] is True          # prev None → 全量
+        assert stats["dirty"] == ["000001", "000002"]
+        assert rows[7] is fps                     # 指纹原样返回（收尾落库用）
+
+
+# ===== 日更逐方法分阶段（2026-11-26 二十轮根治项）测试共用锚 =====
+_ENG = None     # 延迟初始化（engine_version(90)，测试模块级一次）
+
+
+def _eng() -> str:
+    global _ENG
+    if _ENG is None:
+        from app.dca_backtest import engine_version
+        _ENG = engine_version(90)
+    return _ENG
+
+
+_WE = "2025-06-01"      # _fp() 指纹的最大净值日（nav_count≥2 过滤后的窗口末）
+
+
+class TestStagedDailyJob:
+    """日更全量路径分阶段改造（2026-11-26 二十轮）：fp 空/引擎不匹配时
+    逐方法「算完即合并即盖戳」，中断只丢未完成方法、次晚续跑；全部方法
+    新鲜后一次性落指纹回归脏检测快路径——破除「全量被中断→指纹永不落地
+    →每晚全量→再被中断」的恶性循环（crawl_run 147~165 六连 aborted 实证）。
+    日更退让：单策略回测排队/运行中 → 本轮跳过并落 skipped 运行行（日历
+    可见），绝不与单方法 4-worker 池并发叠加内存。"""
+
+    def _drive(self, monkeypatch, *, meta_rows=None, fps=None, prev=(None, None),
+               stop_setter=None, force=False):
+        """驱动 _run_backtest_job 走分阶段全量路径，返回记录器集合。
+        fetchone 队列序：净值最新日 → 退让检查 → start_run → min_span。"""
+        from app import dca_backtest, dca_store, scheduler
+
+        fps = fps or {"000001": _fp()}
+        conn = FakeConn()
+        conn.cursor_obj.fetchone_rows = [
+            (dt.date(2026, 11, 25),),   # max(nav_date) 新鲜度预检
+            (None, 0),                  # 退让检查：(phase, 敞开运行行数)
+            (7,),                       # start_run RETURNING id
+            (90,),                      # get_min_span_days
+        ]
+        conn.cursor_obj.fetchall_rows = list(meta_rows or [])
+        monkeypatch.setattr(scheduler.psycopg, "connect",
+                            lambda *a, **k: _RoutedJobConn(conn))
+        monkeypatch.setattr(scheduler, "_fps_worker",
+                            lambda dsn: (fps, prev[0], prev[1]))
+        called = {"methods": [], "side_flags": [], "cutoffs": [], "prog": []}
+
+        def fake_offset(dsn, task_id, base, total, done, n):
+            called["prog"].append((base + done, total))
+        monkeypatch.setattr(scheduler, "_write_progress_offset", fake_offset)
+
+        def fake_method(dsn, method, *, log=None, progress=None,
+                        with_side_tables=False, cutoff_iso=None, **kw):
+            called["methods"].append(method)
+            called["side_flags"].append(with_side_tables)
+            called["cutoffs"].append(cutoff_iso)
+            if progress:
+                progress(0, 1)
+                progress(1, 1)
+            if stop_setter is not None and len(called["methods"]) \
+                    >= stop_setter:
+                stop_event.set()
+            stats = {"method": method, "fund_count": 1, "tp_round_count": 3,
+                     "window_end": _WE, "engine": _eng(), "workers": 1,
+                     "chunks": 1, "thresholds": [0.2]}
+            if with_side_tables:
+                stats["side"] = {
+                    "old_rows": [{"code": "000001", "name": "测试基金",
+                                  "fund_type": "混合型-偏股",
+                                  "full_end": "2025-06-01", "alive": True}],
+                    "old_rounds": [("000001", 3)],
+                    "timing_rows": [("000001", -0.22, 12, "20-25", _WE)],
+                    "risk_rows": [("000001", 0.18, 0.12, -0.35, 0.9)]}
+            return ([_tp_row("000001", method=method, alive=True)],
+                    [("000001", method, 0.2, "gross", 1, *([0] * 9))], stats)
+
+        monkeypatch.setattr(dca_backtest, "run_full_backtest_tp_method",
+                            fake_method)
+        side_calls = {"merge_rows": [], "merge_rounds": [], "merge_timing": [],
+                      "merge_risk": []}
+
+        def _rec(key):
+            def _f(conn, *a, **k):
+                side_calls[key].append((a, k))
+                return 0
+            return _f
+
+        monkeypatch.setattr(dca_store, "merge_rows", _rec("merge_rows"))
+        monkeypatch.setattr(dca_store, "merge_rounds", _rec("merge_rounds"))
+        monkeypatch.setattr(dca_store, "merge_timing", _rec("merge_timing"))
+        monkeypatch.setattr(dca_store, "merge_risk", _rec("merge_risk"))
+        monkeypatch.setattr(dca_store, "rebuild_tp_compare",
+                            lambda conn, **kwargs: 3)
+        monkeypatch.setattr(concurrent.futures, "ProcessPoolExecutor",
+                            _FakePool)
+        monkeypatch.delenv("PAGES_REPO_URL", raising=False)
+        if force:
+            monkeypatch.setenv("BACKTEST_FORCE_FULL", "1")
+        stop_event = asyncio.Event()
+        summary = asyncio.run(scheduler._run_backtest_job(
+            "postgresql://fake",
+            {"id": 7, "source": "backtest", "mode": "daily",
+             "_trigger": "manual"},
+            progress=lambda c, t: called["prog"].append((c, t)),
+            stop_event=stop_event))
+        return {"summary": summary, "conn": conn, "called": called,
+                "side": side_calls, "stop_event": stop_event}
+
+    def test_staged_full_merges_per_method_and_marks_fresh(self,
+                                                           monkeypatch):
+        r = self._drive(monkeypatch)
+        from app.dca_backtest import DCA_METHODS
+        assert r["called"]["methods"] == list(DCA_METHODS)
+        assert r["called"]["side_flags"] == [m == "amount"
+                                             for m in DCA_METHODS]
+        # cutoff 同源下传（fp 派生窗口末 - 45 天）
+        assert all(c == "2025-04-17" for c in r["called"]["cutoffs"])
+        # 每方法合并：method 域 DELETE/UPDATE 落行 + 盖新鲜度戳
+        merges = [(s, p) for s, p in r["conn"].cursor_obj.execute_calls
+                  if "DELETE FROM fund_dca_tp_result WHERE method = %s" in s]
+        assert [m[1][0] for m in merges] == list(DCA_METHODS)
+        marks = [(s, p) for s, p in r["conn"].cursor_obj.execute_calls
+                 if "INSERT INTO fund_dca_method_meta" in s]
+        assert [m[1][0] for m in marks] == list(DCA_METHODS)
+        assert all(m[1][1] == _eng() and m[1][2] == _WE for m in marks)
+        # amount 搭车：side tables 同事务合并（各一次）
+        assert len(r["side"]["merge_rows"]) == 1
+        assert len(r["side"]["merge_timing"]) == 1
+        # 收尾：指纹落库 + 全局 alive 兜底 + meta 戳
+        assert any("DELETE FROM fund_dca_fp" in s
+                   for s in r["conn"].cursor_obj.executed)
+        assert any("UPDATE fund_dca_tp_result SET alive" in s
+                   for s in r["conn"].cursor_obj.executed)
+        assert any("INSERT INTO fund_dca_tp_meta" in s
+                   for s in r["conn"].cursor_obj.executed)
+        assert r["summary"]["aborted"] is False
+        assert r["summary"]["ok"] == 1
+
+    def test_side_tables_merged_with_amount_not_per_method(self,
+                                                           monkeypatch):
+        """时机/风险/旧口径只在 amount 首班次合并一次（其余方法班次零
+        side 调用）——新鲜度与 amount 戳绑定，中断不留半套。"""
+        r = self._drive(monkeypatch)
+        assert len(r["side"]["merge_rows"]) == 1
+        assert len(r["side"]["merge_rounds"]) == 1
+        assert len(r["side"]["merge_timing"]) == 1
+        assert len(r["side"]["merge_risk"]) == 1
+
+    def test_resume_skips_fresh_methods(self, monkeypatch):
+        """续跑：amount/share 已新鲜（engine+window_end 匹配）→ 跳过重算、
+        不搭车 side tables，从第三个方法接着算；进度分母=待算方法×宇宙。"""
+        from app.dca_backtest import DCA_METHODS
+        r = self._drive(monkeypatch,
+                        meta_rows=[("amount", _eng(), _WE),
+                                   ("share", _eng(), _WE)])
+        assert r["called"]["methods"] == list(DCA_METHODS)[2:]
+        assert "amount" not in r["called"]["methods"]
+        assert len(r["side"]["merge_rows"]) == 0     # amount 班次没跑
+        # 进度分母 = 5 待算方法 × 1 宇宙基金
+        assert r["called"]["prog"][-1] == (5, 5)
+        assert r["summary"]["aborted"] is False
+
+    def test_engine_change_recomputes_all(self, monkeypatch):
+        """引擎版本变化 → 新鲜度戳全部失配 → 七方法全重算（十四轮排除
+        旧行清理机制在新编排下继续成立）。"""
+        from app.dca_backtest import DCA_METHODS
+        r = self._drive(monkeypatch,
+                        meta_rows=[(m, "vOLD", _WE) for m in DCA_METHODS])
+        assert r["called"]["methods"] == list(DCA_METHODS)
+
+    def test_window_end_mismatch_recomputes(self, monkeypatch):
+        """同引擎但窗口推进（新净值日）→ 戳失配重算。"""
+        from app.dca_backtest import DCA_METHODS
+        r = self._drive(monkeypatch,
+                        meta_rows=[(m, _eng(), "2025-05-31")
+                                   for m in DCA_METHODS])
+        assert r["called"]["methods"] == list(DCA_METHODS)
+
+    def test_stop_between_methods_keeps_merged_prefix(self, monkeypatch):
+        """方法间协作式停止：完成当前方法合并后停——已合并方法+新鲜度戳
+        保留，指纹不落（下次仍判全量走续跑），run 收尾 aborted。"""
+        r = self._drive(monkeypatch, stop_setter=1)
+        from app.dca_backtest import DCA_METHODS
+        assert r["called"]["methods"] == [DCA_METHODS[0]]
+        marks = [p for s, p in r["conn"].cursor_obj.execute_calls
+                 if "INSERT INTO fund_dca_method_meta" in s]
+        assert [p[0] for p in marks] == [DCA_METHODS[0]]
+        assert not any("DELETE FROM fund_dca_fp" in s
+                       for s in r["conn"].cursor_obj.executed)
+        assert r["summary"]["aborted"] is True
+
+    def test_force_full_ignores_freshness(self, monkeypatch):
+        """BACKTEST_FORCE_FULL=1 → 新鲜方法也强制重算（逃生口语义不变）。"""
+        from app.dca_backtest import DCA_METHODS
+        r = self._drive(monkeypatch,
+                        meta_rows=[(m, _eng(), _WE) for m in DCA_METHODS],
+                        force=True)
+        assert r["called"]["methods"] == list(DCA_METHODS)
+
+    def test_yield_to_method_run_records_skipped(self, monkeypatch):
+        """日更退让：单策略回测运行中（task_runtime phase=running）→ 本轮
+        不算任何东西，落 skipped 运行行（aborted=False——计划性让路非失败），
+        日历可见。"""
+        from app import dca_backtest, scheduler
+        conn = FakeConn()
+        conn.cursor_obj.fetchone_rows = [
+            (dt.date(2026, 11, 25),),   # 净值预检
+            ("running", 1),             # 退让检查命中
+            (7,),                       # start_run
+        ]
+        monkeypatch.setattr(scheduler.psycopg, "connect",
+                            lambda *a, **k: _RoutedJobConn(conn))
+        called = {"n": 0}
+
+        def _boom(*a, **k):
+            called["n"] += 1
+            return ([], [], {}, )
+        monkeypatch.setattr(dca_backtest, "run_full_backtest_tp_method",
+                            _boom)
+        monkeypatch.setattr(concurrent.futures, "ProcessPoolExecutor",
+                            _FakePool)
+        summary = asyncio.run(scheduler._run_backtest_job(
+            "postgresql://fake",
+            {"id": 7, "source": "backtest", "mode": "daily",
+             "_trigger": "schedule"},
+            progress=lambda c, t: None, stop_event=asyncio.Event()))
+        assert called["n"] == 0
+        assert summary.get("skipped") is True
+        assert summary["aborted"] is False
+        # skipped 运行行：detail 携带 skipped 键（日历按此归类）
+        ups = [(s, p) for s, p in conn.cursor_obj.execute_calls
+               if "UPDATE crawl_run SET" in s]
+        assert ups and '"skipped"' in str(ups[0][1][5])
+        assert ups[0][1][4] is False            # aborted=False

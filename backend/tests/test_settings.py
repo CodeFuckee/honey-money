@@ -317,6 +317,7 @@ class _RoutedConn:
     def __init__(self, routes):
         self.routes = routes      # [(SQL 关键词, fetchone 结果 | Exception)]
         self.executed: list = []
+        self.params: list = []
         self.committed = False
         self._last = None
 
@@ -334,6 +335,7 @@ class _RoutedConn:
 
     def execute(self, query, params=None):
         self.executed.append(query)
+        self.params.append(params)
         self._last = None
         for keyword, value in self.routes:
             if keyword in query:
@@ -768,3 +770,65 @@ class TestMethodTaskBlockingAndError:
         mt = self._client(routes).get("/api/settings").json()["method_task"]
         assert mt["blocking"] is None
         assert mt["last_error"] is None
+
+
+class TestSettingsBacktestCalendar:
+    """GET /api/settings/backtest-calendar（2026-11-26 二十轮）：日更日历
+    数据源——crawl_run source='backtest' 按日聚合（成功/中断/退让跳过），
+    同日多跑按 成功>中断>跳过 取日状态；days 钳制 1~365；DB down 降级
+    200 空形状（沿设置端点惯例，日历缺失不拖垮设置页）。"""
+
+    def _client(self, routes):
+        from app import settings_api
+
+        conn = _RoutedConn(routes)
+
+        def fake_connect(*a, **k):
+            return conn
+
+        app = FastAPI()
+        settings_api.register_settings_routes(app, connect=fake_connect)
+        return TestClient(app), conn
+
+    def test_day_status_precedence_and_runs(self):
+        day_rows = [("2026-11-26", 2, 1, 1, 0),    # 成功+中断 → ok
+                    ("2026-11-25", 1, 0, 0, 1),    # 仅跳过 → skip
+                    ("2026-11-24", 1, 0, 1, 0)]    # 仅中断 → fail
+        run_rows = [("2026-11-26", "daily", datetime(2026, 11, 26, 10, 2),
+                     datetime(2026, 11, 26, 11, 0), False, "", 13441, 13441),
+                    ("2026-11-26", "daily", datetime(2026, 11, 26, 23, 0),
+                     datetime(2026, 11, 27, 3, 55), True, "", 13441, 13441),
+                    ("2026-11-25", "daily", datetime(2026, 11, 25, 23, 0),
+                     datetime(2026, 11, 25, 23, 1), False,
+                     "单策略回测running中", 0, 0),
+                    ("2026-11-24", "daily", datetime(2026, 11, 24, 23, 0),
+                     datetime(2026, 11, 25, 3, 55), True, "", 0, 0)]
+        client, _ = self._client([("GROUP BY day", day_rows),
+                                  ("= ANY(%s", run_rows)])
+        body = client.get("/api/settings/backtest-calendar").json()
+        assert body["status"] == "up"
+        days = body["days"]
+        assert [d["date"] for d in days] == ["2026-11-26", "2026-11-25",
+                                             "2026-11-24"]
+        assert [d["status"] for d in days] == ["ok", "skip", "fail"]
+        assert days[0]["runs"][1]["aborted"] is True
+        assert days[0]["runs"][0]["ok_stocks"] == 13441
+        assert days[1]["runs"][0]["skipped"] == "单策略回测running中"
+        assert "server_now" in body
+
+    def test_days_clamped_to_365(self):
+        client, conn = self._client([("GROUP BY day", []),
+                                     ("= ANY(%s", [])])
+        body = client.get("/api/settings/backtest-calendar",
+                          params={"days": 9999}).json()
+        assert body == {"status": "up", "days": [], "server_now": body["server_now"]}
+        assert any("GROUP BY day" in q for q in conn.executed)
+        limit_calls = [p for q, p in zip(conn.executed, conn.params)
+                       if "GROUP BY day" in q]
+        assert limit_calls == [(365,)]          # 钳制上界
+
+    def test_down_degrades_200(self):
+        client, _ = self._client([("GROUP BY day", RuntimeError("db down"))])
+        resp = client.get("/api/settings/backtest-calendar")
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "down", "days": []}
