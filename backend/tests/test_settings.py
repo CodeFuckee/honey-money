@@ -832,3 +832,73 @@ class TestSettingsBacktestCalendar:
         resp = client.get("/api/settings/backtest-calendar")
         assert resp.status_code == 200
         assert resp.json() == {"status": "down", "days": []}
+
+
+class TestSettingsMethodFullDates:
+    """GET /api/settings/backtest-method-full-dates（2026-11-26 二十一轮）：
+    每策略最近「全量回测成功」时间——两路并集取最新：①夜更分阶段合并的
+    fund_dca_method_meta.computed_at（二十轮戳）；②单策略按钮成功运行
+    （crawl_run source='backtest_method' mode=策略、已收尾、未中断、非
+    skipped）。仅 DCA_METHODS 白名单内的 mode 计入；从未成功 → null。"""
+
+    def _client(self, routes):
+        from app import settings_api
+
+        conn = _RoutedConn(routes)
+
+        def fake_connect(*a, **k):
+            return conn
+
+        app = FastAPI()
+        settings_api.register_settings_routes(app, connect=fake_connect)
+        return TestClient(app), conn
+
+    def test_union_takes_latest_and_filters_whitelist(self):
+        from datetime import timezone as _tz
+        U = _tz.utc
+        meta_rows = [("amount", datetime(2026, 11, 26, 3, 55, tzinfo=U)),
+                     ("share", datetime(2026, 11, 25, 20, 0, tzinfo=U))]
+        # mode=bogus 不在白名单、mode=pl_ladder 成功运行比 meta 新
+        run_rows = [("pl_ladder", datetime(2026, 11, 26, 4, 30, tzinfo=U)),
+                    ("bogus", datetime(2026, 11, 26, 9, 0, tzinfo=U)),
+                    ("pl_ladder_deep", datetime(2026, 11, 26, 3, 40,
+                                                tzinfo=U))]
+        client, conn = self._client([
+            ("FROM fund_dca_method_meta", meta_rows),
+            ("WHERE source = 'backtest_method'", run_rows)])
+        body = client.get("/api/settings/backtest-method-full-dates").json()
+        assert body["status"] == "up"
+        m = body["methods"]
+        from app.dca_backtest import DCA_METHODS
+        assert set(m) == set(DCA_METHODS)
+        assert m["amount"] == "2026-11-26T03:55:00+00:00"      # 仅 meta
+        assert m["share"] == "2026-11-25T20:00:00+00:00"
+        assert m["pl_ladder"] == "2026-11-26T04:30:00+00:00"   # 两路取最新
+        assert m["pl_ladder_deep"] == "2026-11-26T03:40:00+00:00"
+        assert m["dd_ladder"] is None                          # 从未成功
+        assert "bogus" not in m                                # 白名单过滤
+        assert any("FROM fund_dca_method_meta" in q for q in conn.executed)
+
+    def test_meta_table_absent_yields_nulls(self):
+        """夜更分阶段尚未跑过（fund_dca_method_meta 无行）→ 只看单策略
+        成功运行；都没有 → 全 null。**先幂等 ensure 建表再 SELECT**——
+        生产首跑前表不存在，直接查会 UndefinedTable 误入 down 降级
+        （真实冒烟抓过：显示全「—」而非实际有值的策略）。"""
+        client, conn = self._client([
+            ("FROM fund_dca_method_meta", []),
+            ("WHERE source = 'backtest_method'", [])])
+        body = client.get("/api/settings/backtest-method-full-dates").json()
+        assert body["status"] == "up"
+        assert all(v is None for v in body["methods"].values())
+        assert "server_now" in body
+        seq = [q for q in conn.executed
+               if "fund_dca_method_meta" in q]
+        assert seq and "CREATE TABLE IF NOT EXISTS" in seq[0]
+        assert any("SELECT method, computed_at" in q for q in seq[1:])
+
+    def test_down_degrades_200(self):
+        client, _ = self._client([
+            ("FROM fund_dca_method_meta", RuntimeError("db down"))])
+        resp = client.get("/api/settings/backtest-method-full-dates")
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "down", "methods": {}}

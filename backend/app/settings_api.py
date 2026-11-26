@@ -6,7 +6,7 @@ import datetime as dt
 
 from fastapi import HTTPException
 
-from . import dca_backtest, settings_store
+from . import dca_backtest, dca_store, settings_store
 
 
 def register_settings_routes(app, connect) -> None:
@@ -143,6 +143,45 @@ def register_settings_routes(app, connect) -> None:
                  "runs": runs_by_day.get(str(day), [])}
                 for (day, _n, ok, fail, skip) in day_rows]
         return {"status": "up", "days": days,
+                "server_now": _iso(dt.datetime.now(dt.timezone.utc))}
+
+    @app.get("/api/settings/backtest-method-full-dates")
+    def backtest_method_full_dates():
+        """每策略最近「全量回测成功」时间（2026-11-26 二十一轮，用户需求
+        ——哪个策略数据还停在旧宇宙一眼可见）：两路并集取最新——①夜更
+        分阶段合并的新鲜度戳 fund_dca_method_meta.computed_at（二十轮）；
+        ②单策略按钮成功运行（crawl_run source='backtest_method' mode=
+        策略、已收尾、未中断、非 skipped）。仅 DCA_METHODS 白名单内计入；
+        从未成功 → null；DB down 降级 200 空形状（设置端点惯例）。"""
+        try:
+            with connect(_dsn()) as conn, conn.cursor() as cur:
+                # 夜更分阶段今晚才首跑——生产库可能尚无该表，先幂等 ensure
+                # （ UndefinedTable 会让端点误入 down 降级，显示全「—」）
+                dca_store.ensure_method_meta_schema(conn)
+                cur.execute("SELECT method, computed_at "
+                            "FROM fund_dca_method_meta")
+                meta_rows = cur.fetchall()
+                cur.execute(
+                    "SELECT mode, max(finished_at) FROM crawl_run "
+                    "WHERE source = 'backtest_method' "
+                    "AND finished_at IS NOT NULL AND NOT aborted "
+                    "AND COALESCE(detail->>'skipped','') = '' "
+                    "GROUP BY mode")
+                run_rows = cur.fetchall()
+        except Exception:
+            return {"status": "down", "methods": {}}
+        latest: dict = {}
+        for method, computed_at in meta_rows:
+            if computed_at is not None:
+                latest[str(method)] = computed_at
+        for mode, finished_at in run_rows:
+            if finished_at is not None and \
+                    (latest.get(str(mode)) is None
+                     or finished_at > latest[str(mode)]):
+                latest[str(mode)] = finished_at
+        methods = {m: (_iso(latest[m]) if m in latest else None)
+                   for m in dca_backtest.DCA_METHODS}
+        return {"status": "up", "methods": methods,
                 "server_now": _iso(dt.datetime.now(dt.timezone.utc))}
 
     @app.put("/api/settings/backtest-min-span")

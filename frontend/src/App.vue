@@ -1698,6 +1698,16 @@ async function loadCalendar() {
     }
   } catch (e) { /* 日历缺失不拖垮设置页 */ }
 }
+// 各策略最近全量成功（2026-11-26 二十一轮）：夜更分阶段盖戳 ∪ 单策略按钮
+// 成功运行取最新；缺失不拖垮设置页
+const methodDates = ref({})
+async function loadMethodDates() {
+  try {
+    const resp = await fetch('/api/settings/backtest-method-full-dates')
+    const body = await resp.json()
+    if (body.status === 'up') methodDates.value = body.methods || {}
+  } catch (e) { /* 缺失显示全 — */ }
+}
 // 进度推算（2026-11-24）：引擎在 spawn 子进程内计算、期间无库上进度信号，
 // 进度条按「已运行时长 / 预估耗时」推算渲染（时间基准用服务端 server_now
 // 校正客户端时钟偏差；full 按 8 小时、dirty 按 10 分钟），每秒走表、
@@ -1977,7 +1987,7 @@ async function loadBacktestMinSpan() {
 watch(activeNav, (nav, prev) => {
   if (nav === 'funds') loadFunds()
   if (nav === 'fundDca') { loadDca(); loadDcaScatter(); loadDcaTpCompare(); loadDcaDipReport(); loadDcaPauseExperiment(); loadBacktestMinSpan() }
-  if (nav === 'settings') { loadSettings(); loadCalendar() }
+  if (nav === 'settings') { loadSettings(); loadCalendar(); loadMethodDates() }
   if (nav === 'market') loadMarketCompare()
   if (nav === 'crises') loadMarketCrises()
   if (nav === 'fund' && fund.value) {
@@ -4568,6 +4578,18 @@ watch(
                     @click="methodConfirmShow = true">运行该策略…</button>
                 </div>
               </div>
+              <!-- 各策略最近全量成功（2026-11-26 二十一轮）：夜更分阶段盖戳
+                   ∪ 单策略按钮成功运行取最新——哪个策略数据还停在旧宇宙一眼可见 -->
+              <div data-method-full-dates style="margin: 10px 0 0">
+                <span class="settings-hint">各策略最近全量成功：</span>
+                <span v-for="o in DCA_MODE_OPTIONS" :key="o.key"
+                  class="mfd-item" :data-mfd="o.key"
+                  :title="methodDates[o.key] ? fmtDateTime(methodDates[o.key]) : '从未完成全量回测'">
+                  <b>{{ o.label }}</b>
+                  <span :style="{ color: methodDates[o.key] ? '#1a7f37' : '#999' }">{{
+                    methodDates[o.key] ? methodDates[o.key].slice(0, 10) : '—' }}</span>
+                </span>
+              </div>
               <p v-if="methodBusy" class="note" data-run-method-running
                 style="margin: 8px 0 0; color: #0f62fe">单策略回测{{ methodTask.phase === 'queued' ? '排队中' : '运行中' }}<span v-if="methodTask.phase === 'queued' && methodTask.blocking">（等待「{{ methodTask.blocking }}」完成，完成后自动开始）</span><span v-if="methodTask.last_started_at && methodTask.phase !== 'queued'">（{{ fmtDateTime(methodTask.last_started_at) }} 起）</span>——完成后定投回测页该策略数据自动更新</p>
               <div v-if="methodBusy && methodProgressPercent !== null"
@@ -6040,6 +6062,10 @@ body {
 .cal-cell { width: 30px; height: 26px; display: inline-flex; align-items: center;
   justify-content: center; font-size: 12px; border-radius: 4px;
   border: 1px solid #e0e0e0; color: #333; cursor: default; }
+/* 各策略最近全量成功（2026-11-26 二十一轮） */
+.mfd-item { display: inline-flex; align-items: center; gap: 5px;
+  margin: 4px 14px 4px 0; font-size: 12px; }
+.mfd-item b { font-weight: 600; color: #333; }
 .cal-cell[data-status="ok"], .cal-cell[data-status="fail"],
 .cal-cell[data-status="skip"] { color: #fff; border-color: transparent;
   font-weight: 600; }

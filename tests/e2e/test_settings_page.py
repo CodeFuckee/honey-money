@@ -1,6 +1,8 @@
 """设置页 E2E（2026-11-24）：回测年化运作期限下限（app_settings 表）。
 
 用例表（确认门 1）：
+- E2E-492 各策略最近全量成功（二十一轮）：夜更盖戳 ∪ 单策略成功运行取
+  最新，有日期绿显、从未回测显「—」，悬停看完整时间；
 - E2E-490 日更日历（二十轮）：设置页当月网格渲染，成功/中断/跳过三态
   着色，悬停 title 携带当天运行明细；
 - E2E-491 月份导航 ‹ ›：切上月无数据（全 none 格），切回当月三态恢复；
@@ -545,3 +547,41 @@ class TestBacktestCalendar:
         expect(page.locator('[data-cal-cell][data-status="ok"]')
               ).to_have_count(1)
         assert len(calls) == 1, calls      # 导航纯本地重排，不回源
+
+
+class TestMethodFullDates:
+    """各策略最近全量成功显示（2026-11-26 二十一轮）。"""
+
+    def test_method_full_dates_render(self, servers, page):
+        """E2E-492：设置页「各策略最近全量成功」——7 策略各占一项，有
+        日期的绿显日期、null 显「—」，悬停 title 携带完整时间。"""
+        _install_mock(page)
+
+        methods = {"amount": "2026-11-26T03:55:00+00:00",
+                   "share": "2026-11-25T20:00:00+00:00",
+                   "dd_ladder": "2026-11-26T04:30:00+00:00",
+                   "dd_ladder_deep": "2026-11-26T04:35:00+00:00",
+                   "profit_dd_ladder": None,
+                   "pl_ladder": "2026-11-25T12:25:00+00:00",
+                   "pl_ladder_deep": "2026-11-26T03:40:00+00:00"}
+
+        def _route(route):
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"status": "up", "methods": methods,
+                                           "server_now":
+                                           "2026-11-26T12:00:00+00:00"}))
+
+        page.route("**/api/settings/backtest-method-full-dates**", _route)
+        _, frontend_port = servers
+        page.goto(f"http://127.0.0.1:{frontend_port}/settings")
+        block = page.locator("[data-method-full-dates]")
+        expect(block).to_be_visible()
+        expect(block.locator("[data-mfd]")).to_have_count(7)
+        expect(block.locator('[data-mfd="amount"]')).to_contain_text("2026-11-26")
+        expect(block.locator('[data-mfd="pl_ladder"]')).to_contain_text("2026-11-25")
+        expect(block.locator('[data-mfd="profit_dd_ladder"]')
+              ).to_contain_text("—")            # 从未成功 → —
+        expect(block.locator('[data-mfd="amount"]')
+              ).to_have_attribute("title", re.compile("2026-11-26 \d{2}:\d{2}"))
+        expect(block.locator('[data-mfd="profit_dd_ladder"]')
+              ).to_have_attribute("title", re.compile("从未完成全量回测"))
