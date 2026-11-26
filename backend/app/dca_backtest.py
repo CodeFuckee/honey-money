@@ -58,7 +58,7 @@ TP_THRESHOLDS = (0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40)
 # 跌时花得少，成本摊平效果最差的反面基准；含费为外扣法对偶：现金 =
 # 份额×净值×(1+申购费率)）。API method 白名单与前端 tab 共用此事实源。
 DCA_METHODS = ("amount", "share", "dd_ladder", "dd_ladder_deep",
-               "profit_dd_ladder", "pl_ladder")
+               "profit_dd_ladder", "pl_ladder", "pl_ladder_deep")
 # 回撤梯度加码（dd_ladder，2026-11-23 四轮）：月度买入日按当日回撤分档加倍
 # ——回撤 = adj/历史最高（含当日）- 1，因果无前视；取满足 回撤 ≤ 阈值 的
 # 最深一档的倍数（reversed 依序匹配，都不中为 1×——浅档在前直接 next 会
@@ -94,6 +94,15 @@ PROFIT_LADDERS = {"profit_dd_ladder": PROFIT_LADDER,
 PL_LOSS_LADDER = ((-0.10, 1.5), (-0.20, 2.0))
 PL_PROFIT_LADDER = ((0.10, 0.5), (0.20, 0.0))
 PL_LOSS_LADDERS = {"pl_ladder": PL_LOSS_LADDER}
+# 盈亏阶梯深档（pl_ladder_deep，2026-11-26 十九轮用户定案）：pl_ladder 的
+# 加码半边阈值加深变体——浮亏（持仓口径）≥20% 投 1.5×、≥30% 投 2×，
+# 减码半边与 pl_ladder 完全同表（浮盈 ≥10% → 0.5×、≥20% → 0× 停投）。
+# 比 pl_ladder 只在「账户真的亏了 20% 以上」才出手：加码次数更少、回撤期
+# 现金压力更小（阈值与 dd_ladder_deep 的价格回撤档数值相同，但口径不同
+# ——持仓浮亏按均价摊薄恒不深于价格回撤，触发更晚更温和）。
+PL_LOSS_LADDER_DEEP = ((-0.20, 1.5), (-0.30, 2.0))
+PL_LOSS_LADDERS["pl_ladder_deep"] = PL_LOSS_LADDER_DEEP
+PROFIT_LADDERS["pl_ladder_deep"] = PL_PROFIT_LADDER
 # 回测宇宙白名单（2026-11-25 十四轮用户定案）：仅权益类 8 类产生回测结果
 # 行——与排行默认筛选同口径（dca_api.EQUITY_TYPES 别名引用本常量，事实源
 # 单一）；债券/FOF/货币/商品/Reits/偏债/未知类型与年轻基金（全史窗口 <
@@ -330,7 +339,10 @@ def simulate_multi(dates: pd.DatetimeIndex, adj: np.ndarray,
       均为持仓口径 pr = 市值/已投入 - 1，无回撤分量）——浮亏 ≥10% 投
       1.5×、≥20% 投 2×（≤ 阈值取最深档）；浮盈 ≥10% 投 0.5×、≥20% 投
       0×（当期完全停投：无份额无现金流，止盈检查照常运行）；余者与
-      浮盈无定义（invested=0）投 1×，invested 每期可变。
+      浮盈无定义（invested=0）投 1×，invested 每期可变；
+    - pl_ladder_deep（盈亏阶梯深档，2026-11-26 十九轮）：同 pl_ladder 换深
+      浮亏档位表（PL_LOSS_LADDER_DEEP，≥20% → 1.5×、≥30% → 2×），减码
+      半边与 pl_ladder 同表，invested 每期可变。
 
     min_span_days：年化运作期限下限（天），None=读模块常量 MIN_SPAN_DAYS
     （设置页 backtest_min_span_days 经调用方下传；全窗口年化与止盈后当前
@@ -342,8 +354,8 @@ def simulate_multi(dates: pd.DatetimeIndex, adj: np.ndarray,
     # 无前视——adj[0] 即首个月度买入价）
     unit_shares = AMOUNT / adj[0]
     ladder = DD_LADDERS.get(method)   # 梯度加码方式的档位表（amount/share 为 None）
-    pr_ladder = PROFIT_LADDERS.get(method)   # 浮盈档位表（profit_dd_ladder/pl_ladder）
-    pl_loss = PL_LOSS_LADDERS.get(method)   # 盈亏阶梯的浮亏半边（仅 pl_ladder）
+    pr_ladder = PROFIT_LADDERS.get(method)   # 浮盈档位表（profit_dd_ladder/pl_ladder 系）
+    pl_loss = PL_LOSS_LADDERS.get(method)   # 盈亏阶梯的浮亏半边（pl_ladder 系）
     states = [_new_tp_state(tp) for tp in take_profits]
     months = dates.to_numpy().astype("datetime64[M]")
     peak = -np.inf          # dd_ladder 用：历史最高（含当日）的运行峰值
@@ -1049,6 +1061,7 @@ def engine_version(*extra) -> str:
                      DCA_METHODS, DD_LADDER, DD_LADDER_DEEP, DD_LADDERS,
                      PROFIT_LADDER, PROFIT_LADDERS, PL_LOSS_LADDER,
                      PL_PROFIT_LADDER, PL_LOSS_LADDERS,
+                     PL_LOSS_LADDER_DEEP,
                      BACKTEST_UNIVERSE_TYPES, SUB_DISCOUNT,
                      SUB_RATE_A, _SUB_RATE_DEFAULT, REDEEM_EQUITY,
                      REDEEM_BOND_C)

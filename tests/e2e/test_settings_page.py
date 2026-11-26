@@ -150,7 +150,7 @@ class TestRunBacktestButton:
         btn.click()
         expect(page.locator("[data-run-confirm]")).to_be_visible()
         expect(page.locator("[data-run-confirm-time]")
-              ).to_contain_text("约 6~10 小时")
+              ).to_contain_text("约 7~12 小时")
         page.locator("[data-run-confirm-ok]").click()
         expect(page.locator("[data-run-backtest-triggered]")
               ).to_contain_text("已触发", timeout=10_000)
@@ -256,15 +256,15 @@ class TestRunMethodButton:
     任务系统触发。"""
 
     def test_run_method_main_flow(self, servers, page):
-        """E2E-481：选择器默认「盈亏阶梯」→ 切「深回撤加码」→ 确认框
+        """E2E-481：选择器默认「盈亏阶梯深档」→ 切「深回撤加码」→ 确认框
         （耗时文案 + 策略名）→ 确认 → 前置 POST 载荷 {"method":…} +
         POST /api/tasks/9/run + 已触发提示 + 按钮转禁用。"""
         calls = _install_mock(page)
         _, frontend_port = servers
         page.goto(f"http://127.0.0.1:{frontend_port}/settings")
         seg = page.locator("[data-method-target-seg]")
-        expect(seg.locator("button")).to_have_count(6)   # 六种全可选
-        expect(page.locator('[data-method-target="pl_ladder"]')
+        expect(seg.locator("button")).to_have_count(7)   # 七种全可选
+        expect(page.locator('[data-method-target="pl_ladder_deep"]')
               ).to_have_class(re.compile("active"))      # 缺省最新策略
         page.locator('[data-method-target="dd_ladder_deep"]').click()
         expect(page.locator('[data-method-target="dd_ladder_deep"]')

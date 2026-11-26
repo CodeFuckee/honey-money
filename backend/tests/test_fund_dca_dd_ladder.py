@@ -89,13 +89,13 @@ def _round_restart_nav():
 
 class TestSimulateDdLadder:
     def test_methods_pin_values(self):
-        """定投方式口径锚：六档（四轮 dd_ladder、六轮 dd_ladder_deep、
-        七轮 profit_dd_ladder 浮盈阶梯、八轮 pl_ladder 盈亏阶梯，见
-        test_fund_dca_pl_ladder.py）。"""
+        """定投方式口径锚：七档（四轮 dd_ladder、六轮 dd_ladder_deep、
+        七轮 profit_dd_ladder 浮盈阶梯、八轮 pl_ladder 盈亏阶梯、十九轮
+        pl_ladder_deep 盈亏阶梯深档，见 test_fund_dca_pl_ladder_deep.py）。"""
         from app.dca_backtest import DCA_METHODS
         assert DCA_METHODS == ("amount", "share", "dd_ladder",
                                "dd_ladder_deep", "profit_dd_ladder",
-                               "pl_ladder")
+                               "pl_ladder", "pl_ladder_deep")
 
     def test_ladder_constant_pinned(self):
         """档位契约：-10% → 1.5×、-20% → 2×（防悄悄改坏）。"""

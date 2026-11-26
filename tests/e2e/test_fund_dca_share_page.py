@@ -312,8 +312,9 @@ class TestDcaShareMode:
         assert tab_y < metrics.bounding_box()["y"], \
             "定投方式 tab 应在统计卡之前"
         # 唯一性：筛选面板里没有第二组 data-mode（已从面板移除）；
-        # 八轮起六枚：等额/等份额/回撤加码/深回撤加码/浮盈阶梯/盈亏阶梯
-        assert page.locator("button[data-mode]").count() == 6
+        # 十九轮起七枚：等额/等份额/回撤加码/深回撤加码/浮盈阶梯/盈亏阶梯/
+        # 盈亏阶梯深档
+        assert page.locator("button[data-mode]").count() == 7
         # 深链接形态同样置顶
         page.goto(f"http://127.0.0.1:{frontend_port}/data/fund-dca?mode=share")
         expect(page.locator('button[data-mode="share"]')
@@ -531,9 +532,47 @@ class TestDcaShareMode:
                       and "/summary" not in u]
         assert list_calls and "method=pl_ladder" in list_calls[0], mock_share
 
+    def test_pl_ladder_deep_switch_and_request(self, servers, page, mock_dca,
+                                               mock_share, mock_navs,
+                                               mock_share_scatter):
+        """E2E-488：切「盈亏阶梯深档」→ 列表/散点请求带
+        method=pl_ladder_deep，悬停 title 携带深档口径（≥30% 投 2 倍），
+        表格行渲染。"""
+        _, frontend_port = servers
+        open_dca(page, frontend_port)
+        page.locator('button[data-mode="pl_ladder_deep"]').click()
+        expect(page.locator('button[data-mode="pl_ladder_deep"]')
+              ).to_have_class(re.compile("active"), timeout=10_000)
+        list_calls = [u for u in mock_share
+                      if "/rounds" not in u and "/compare" not in u
+                      and "/summary" not in u]
+        assert list_calls and "method=pl_ladder_deep" in list_calls[-1], \
+            mock_share
+        expect(page.locator('button[data-mode="pl_ladder_deep"]')
+              ).to_have_attribute("title", re.compile("≥30% 投 2 倍"))
+        expect(page.locator(".browse-pv tbody tr", has_text="019387")
+              ).to_contain_text("+74.0%")     # mock 回显行
+        assert any("method=pl_ladder_deep" in u
+                   for u in mock_share_scatter), mock_share_scatter
+
+    def test_pl_ladder_deep_deeplink(self, servers, page, mock_dca,
+                                     mock_share, mock_navs):
+        """E2E-489：?mode=pl_ladder_deep 深链接 → tab 激活且首请求即带参。"""
+        _, frontend_port = servers
+        page.goto(f"http://127.0.0.1:{frontend_port}/data/fund-dca"
+                  f"?mode=pl_ladder_deep")
+        expect(page.get_by_role("heading", name="定投止盈回测")).to_be_visible()
+        expect(page.locator('button[data-mode="pl_ladder_deep"]')
+              ).to_have_class(re.compile("active"), timeout=10_000)
+        list_calls = [u for u in mock_share
+                      if "/rounds" not in u and "/compare" not in u
+                      and "/summary" not in u]
+        assert list_calls and "method=pl_ladder_deep" in list_calls[0], \
+            mock_share
+
     def test_mode_help_popover_and_titles(self, servers, page, mock_dca,
                                           mock_share, mock_navs):
-        """E2E-459：点「?」→ 弹出五种方式完整说明（含各自 detail 关键词），
+        """E2E-459：点「?」→ 弹出七种方式完整说明（含各自 detail 关键词），
         再点收起；悬停各按钮 title 携带对应方式详情；口径副标题已删。"""
         _, frontend_port = servers
         open_dca(page, frontend_port)
@@ -546,7 +585,9 @@ class TestDcaShareMode:
               ).to_have_attribute("title", re.compile("外扣法"))
         expect(page.locator('button[data-mode="profit_dd_ladder"]')
               ).to_have_attribute("title", re.compile("0\\.5 倍"))
-        # 点 ? 开：面板含六种方式与关键口径词
+        expect(page.locator('button[data-mode="pl_ladder_deep"]')
+              ).to_have_attribute("title", re.compile("更深的亏损才出手"))
+        # 点 ? 开：面板含七种方式与关键口径词
         page.locator('[data-mode-help]').click()
         pop = page.locator('[data-mode-help-pop]')
         expect(pop).to_be_visible()
@@ -560,6 +601,8 @@ class TestDcaShareMode:
         expect(pop).to_contain_text("≥20% 投 0.25 倍")
         expect(pop).to_contain_text("盈亏阶梯")
         expect(pop).to_contain_text("浮盈≥20% 停投")
+        expect(pop).to_contain_text("盈亏阶梯深档")
+        expect(pop).to_contain_text("更深的亏损才出手")
         # 再点 ? 关
         page.locator('[data-mode-help]').click()
         expect(pop).to_have_count(0, timeout=10_000)

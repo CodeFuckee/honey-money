@@ -458,6 +458,7 @@ const DCA_MODE_OPTIONS = [
   { key: 'dd_ladder_deep', label: '深回撤加码' },
   { key: 'profit_dd_ladder', label: '浮盈阶梯' },
   { key: 'pl_ladder', label: '盈亏阶梯' },
+  { key: 'pl_ladder_deep', label: '盈亏阶梯深档' },
 ]
 // 定投方式说明（2026-11-23 五轮：? 图标点击弹出全部说明；悬停按钮 title
 // 显示对应方式详情）——brief 是面板里的一句话定位，detail 是完整口径
@@ -491,6 +492,11 @@ const DCA_MODE_HELP = {
     title: '盈亏阶梯',
     brief: '浮亏加倍、浮盈减码，浮盈≥20% 停投',
     detail: '每月基础 1000 元，按当轮持仓浮盈亏双向调节（浮盈亏 = 市值/已投入 - 1，与止盈触发线同口径）：浮亏 ≥10% 投 1.5 倍、≥20% 投 2 倍——越亏越买摊低成本；浮盈 ≥10% 投 0.5 倍、≥20% 停投——接近止盈线不再追高。与「浮盈阶梯」的区别：亏损半边也看持仓浮亏（而非价格回撤）——低位摊薄过的持仓跌得浅、加码更温和；且浮盈 ≥20% 彻底停投（浮盈阶梯是 0.25 倍）。止盈清算后新一轮首期浮盈无定义，按 1 倍正常起步。',
+  },
+  pl_ladder_deep: {
+    title: '盈亏阶梯深档',
+    brief: '深亏才加倍、浮盈减码，浮盈≥20% 停投',
+    detail: '每月基础 1000 元，按当轮持仓浮盈亏双向调节（浮盈亏 = 市值/已投入 - 1，与止盈触发线同口径）：浮亏 ≥20% 投 1.5 倍、≥30% 投 2 倍——比「盈亏阶梯」更深的亏损才出手（只在账户真的亏了 20% 以上才加码），加码次数更少、回撤期现金压力更小；浮盈 ≥10% 投 0.5 倍、≥20% 停投——减码半边与「盈亏阶梯」完全相同，接近止盈线不再追高。止盈清算后新一轮首期浮盈无定义，按 1 倍正常起步。',
   },
 }
 const dcaModeHelpShow = ref(false)
@@ -1774,7 +1780,7 @@ async function confirmRunBacktest() {
   }
 }
 
-// 单策略全量运行（2026-11-25 九轮定案：六策略全可选/进任务系统/日更
+// 单策略全量运行（2026-11-25 九轮定案：七策略全可选/进任务系统/日更
 // 运行中直接拒绝）：预置任务「单策略全量回测」（source='backtest_method'，
 // mode 列=目标策略）——先 POST /api/settings/backtest-method-run 校验并
 // 改目标策略（日更运行中 / 本任务排队运行中 409 前置拒绝），再复用任务
@@ -1784,7 +1790,7 @@ const methodTask = ref({ task_id: null, method: null, phase: 'idle',
   running: false, last_started_at: null, last_finished_at: null,
   last_aborted: null, progress_done: null, progress_total: null,
   blocking: null, last_error: null })
-const methodTarget = ref('pl_ladder')      // 待运行策略（缺省最新加的盈亏阶梯）
+const methodTarget = ref('pl_ladder_deep') // 待运行策略（缺省最新加的盈亏阶梯深档）
 const methodConfirmShow = ref(false)
 const methodStarting = ref(false)
 const methodMsg = ref('')
@@ -1797,7 +1803,7 @@ const methodBusy = computed(() =>
   methodTask.value.phase === 'queued' || methodTask.value.phase === 'running'
   || !!methodTask.value.running)
 // 单策略进度条（2026-11-25 十三轮）：真实分母优先（已完成/需回测基金数），
-// 指纹比对阶段尚无基金级信号时回落已运行时长/预估耗时（单策略 ≈ 全量 1/6
+// 指纹比对阶段尚无基金级信号时回落已运行时长/预估耗时（单策略 ≈ 全量 1/7
 // ≈ 80 分钟），与全市场回测进度条同款 UX
 const _METHOD_EXPECTED_MS = 80 * 60e3
 // 已运行时长仅在 phase==='running' 时计——排队中沿用上轮 last_started_at
@@ -1855,7 +1861,7 @@ async function confirmRunMethod() {
     // 触发成功即启动轮询（2026-11-25 十二轮，同日更按钮缺口）：停留页面
     // 点按钮后 30 秒 loadSettings 拉新快照，基金级进度才会出现
     startProgressTimer()
-    methodMsg.value = `已触发：「${methodTargetLabel.value}」单策略全量运行中（约为全市场全量耗时的 1/6），仅替换该策略结果，其余策略不受影响`
+    methodMsg.value = `已触发：「${methodTargetLabel.value}」单策略全量运行中（约为全市场全量耗时的 1/7），仅替换该策略结果，其余策略不受影响`
   } catch (e) {
     methodError.value = String(e)
   } finally {
@@ -3556,7 +3562,7 @@ watch(
                 <button class="mode-help-btn" @click="dcaModeHelpShow = !dcaModeHelpShow"
                         :class="{ active: dcaModeHelpShow }"
                         data-mode-help aria-label="定投方式说明"
-                        title="查看六种定投方式的完整说明">?</button>
+                        title="查看七种定投方式的完整说明">?</button>
                 <div v-if="dcaModeHelpShow" class="mode-help-pop" data-mode-help-pop>
                   <div v-for="o in DCA_MODE_OPTIONS" :key="o.key" class="mode-help-item">
                     <b>{{ DCA_MODE_HELP[o.key].title }}</b>
@@ -4428,7 +4434,7 @@ watch(
               <div class="settings-row" data-run-backtest-row
                 style="margin-top: 14px; padding-top: 14px; border-top: 1px solid #e0e0e0">
                 <label class="settings-label"><b>立即运行全市场定投回测</b>
-                  <span class="settings-hint">对全市场基金按当前设置重跑六种定投方式 × 8 档止盈回测并入库（等价于手动触发夜窗「定投回测日更」任务；后台运行，期间可关闭页面）</span>
+                  <span class="settings-hint">对全市场基金按当前设置重跑七种定投方式 × 8 档止盈回测并入库（等价于手动触发夜窗「定投回测日更」任务；后台运行，期间可关闭页面）</span>
                 </label>
                 <div class="settings-input">
                   <button class="btn" data-run-backtest
@@ -4460,7 +4466,7 @@ watch(
               <div class="settings-row" data-run-method-row
                 style="margin-top: 14px; padding-top: 14px; border-top: 1px solid #e0e0e0">
                 <label class="settings-label"><b>运行单个策略全量回测</b>
-                  <span class="settings-hint">只重算选定定投方式的权益类全市场 8 档止盈 × 3 费率并替换该策略结果（约为全市场全量耗时的 1/6，其余策略不受影响；不写指纹表——当晚日更仍会按引擎版本全量兜底）。新策略上线后可不等日更立即出数。</span>
+                  <span class="settings-hint">只重算选定定投方式的权益类全市场 8 档止盈 × 3 费率并替换该策略结果（约为全市场全量耗时的 1/7，其余策略不受影响；不写指纹表——当晚日更仍会按引擎版本全量兜底）。新策略上线后可不等日更立即出数。</span>
                 </label>
                 <div class="settings-input"
                   style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap">
@@ -4509,7 +4515,7 @@ watch(
                 <b>确认立即运行全市场定投回测？</b>
                 <p class="note" data-run-confirm-time style="margin: 8px 0 0">
                   <template v-if="backtestTask.estimate === 'dirty'">脏检测增量回测：仅重算有变化的基金，通常约 10 分钟；若刚修改过运作期限设置或引擎有升级，将自动转为全量（约 6~10 小时）。</template>
-                  <template v-else>本次为<b>全量回测</b>：全市场基金 × 六种定投方式 × 8 档止盈，预计约 <b>6~10 小时</b>。</template>
+                  <template v-else>本次为<b>全量回测</b>：全市场基金 × 七种定投方式 × 8 档止盈，预计约 <b>7~12 小时</b>。</template>
                   后台运行，期间可关闭页面；已有回测在排队/运行时会拒绝重复触发。
                 </p>
                 <div class="confirm-actions">
