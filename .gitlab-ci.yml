@@ -165,9 +165,11 @@ deploy-nas:
     name: nas
 
 # 空闲补部署（每小时定时流水线，需在 GitLab CI/CD → Schedules 建 main
-# 分支每小时计划）：deploy-nas 守门场景下被延后的 backend/worker 在任务
+# 分支每小时计划）：deploy-nas 守门场景下被延后/超时失败的服务在任务
 # 跑完后由本作业补上新镜像——镜像没变化时 compose 判定容器无需重建 =
 # 秒级空操作，忙时跳过等下一轮（新代码生效最多延迟 1 小时）。
+# 覆盖面含 frontend+mcp（2026-11-27 二十五轮补：此前只补 backend+worker，
+# deploy-nas 失败时 frontend 停旧镜像直到下次 push——前后端键名错配被抓包）。
 deploy-catchup-nas:
   stage: deploy
   image: docker:27-cli
@@ -191,6 +193,11 @@ deploy-catchup-nas:
     - *nas-busy-query
     - |
       busy_query
+      # frontend/mcp 是无状态 web 层（nginx 静态 + 反代 / uvicorn 短连接），
+      # 重建不碰任务容器——deploy-nas 失败时若只靠本作业补 backend+worker，
+      # frontend 会停在旧镜像（2026-11-27 实证：deploy-nas 双超时后 catchup
+      # 补了 backend，frontend 停二十四轮 3 小时被用户抓包前后端键名错配全 —）
+      # 故空闲分支把 frontend+mcp 一并纳入；忙时分支维持保守跳过不动 web 层
       if [ "$CRAWL_BUSY" = "1" ]; then
         echo "爬虫/回测任务运行中：跳过本次补部署（worker/backend 均不动，等下一轮）"
         exit 0
@@ -199,8 +206,8 @@ deploy-catchup-nas:
         echo "教学页全量回测运行中：仅补 worker（backend 等下一轮）"
         $DC -p honey-money up -d --build --no-deps worker
       else
-        echo "空闲：补部署 backend+worker（镜像无变化=空操作）"
-        $DC -p honey-money up -d --build --no-deps backend worker
+        echo "空闲：补部署 backend+worker+frontend+mcp（镜像无变化=空操作）"
+        $DC -p honey-money up -d --build --no-deps backend worker frontend mcp
       fi
       $DC -p honey-money ps
   environment:

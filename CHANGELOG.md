@@ -6,6 +6,18 @@
 ## [Unreleased]
 
 ### Fixed
+- **deploy-catchup-nas 补部署覆盖面缺 frontend/mcp（2026-11-27 二十五轮
+  追修）**：二十三轮立起的每小时 catchup 兜底流水线此前只补
+  backend+worker——deploy-nas 构建超时失败时 frontend 停在旧镜像直到下次
+  push 触发成功（本轮实证：二十五轮 deploy-nas 被 NAS IO 高载拖到
+  DeadlineExceeded ×2，catchup 补了 backend 但 frontend 停二十四轮
+  3 小时，旧 JS 读 pr_* 键 × 新后端 amt_* 键 → 统计卡总收益组全 —
+  被用户抓包）。修复：空闲分支补部署扩为 backend+worker+frontend+mcp
+  （无状态 web 层重建不碰任务容器）；CRAWL_BUSY/FULL_BUSY 忙时分支维持
+  保守跳过不动 web 层。另核验链新指纹：frontend bundle 应含
+  「总收益额中位/amt_median/invested_median」（index-COX7BqgA.js）。
+
+### Changed
 - **单策略进度分母回落全市场 26832——直查 SQL 类型错误，三次反馈「假修」的真凶
   （2026-11-26 二十一轮）**：用户三次反馈「进度分母/在市数不是权益类+运作年限过滤
   后的宇宙」。根因终于实证：`fund_nav.nav_date` 是 **DATE 列**，PG 中
