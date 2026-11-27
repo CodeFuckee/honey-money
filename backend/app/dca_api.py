@@ -233,6 +233,15 @@ def register_fund_dca_routes(app):
                                     equity=_parse_equity(equity),
                                     method=_parse_method(method))
 
+    @app.get("/api/funds/dca/tp/matrix")
+    def funds_dca_tp_matrix(fee: str = "nom"):
+        """策略×止盈点 总收益额矩阵（8 方式 × 8 档，权益类+商品池，
+        2026-11-27 二十六轮）：每格样本数 / 中位与平均总收益率 / 中位与
+        平均总收益额；快照满 8×8 优先，缺失整体回落现算（循环每方式
+        compare 同款聚合）。fee 白名单同 compare。降级契约同族。"""
+        return fetch_dca_tp_matrix(config.DATABASE_URL,
+                                   fee=fee.strip().lower())
+
     @app.get("/api/funds/dca/tp/{code}/rounds")
     def funds_dca_tp_rounds(code: str, fee: str = "nom", tp: str = "0.2",
                             method: str = "amount"):
@@ -774,6 +783,121 @@ def fetch_dca_tp_compare(dsn: str, *, fee: str = "nom", equity: bool = True,
                        "method": method, "equity": bool(equity),
                        "thresholds": [], "rows": [],
                        "source": None, "computed_at": None})
+
+
+# 矩阵快照切片查询（二十六轮）：一次拉 equity=TRUE（权益+商品池，对比表同
+# 池口径）该费用的全部方式×八档，API 层组装 8×8；列序与 compare 快照查询
+# 同族，method 打头
+_TP_MATRIX_SNAP_SQL = """
+SELECT method, tp, sample_count, median, mean, positive_share, success_share,
+       avg_rounds, avg_gap_days,
+       median_profit_rate, mean_profit_rate,
+       median_profit_amt, mean_profit_amt, computed_at
+FROM fund_dca_tp_compare
+WHERE equity = %s AND fee = %s
+"""
+
+
+def fetch_dca_tp_matrix(dsn: str, *, fee: str = "nom") -> dict:
+    """策略×止盈点 总收益额矩阵（8 方式 × 8 档，权益类+商品池）。
+
+    每格：样本数 / 中位与平均总收益率 / 中位与平均总收益额（快照行直接
+    透传，已按现算精度圆整）。快照满 8×8 优先（毫秒级）；不满整表回落
+    现算——循环每方式执行 compare 同款聚合 SQL（一次一个 method，
+    GROUP BY tp）。行序=DCA_METHODS、格序=TP_THRESHOLDS。fee 白名单同
+    compare（乱值回落 nom）。降级契约同族：PG 不可达 → 200 status=down。
+    """
+    fee_val = fee if fee in _FEE_XIRR_COL else "nom"
+    suffix = _LIST_FEE_SUFFIX[fee_val]
+
+    def _cell_from_snapshot(r, tp):
+        return {"tp": tp, "count": r[2],
+                "median_profit_rate": r[9], "mean_profit_rate": r[10],
+                "median_profit_amt": r[11], "mean_profit_amt": r[12]}
+
+    def _cell_from_live(r, tp):
+        return {"tp": tp, "count": r[1],
+                "median_profit_rate":
+                    round(r[8], 4) if r[8] is not None else None,
+                "mean_profit_rate":
+                    round(r[9], 4) if r[9] is not None else None,
+                "median_profit_amt":
+                    round(r[10], 2) if r[10] is not None else None,
+                "mean_profit_amt":
+                    round(r[11], 2) if r[11] is not None else None}
+
+    def run():
+        with psycopg.connect(dsn, connect_timeout=3) as conn:
+            with conn.cursor() as cur:
+                # 快照优先：满 8×8（每方式×每档齐备）才整表采用
+                snap = None
+                try:
+                    cur.execute(_TP_MATRIX_SNAP_SQL, (True, fee_val))
+                    snap = cur.fetchall()
+                except psycopg.Error:
+                    snap = None
+                if snap is not None and \
+                        len(snap) == len(DCA_METHODS) * len(TP_THRESHOLDS):
+                    by = {(r[0], r[1]): r for r in snap}
+                    computed = max((r[13] for r in snap
+                                    if r[13] is not None), default=None)
+                    rows = []
+                    for m in DCA_METHODS:
+                        cells = []
+                        for tp in TP_THRESHOLDS:
+                            r = by.get((m, tp))
+                            cells.append(_cell_from_snapshot(r, tp)
+                                         if r is not None else
+                                         {"tp": tp, "count": None,
+                                          "median_profit_rate": None,
+                                          "mean_profit_rate": None,
+                                          "median_profit_amt": None,
+                                          "mean_profit_amt": None})
+                        rows.append({"method": m, "cells": cells})
+                    return {"status": "up", "fee": fee_val,
+                            "source": "snapshot",
+                            "computed_at":
+                                computed.isoformat() if computed else None,
+                            "thresholds":
+                                [float(t) for t in TP_THRESHOLDS],
+                            "methods": list(DCA_METHODS),
+                            "rows": rows}
+                # 回落现算：循环每方式执行 compare 同款聚合（单 method 单遍）
+                cols = {"fx": f"full_xirr{suffix}",
+                        "wr": f"w10_rounds{suffix}",
+                        "fr": f"full_rounds{suffix}",
+                        "gap": f"gap_avg_days{suffix}",
+                        "pr": f"full_profit_rate{suffix}",
+                        "inv": "full_invested"}
+                eq_params = [list(TP_COMPARE_EQUITY_TYPES)]
+                eq_clause = " AND fund_type = ANY(%s)"
+                sql = _TP_COMPARE_SQL.replace(
+                    "{fx}", cols["fx"]).replace("{wr}", cols["wr"]).replace(
+                    "{fr}", cols["fr"]).replace("{gap}", cols["gap"]).replace(
+                    "{pr}", cols["pr"]).replace("{inv}", cols["inv"]).replace(
+                    "{equity_clause}", eq_clause)
+                rows = []
+                for m in DCA_METHODS:
+                    cur.execute(sql, (m, *eq_params))
+                    by = {r[0]: r for r in cur.fetchall()}
+                    cells = []
+                    for tp in TP_THRESHOLDS:
+                        r = by.get(tp)
+                        cells.append(_cell_from_live(r, tp)
+                                     if r is not None else
+                                     {"tp": tp, "count": None,
+                                      "median_profit_rate": None,
+                                      "mean_profit_rate": None,
+                                      "median_profit_amt": None,
+                                      "mean_profit_amt": None})
+                    rows.append({"method": m, "cells": cells})
+        return {"status": "up", "fee": fee_val, "source": "live",
+                "computed_at": None,
+                "thresholds": [float(t) for t in TP_THRESHOLDS],
+                "methods": list(DCA_METHODS), "rows": rows}
+    return _safe(run, {"status": "down", "detail": "pg unreachable",
+                       "fee": fee, "thresholds": [], "methods": [],
+                       "rows": [], "source": None, "computed_at": None})
 
 
 _TP_ROUNDS_SQL = """

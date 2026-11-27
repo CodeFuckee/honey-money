@@ -691,6 +691,120 @@ class TestDcaTpRoutes:
         assert r["median_profit_amt"] == 12345.68
         assert r["mean_profit_amt"] == 23456.79
 
+
+# ===== 策略×止盈点 总收益额矩阵端点（2026-11-27 二十六轮） =====
+
+class TestTpMatrix:
+    def _snap_row(self, method="share", tp=0.20, amt_med=17000.0,
+                  amt_mean=16400.0):
+        """快照表一行（14 元组，列序同 _TP_MATRIX_SNAP_SQL：method 打头）。"""
+        import datetime as dtm
+        return (method, tp, 15029, 0.12, 0.10, 0.5, 0.7, 2.0, 700.0,
+                0.11, 0.09, amt_med, amt_mean,
+                dtm.datetime(2026, 11, 27, 12, 0, 0, tzinfo=dtm.timezone.utc))
+
+    def _snap_body(self, methods=None, tps=None):
+        from app.dca_backtest import DCA_METHODS, TP_THRESHOLDS
+        ms = methods or DCA_METHODS
+        ts = tps or TP_THRESHOLDS
+        rows = []
+        for m in ms:
+            for i, tp in enumerate(ts):
+                rows.append(self._snap_row(
+                    method=m, tp=tp,
+                    amt_med=9000 + i * 1000, amt_mean=8800 + i * 950))
+        return rows
+
+    def _live_row(self, tp=0.20, amt_med=12345.678, amt_mean=23456.789):
+        """现算聚合一行（12 元组，列序同 _TP_COMPARE_SQL）。"""
+        return (tp, 15029, 0.1235, 0.2346, 0.3457, 0.4568, 1.93, 703.1,
+                0.111123, 0.222234, amt_med, amt_mean)
+
+    def test_matrix_registered_and_degrades(self, client, monkeypatch):
+        """PG 不可达：仍 200，status=down 空形状（降级契约同 compare）。"""
+        monkeypatch.setattr("app.config.DATABASE_URL", DEAD_DSN)
+        resp = client.get("/api/funds/dca/tp/matrix", params={"fee": "nom"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "down" and body["rows"] == []
+
+    def test_matrix_fee_whitelist_fallback(self, client, monkeypatch):
+        """fee 乱值回落 nom 并回显实际使用值（白名单契约同 compare）。"""
+        import app.dca_api as dca_mod
+        conn = _ListDispatchConn((None,), rows=[])
+        _patch_connect(monkeypatch, dca_mod, conn)
+        resp = client.get("/api/funds/dca/tp/matrix", params={"fee": "abc"})
+        assert resp.status_code == 200
+        assert resp.json()["fee"] == "nom"
+
+    def test_matrix_snapshot_assembles_8x8(self, client, monkeypatch):
+        """快照满 8×8：单条 SQL 拉 equity=TRUE 切片组装矩阵——行序=引擎
+        方式顺序、格序=八档阈值、金额/率四键透传、source/computed_at 透传。"""
+        import app.dca_api as dca_mod
+        from app.dca_backtest import DCA_METHODS, TP_THRESHOLDS
+        conn = _ListDispatchConn((None,), rows=self._snap_body())
+        _patch_connect(monkeypatch, dca_mod, conn)
+        resp = client.get("/api/funds/dca/tp/matrix", params={"fee": "disc"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "up" and body["source"] == "snapshot"
+        assert body["fee"] == "disc"
+        assert body["computed_at"] == "2026-11-27T12:00:00+00:00"
+        assert body["methods"] == list(DCA_METHODS)
+        assert body["thresholds"] == [float(t) for t in TP_THRESHOLDS]
+        assert [r["method"] for r in body["rows"]] == list(DCA_METHODS)
+        # share × 20% 格：_snap_body 里 i=3（第 4 档）→ 9000+3000/8800+2850
+        cell = body["rows"][1]["cells"][3]
+        assert cell["tp"] == 0.20
+        assert cell["median_profit_amt"] == 12000.0
+        assert cell["mean_profit_amt"] == 11650.0
+        assert cell["median_profit_rate"] == 0.11
+        assert cell["mean_profit_rate"] == 0.09
+        assert cell["count"] == 15029
+        # 只发一条快照查询（不落百万行现算）
+        assert len(conn.executed) == 1
+        assert "fund_dca_tp_compare" in conn.executed[0][0]
+        assert "equity = %s" in conn.executed[0][0]
+
+    def test_matrix_snapshot_incomplete_falls_back_live(self,
+                                                        client, monkeypatch):
+        """快照不满 8×8（部署早期部分方式未跑完）：整体回落现算——
+        循环每个方式执行一次 GROUP BY tp 聚合（复用 compare 现算 SQL）。"""
+        import app.dca_api as dca_mod
+        from app.dca_backtest import DCA_METHODS
+        conn = _ListDispatchConn(
+            (None,), rows=[self._live_row(tp=t) for t in
+                           (0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40)])
+        _patch_connect(monkeypatch, dca_mod, conn)
+        resp = client.get("/api/funds/dca/tp/matrix", params={"fee": "nom"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "up" and body["source"] == "live"
+        assert body["computed_at"] is None
+        assert len(body["rows"]) == len(DCA_METHODS)
+        agg_sqls = [q for q, _ in conn.executed if "GROUP BY tp" in q]
+        assert len(agg_sqls) == len(DCA_METHODS)      # 每方式一遍聚合
+        assert all("fund_dca_tp_result" in q for q in agg_sqls)
+        assert "fund_dca_tp_compare" not in "".join(
+            q for q, _ in conn.executed if "GROUP BY tp" in q)
+
+    def test_matrix_live_row_values_rounded(self, client, monkeypatch):
+        """现算格值圆整与快照同精度（率 4 位 / 金额 2 位）。"""
+        import app.dca_api as dca_mod
+        conn = _ListDispatchConn(
+            (None,), rows=[self._live_row(tp=t) for t in
+                           (0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40)])
+        _patch_connect(monkeypatch, dca_mod, conn)
+        resp = client.get("/api/funds/dca/tp/matrix", params={"fee": "nom"})
+        assert resp.status_code == 200
+        cell = resp.json()["rows"][0]["cells"][3]
+        assert cell["median_profit_rate"] == 0.1111
+        assert cell["mean_profit_rate"] == 0.2222
+        assert cell["median_profit_amt"] == 12345.68
+        assert cell["mean_profit_amt"] == 23456.79
+        assert cell["count"] == 15029
+        assert cell["tp"] == 0.20
+
     def test_compare_equity_pool_includes_commodity(self):
         """对比池口径（2026-11-15 用户确认）：权益 8 类 + QDII-商品 + 商品。"""
         from app.dca_api import EQUITY_TYPES, TP_COMPARE_EQUITY_TYPES
@@ -787,10 +901,12 @@ class FakeConnOne:
 class _ListDispatchConn:
     """按查询内容分发的连接桩（tp 列表端点一次请求四次 fetchone：参考日 /
     count / 统计卡聚合 / meta，各回各的值——FakeConnOne 恒返同一元组会
-    让 meta 解析踩到统计行形状）。"""
+    让 meta 解析踩到统计行形状）。rows 可选：fetchall 返回值（matrix 等
+    fetchall 型端点复用）。"""
 
-    def __init__(self, stats_row):
+    def __init__(self, stats_row, rows=None):
         self.stats_row = stats_row
+        self.rows = rows or []
         self.executed: list = []
 
     def cursor(self):
@@ -816,4 +932,4 @@ class _ListDispatchConn:
         return (0,)                         # count(*)
 
     def fetchall(self):
-        return []
+        return self.rows

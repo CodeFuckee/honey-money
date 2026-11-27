@@ -652,6 +652,34 @@ async function loadDcaTpCompare() {
     dcaTpLoading.value = false
   }
 }
+// 策略×止盈点 总收益额矩阵（2026-11-27 二十六轮：8 方式 × 8 档，快照
+// 聚合；只随费用口径变化——矩阵本身即全方式×全档，不挂 mode/tp watch）
+const dcaTpMatrix = ref(null)
+const dcaTpMatrixLoading = ref(false)
+async function loadDcaTpMatrix() {
+  if (STATIC_MODE) return
+  dcaTpMatrixLoading.value = true
+  try {
+    const r = await fetch(`/api/funds/dca/tp/matrix?fee=${dcaFeeMode.value}`)
+    dcaTpMatrix.value = await r.json()
+  } catch (e) {
+    dcaTpMatrix.value = { status: 'down', detail: String(e), rows: [] }
+  } finally {
+    dcaTpMatrixLoading.value = false
+  }
+}
+const dcaModeLabelOf = m => DCA_MODE_OPTIONS.find(o => o.key === m)?.label || m
+// 矩阵格点击：一次设定方式+止盈点再统一加载（避免两次联动请求竞态）
+function onDcaMatrixCell(mode, tp) {
+  const modeChanged = dcaMode.value !== mode
+  const tpChanged = dcaTp.value !== tp
+  if (!modeChanged && !tpChanged) return
+  if (modeChanged) { dcaMode.value = mode; dcaPage.value = 0 }
+  if (tpChanged) dcaTp.value = tp
+  loadDca()
+  loadDcaTpCompare()
+  loadDcaScatter()
+}
 // 中位年化 vs 止盈点 折线（手写 SVG 坐标，无图表库依赖；点可点击切换阈值）
 const dcaTpChart = computed(() => {
   const rows = (dcaTpCompare.value?.rows || []).filter(r => r.median != null)
@@ -922,7 +950,7 @@ async function loadDcaScatter() {
 }
 // 费用口径与权益开关都联动散点+排行（权益切换时统计卡/分箱同步重算）；
 // 费用口径同时联动止盈点对比区块
-watch(dcaFeeMode, () => { loadDcaScatter(); loadDca(); loadDcaTpCompare() })
+watch(dcaFeeMode, () => { loadDcaScatter(); loadDca(); loadDcaTpCompare(); loadDcaTpMatrix() })
 
 function renderDcaScatterChart() {
   if (dcaScatterChart) { dcaScatterChart.destroy(); dcaScatterChart = null }
@@ -2011,7 +2039,7 @@ async function loadBacktestMinSpan() {
 
 watch(activeNav, (nav, prev) => {
   if (nav === 'funds') loadFunds()
-  if (nav === 'fundDca') { loadDca(); loadDcaScatter(); loadDcaTpCompare(); loadDcaDipReport(); loadDcaPauseExperiment(); loadBacktestMinSpan() }
+  if (nav === 'fundDca') { loadDca(); loadDcaScatter(); loadDcaTpCompare(); loadDcaTpMatrix(); loadDcaDipReport(); loadDcaPauseExperiment(); loadBacktestMinSpan() }
   if (nav === 'settings') { loadSettings(); loadCalendar(); loadMethodDates() }
   if (nav === 'market') loadMarketCompare()
   if (nav === 'crises') loadMarketCrises()
@@ -3757,6 +3785,40 @@ watch(
                     <text :x="p.x" :y="p.y - 9" text-anchor="middle" class="tp-v">{{ pctp(p.v) }}</text>
                   </g>
                 </svg>
+                <!-- 策略×止盈点 总收益额矩阵（2026-11-27 二十六轮）：8 方式 × 8 档，
+                     格=中位(主)/平均(副)两行，悬停看率与样本；行头/列头/格点击联动切页面口径 -->
+                <div style="margin-top: 14px" v-if="dcaTpMatrix && dcaTpMatrix.status === 'up' && dcaTpMatrix.rows?.length">
+                  <h3 style="font-size: 14px; margin: 0 0 6px">策略 × 止盈点：总收益额对比<span class="dc-hint" style="margin-left: 6px">每格上=中位总收益额 / 下=平均总收益额，悬停看率与样本 · 点击策略名/止盈点/格子切换页面口径<span v-if="dcaTpMatrixLoading"> · 重算中…</span></span></h3>
+                  <div style="overflow-x: auto">
+                    <table class="dca-matrix tp-matrix" style="width: 100%; min-width: 1040px">
+                      <thead><tr>
+                        <th style="text-align: left">策略 \ 止盈点</th>
+                        <th v-for="t in dcaTpMatrix.thresholds" :key="t"
+                            :class="{ 'tp-mx-active': dcaTp === t }"
+                            style="cursor: pointer; text-align: right"
+                            title="点击切换排行/统计到该止盈点"
+                            @click="onDcaTpChange(t)">{{ dcaTpLabel(t) }}<span v-if="t === 0.20" class="dc-hint"> 默认</span></th>
+                      </tr></thead>
+                      <tbody>
+                        <tr v-for="row in dcaTpMatrix.rows" :key="row.method">
+                          <th class="tp-mx-mode" :class="{ 'tp-mx-active': dcaMode === row.method }"
+                              style="cursor: pointer; text-align: left; white-space: nowrap"
+                              title="点击切换排行/统计到该定投方式"
+                              @click="onDcaMatrixCell(row.method, dcaTp)">{{ dcaModeLabelOf(row.method) }}</th>
+                          <td v-for="c in row.cells" :key="c.tp"
+                              :class="{ 'tp-mx-active': dcaMode === row.method && dcaTp === c.tp }"
+                              style="cursor: pointer; text-align: right"
+                              :title="`中位总收益率 ${pctp(c.median_profit_rate)} · 平均总收益率 ${pctp(c.mean_profit_rate)} · 样本 ${c.count ?? '—'} 只 · 点击切换到 ${dcaModeLabelOf(row.method)} + 止盈 ${dcaTpLabel(c.tp)}`"
+                              @click="onDcaMatrixCell(row.method, c.tp)">
+                            <div class="tp-mx-med">{{ fmtAmt(c.median_profit_amt) }}</div>
+                            <div class="tp-mx-mean">平均 {{ fmtAmt(c.mean_profit_amt) }}</div>
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+                <p v-else-if="dcaTpMatrix && dcaTpMatrix.status === 'down'" class="note" style="margin: 10px 0 0">策略×止盈点矩阵不可用：{{ dcaTpMatrix.detail || '数据库连接失败' }}</p>
                 <p class="note" style="margin: 10px 0 0">口径：权益类+商品池（权益 8 类白名单 + QDII-商品/商品；债基·FOF·货币·偏债·REITs 不在内——债基货基波动小到连 5% 都难触发，进平均会稀释阈值间差异）· 近 10 年窗口为主口径，「全史」自基金成立起 · 「曾止盈」= 窗口内触发过至少一轮止盈的基金占比 · 平均间隔按费用口径轮次聚合 · 总收益率 = 全史窗口期末总市值/总投入-1（含已止盈落袋轮次）、总收益额 = 总收益率 × 总投入（每月 1000 元口径，加码方式投入随档位变化；率与额同费用口径，随顶部切换）· 点击表格行或折线圆点，排行表格切换到该止盈点；散点/分箱跟随顶部定投方式与止盈点开关 · 本区块为历史回测统计，不构成任何操作建议</p>
               </template>
               <div v-else class="browse-empty">多阈值对比数据尚未生成（日更回测首次写入后可用）</div>
@@ -6236,6 +6298,16 @@ body {
 .tp-compare td { cursor: pointer; }
 .tp-compare tbody tr:hover td { background: #eef4fc; }
 .tp-compare tr.tp-row-active td { background: #def1c6; }
+/* 策略×止盈点 总收益额矩阵（二十六轮）：格两行（中位主/平均副）、
+   行头/列头/格可点联动、当前口径行列高亮 */
+.tp-matrix td, .tp-matrix thead th { white-space: nowrap; }
+.tp-matrix td { vertical-align: top; }
+.tp-matrix tbody tr:hover td, .tp-matrix tbody tr:hover th { background: #eef4fc; }
+.tp-matrix td.tp-mx-active, .tp-matrix thead th.tp-mx-active,
+.tp-matrix th.tp-mx-active { background: #def1c6; }
+.tp-matrix .tp-mx-med { font-weight: 600; font-variant-numeric: tabular-nums; }
+.tp-matrix .tp-mx-mean { font-size: 11px; color: var(--fg-2); font-variant-numeric: tabular-nums; }
+.tp-matrix th.tp-mx-mode { font-weight: 600; }
 .tp-chart { width: 100%; height: auto; max-width: 720px; margin: 12px auto 0; display: block; }
 .tp-chart .tp-line { fill: none; stroke: var(--accent); stroke-width: 2; }
 .tp-chart .tp-zero { stroke: #cbd5e1; stroke-width: 1; stroke-dasharray: 4 3; }

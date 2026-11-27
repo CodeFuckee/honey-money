@@ -23,6 +23,8 @@
 - E2E-496 对比表总收益四列（2026-11-27）：中位/平均总收益率、中位/平均
   总收益额 按行渲染（额千分位+元）；
 - E2E-497 排行表总收益率/总收益额列（2026-11-27）：行值渲染、额=率×投入。
+- E2E-498 策略×止盈点总收益额矩阵（2026-11-27 二十六轮）：8 行渲染、格
+  中位+平均两行、当前口径格高亮、点格/行头联动切方式与止盈点。
 运行：python -m pytest tests/e2e/test_fund_dca_tp_page.py
 """
 
@@ -93,6 +95,31 @@ TP_COMPARE_BODY = {
              _cmp_row(0.35, 0.058), _cmp_row(0.40, 0.050)],
 }
 
+# 策略×止盈点 总收益额矩阵（二十六轮）：8 方式 × 8 档，格=中位/平均金额
+DCA_METHOD_KEYS = ["amount", "share", "dd_ladder", "dd_ladder_deep",
+                   "profit_dd_ladder", "pl_ladder", "pl_ladder_deep",
+                   "pl_ladder_stop"]
+TP_THRESHOLDS_8 = [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4]
+
+
+def _mx_cell(tp, i):
+    return {"tp": tp, "count": 14000,
+            "median_profit_rate": 0.10 + i * 0.01,
+            "mean_profit_rate": 0.08 + i * 0.008,
+            "median_profit_amt": 5000 + i * 1200,
+            "mean_profit_amt": 4800 + i * 1100}
+
+
+TP_MATRIX_BODY = {
+    "status": "up", "fee": "nom", "source": "snapshot",
+    "computed_at": "2026-11-27T12:00:00+00:00",
+    "thresholds": TP_THRESHOLDS_8,
+    "methods": DCA_METHOD_KEYS,
+    "rows": [{"method": m,
+              "cells": [_mx_cell(t, i) for i, t in enumerate(TP_THRESHOLDS_8)]}
+             for m in DCA_METHOD_KEYS],
+}
+
 TP_ROUNDS_BODY = {
     "status": "up", "code": "019387", "fee": "nom", "tp": 0.15,
     "rounds": [
@@ -156,6 +183,11 @@ def mock_tp(page):
                           body=json.dumps(body))
         elif "/api/funds/dca/tp/compare" in url:
             body = {**TP_COMPARE_BODY,
+                    "fee": (qs.get("fee") or ["nom"])[0]}
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps(body))
+        elif "/api/funds/dca/tp/matrix" in url:
+            body = {**TP_MATRIX_BODY,
                     "fee": (qs.get("fee") or ["nom"])[0]}
             route.fulfill(status=200, content_type="application/json",
                           body=json.dumps(body))
@@ -430,3 +462,37 @@ class TestDcaTp:
         row2 = page.locator(".browse-pv tbody tr", has_text="161725")
         expect(row2).to_contain_text("-5.0%")
         expect(row2).to_contain_text("-6,050 元")             # -0.05×121000
+
+    def test_matrix_table_renders_and_links(self, servers, page, mock_dca,
+                                            mock_tp):
+        """E2E-498：策略×止盈点总收益额矩阵（二十六轮）——8 行渲染、格两行
+        金额（中位主/平均副）、当前口径格高亮；点格联动切方式+止盈点、
+        点行头只切方式（tp 保持）。"""
+        _, frontend_port = servers
+        open_dca(page, frontend_port)
+        tb = page.locator(".tp-matrix tbody tr")
+        expect(tb).to_have_count(8, timeout=10_000)
+        # 等额定投行（首行）20% 格：中位 8,600 元 / 平均 8,100 元，当前口径高亮
+        c20 = tb.nth(0).locator("td").nth(3)
+        expect(c20).to_contain_text("8,600 元")
+        expect(c20).to_contain_text("平均 8,100 元")
+        expect(c20).to_have_class(re.compile("tp-mx-active"))
+        # 点「盈亏阶梯即停」行 30% 格（td 序 5）→ 请求带 method+tp，高亮转移
+        stop30 = tb.filter(has_text="盈亏阶梯即停").locator("td").nth(5)
+        stop30.click()
+        list_calls = [u for u in mock_tp
+                      if "/rounds" not in u and "/compare" not in u
+                      and "/matrix" not in u and "/summary" not in u]
+        qs = parse_qs(urlparse(list_calls[-1]).query)
+        assert qs["method"] == ["pl_ladder_stop"], list_calls[-1]
+        assert qs["tp"] == ["0.3"], list_calls[-1]
+        expect(stop30).to_have_class(re.compile("tp-mx-active"),
+                                     timeout=10_000)
+        # 行头点击：等份额定投 → 只切方式，tp 保持 0.3
+        tb.filter(has_text="等份额定投").locator("th").first.click()
+        list_calls = [u for u in mock_tp
+                      if "/rounds" not in u and "/compare" not in u
+                      and "/matrix" not in u and "/summary" not in u]
+        qs = parse_qs(urlparse(list_calls[-1]).query)
+        assert qs["method"] == ["share"], list_calls[-1]
+        assert qs["tp"] == ["0.3"], list_calls[-1]

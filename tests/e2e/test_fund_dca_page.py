@@ -382,15 +382,15 @@ class TestFundDcaPage:
         # 伪 3D 散点 canvas 渲染
         expect(page.locator(".dca-scatter-chart canvas")).to_have_count(1)
         # 均值分箱表：≥10 年表头与 900 只格子（:not 排除中位表——两表同格数）
-        expect(page.locator(".dca-matrix:not(.dca-median):not(.tp-compare) th",
+        expect(page.locator(".dca-matrix:not(.dca-median):not(.tp-compare):not(.tp-matrix) th",
               has_text="≥10 年")).to_have_count(1)
-        expect(page.locator(".dca-matrix:not(.dca-median):not(.tp-compare) td",
+        expect(page.locator(".dca-matrix:not(.dca-median):not(.tp-compare):not(.tp-matrix) td",
               has_text="900 只")).to_have_count(1)
         # 中位分箱表：同格数、中位值与均值不同；默认名义口径（×0.92）下
         # mock ≥10年×<1亿 均值 0.076→7.0%、中位 0.065→6.0%
         expect(page.locator(".dca-median th", has_text="≥10 年")).to_have_count(1)
         expect(page.locator(".dca-median td", has_text="900 只")).to_have_count(1)
-        expect(page.locator(".dca-matrix:not(.dca-median):not(.tp-compare) td",
+        expect(page.locator(".dca-matrix:not(.dca-median):not(.tp-compare):not(.tp-matrix) td",
               has_text="7.0%")).to_have_count(1)
         expect(page.locator(".dca-median td", has_text="6.0%")).to_have_count(1)
 
@@ -651,7 +651,7 @@ class TestFundDcaPage:
         open_dca(page, frontend_port)
         # mock 散点 3 点中仅中欧时代共赢（age 2.9, scale 1.2）落在 1-3 年 × 1-10 亿
         # 均值表：行 = 表头/<1亿/1-10亿/...，列 = 0-1年/1-3年/... → tr.nth(2).td.nth(1)
-        cell = page.locator(".dca-matrix:not(.dca-median):not(.tp-compare) tr").nth(2) \
+        cell = page.locator(".dca-matrix:not(.dca-median):not(.tp-compare):not(.tp-matrix) tr").nth(2) \
             .locator("td").nth(1)
         cell.scroll_into_view_if_needed()
         page.wait_for_timeout(300)
