@@ -745,13 +745,22 @@ ALTER TABLE fund_dca_tp_compare ADD COLUMN IF NOT EXISTS mean DOUBLE PRECISION;
 ALTER TABLE fund_dca_tp_compare ADD COLUMN IF NOT EXISTS positive_share DOUBLE PRECISION;
 ALTER TABLE fund_dca_tp_compare ADD COLUMN IF NOT EXISTS success_share DOUBLE PRECISION;
 ALTER TABLE fund_dca_tp_compare ADD COLUMN IF NOT EXISTS avg_rounds DOUBLE PRECISION;
+-- 总收益四列（2026-11-27）：率=全史总收益率、额=总收益率×总投入（总投入
+-- 与费率无关，每期固定现金，三口径同式）；重建前旧行为 NULL，API 快照
+-- 路径透传 NULL 前端显 —，夜更 rebuild_tp_compare 后自愈
+ALTER TABLE fund_dca_tp_compare ADD COLUMN IF NOT EXISTS median_profit_rate DOUBLE PRECISION;
+ALTER TABLE fund_dca_tp_compare ADD COLUMN IF NOT EXISTS mean_profit_rate DOUBLE PRECISION;
+ALTER TABLE fund_dca_tp_compare ADD COLUMN IF NOT EXISTS median_profit_amt DOUBLE PRECISION;
+ALTER TABLE fund_dca_tp_compare ADD COLUMN IF NOT EXISTS mean_profit_amt DOUBLE PRECISION;
 """
 
 _FEE_COL_SUFFIX = {"gross": "", "disc": "_disc", "nom": "_nom"}
 
-# 单费用口径的 7 项聚合列块（{fx} 全史年化 / {wr} 轮次 / {fr} 全史轮次 /
-# {gap} 平均间隔；后缀按 _FEE_COL_SUFFIX 替换；十七轮起 w10 年化退役，
-# 门与分位源统一 {fx}）。列序与 _tp_compare_row 映射、API 快照行映射逐位
+# 单费用口径的 11 项聚合列块（{fx} 全史年化 / {wr} 轮次 / {fr} 全史轮次 /
+# {gap} 平均间隔 / {pr} 全史总收益率、{pr}×{inv}=总收益额（2026-11-27，
+# {inv}=full_invested 总投入与费率无关）；后缀按 _FEE_COL_SUFFIX 替换；
+# 十七轮起 w10 年化退役，门与分位源统一 {fx}——总收益四聚合同门，
+# 宇宙锚不因新列漂移）。列序与 _tp_compare_row 映射、API 快照行映射逐位
 # 对齐；FILTER 口径锚点见节注释
 _TP_AGG_BLOCK = """
   count({fx}) FILTER (WHERE {fx} IS NOT NULL),
@@ -760,13 +769,18 @@ _TP_AGG_BLOCK = """
   avg(({fx} > 0)::int) FILTER (WHERE {fx} IS NOT NULL),
   avg(({wr} > 0)::int) FILTER (WHERE {fx} IS NOT NULL),
   avg({wr}) FILTER (WHERE {fx} IS NOT NULL),
-  avg({gap}) FILTER (WHERE {fx} IS NOT NULL)
+  avg({gap}) FILTER (WHERE {fx} IS NOT NULL),
+  percentile_cont(0.5) WITHIN GROUP (ORDER BY {pr}) FILTER (WHERE {fx} IS NOT NULL),
+  avg({pr}) FILTER (WHERE {fx} IS NOT NULL),
+  percentile_cont(0.5) WITHIN GROUP (ORDER BY {pr} * {inv}) FILTER (WHERE {fx} IS NOT NULL),
+  avg({pr} * {inv}) FILTER (WHERE {fx} IS NOT NULL)
 """
 
 _TP_COMPARE_AGG_SQL = "SELECT tp,\n" + ",\n".join(
     _TP_AGG_BLOCK.format(fx=f"full_xirr{sfx}",
                          wr=f"w10_rounds{sfx}", fr=f"full_rounds{sfx}",
-                         gap=f"gap_avg_days{sfx}")
+                         gap=f"gap_avg_days{sfx}",
+                         pr=f"full_profit_rate{sfx}", inv="full_invested")
     for sfx in _FEE_COL_SUFFIX.values()) + """
 FROM fund_dca_tp_result
 WHERE alive AND method = %s{equity_clause}
@@ -776,7 +790,9 @@ GROUP BY tp ORDER BY tp
 _TP_COMPARE_COLS = ["method", "equity", "fee", "tp", "sample_count",
                     "median", "mean",
                     "positive_share", "success_share",
-                    "avg_rounds", "avg_gap_days"]
+                    "avg_rounds", "avg_gap_days",
+                    "median_profit_rate", "mean_profit_rate",
+                    "median_profit_amt", "mean_profit_amt"]
 _TP_COMPARE_INSERT = f"""
 INSERT INTO fund_dca_tp_compare ({", ".join(_TP_COMPARE_COLS)})
 VALUES ({", ".join(["%s"] * len(_TP_COMPARE_COLS))})
@@ -784,20 +800,23 @@ VALUES ({", ".join(["%s"] * len(_TP_COMPARE_COLS))})
 
 
 def _tp_compare_row(method: str, equity: bool, fee: str, r: tuple) -> tuple:
-    """单遍聚合行 → 快照行。一行含三费用块（r[1:8] gross、r[8:15] disc、
-    r[15:22] nom，块序同 _TP_COMPARE_AGG_SQL 的 _FEE_COL_SUFFIX 拼接序），
-    按 fee 取对应块；列内序同 _TP_AGG_BLOCK（count / 中位 / 均值 / 正收益 /
-    成功 / 平均轮次 / 平均间隔——门与分位源统一全史年化，2026-11-25 十七轮）。
-    精度圆整同 API 现算（中位/均值/占比 4 位、平均轮次 2 位、平均间隔 1 位
-    ——快照输出与现算输出逐值一致）。"""
-    off = 1 + {"gross": 0, "disc": 7, "nom": 14}[fee]
+    """单遍聚合行 → 快照行。一行含三费用块（每块 11 列：r[1:12] gross、
+    r[12:23] disc、r[23:34] nom，块序同 _TP_COMPARE_AGG_SQL 的
+    _FEE_COL_SUFFIX 拼接序），按 fee 取对应块；列内序同 _TP_AGG_BLOCK
+    （count / 年化中位 / 年化均值 / 正收益 / 成功 / 平均轮次 / 平均间隔 /
+    总收益率中位 / 总收益率均值 / 总收益额中位 / 总收益额均值——总收益
+    四列 2026-11-27，门与分位源统一全史年化，2026-11-25 十七轮）。
+    精度圆整同 API 现算（率/占比 4 位、平均轮次 2 位、平均间隔 1 位、
+    金额 2 位——快照输出与现算输出逐值一致）。"""
+    off = 1 + {"gross": 0, "disc": 11, "nom": 22}[fee]
 
     def q(i, nd):
         return round(r[off + i], nd) if r[off + i] is not None else None
     return (method, equity, fee, r[0],
             r[off] if r[off] is not None else None,
             q(1, 4), q(2, 4), q(3, 4),
-            q(4, 4), q(5, 2), q(6, 1))
+            q(4, 4), q(5, 2), q(6, 1),
+            q(7, 4), q(8, 4), q(9, 2), q(10, 2))
 
 
 def rebuild_tp_compare(conn, *, equity_types) -> int:

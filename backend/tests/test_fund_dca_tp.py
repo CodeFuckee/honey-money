@@ -338,9 +338,12 @@ class AggCursor(FakeCursor):
 
 
 def _agg_row(tp=0.20):
-    """单遍聚合查询的一行（22 元组：tp + 三费用块各 7 列，块序 gross /
+    """单遍聚合查询的一行（34 元组：tp + 三费用块各 11 列，块序 gross /
     disc / nom 同 _TP_COMPARE_AGG_SQL；三块取值互异防跨块错位混过——
-    生产首跑曾因恒取 gross 块给三口径标签，桩行列数不足旧形状漏过）。"""
+    生产首跑曾因恒取 gross 块给三口径标签，桩行列数不足旧形状漏过）。
+    列内序：count / 年化中位 / 年化均值 / 正收益占比 / 成功率 / 平均轮次 /
+    平均间隔 / 总收益率中位 / 总收益率均值 / 总收益额中位 / 总收益额均值
+    （总收益四列 2026-11-27 加入，金额 = 总收益率 × 总投入）。"""
     def blk(base):
         return (15029,                       # count
                 0.12345612345 + base,        # 中位（全史年化）
@@ -348,7 +351,11 @@ def _agg_row(tp=0.20):
                 0.34567812345 + base,        # 正收益占比
                 0.45678912345 + base,        # 成功率（轮次口径）
                 1.931612345 + base,          # 平均轮次
-                703.14159265 + base)         # 平均间隔
+                703.14159265 + base,         # 平均间隔
+                0.5678912345 + base,         # 总收益率中位
+                0.6789123456 + base,         # 总收益率均值
+                12345.678901 + base,         # 总收益额中位
+                23456.789012 + base)         # 总收益额均值
     return (tp,) + blk(0.0) + blk(0.02) + blk(0.04)
 
 
@@ -378,6 +385,19 @@ class TestTpCompareSnapshot:
         assert all("FILTER (WHERE full_xirr_nom IS NOT NULL)" in s
                    for s in aggs)
         assert all("w10_xirr" not in s for s in aggs)   # 退役列不得残留
+        # 总收益四聚合（2026-11-27）：三口径各带 总收益率中位/均值 + 总收益额
+        # （=总收益率×总投入）中位/均值；门沿用年化（宇宙锚不因新列漂移）
+        for sfx in ("", "_disc", "_nom"):
+            assert all("percentile_cont(0.5) WITHIN GROUP "
+                       f"(ORDER BY full_profit_rate{sfx})" in s for s in aggs)
+            assert all(f"avg(full_profit_rate{sfx})" in s for s in aggs)
+            assert all("percentile_cont(0.5) WITHIN GROUP "
+                       f"(ORDER BY full_profit_rate{sfx} * full_invested)"
+                       in s for s in aggs)
+            assert all(f"avg(full_profit_rate{sfx} * full_invested)"
+                       in s for s in aggs)
+        # 口径锚点不漂移：总收益聚合的门仍是年化非空，不得换成按收益过滤
+        assert all("FILTER (WHERE full_profit_rate" not in s for s in aggs)
         assert all("FROM fund_dca_tp_result" in s for s in aggs)
         assert "DELETE FROM fund_dca_tp_compare" in sqls
         # equity 两池：白名单参数（fund_type = ANY）vs 全市场无池参数
@@ -402,7 +422,11 @@ class TestTpCompareSnapshot:
                     round(0.34567812345 + base, 4),
                     round(0.45678912345 + base, 4),
                     round(1.931612345 + base, 2),
-                    round(703.14159265 + base, 1))
+                    round(703.14159265 + base, 1),
+                    round(0.5678912345 + base, 4),
+                    round(0.6789123456 + base, 4),
+                    round(12345.678901 + base, 2),
+                    round(23456.789012 + base, 2))
 
         assert blk_want(0.0, "gross") in rows
         assert blk_want(0.02, "disc") in rows
@@ -410,7 +434,9 @@ class TestTpCompareSnapshot:
         want = ("amount", True, "gross", 0.20, 15029,
                 round(0.12345612345, 4), round(0.23456712345, 4),
                 round(0.34567812345, 4), round(0.45678912345, 4),
-                round(1.931612345, 2), round(703.14159265, 1))
+                round(1.931612345, 2), round(703.14159265, 1),
+                round(0.5678912345, 4), round(0.6789123456, 4),
+                round(12345.678901, 2), round(23456.789012, 2))
         assert want in rows
 
     def test_rebuild_empty_table_still_replaces(self):
@@ -421,6 +447,16 @@ class TestTpCompareSnapshot:
         sqls = [sql for sql, _ in conn.cursor_obj.executed]
         assert "DELETE FROM fund_dca_tp_compare" in sqls
         assert conn.cursor_obj.batch == []      # 空结果不 executemany
+
+    def test_compare_ddl_adds_profit_columns(self):
+        """总收益四列幂等扩列（2026-11-27）：存量快照表 ALTER 补列，
+        重建前旧行该四列为 NULL → API 快照路径透传 NULL 前端显 —，
+        夜更重建后自愈。"""
+        from app.dca_store import _TP_COMPARE_DDL
+        for col in ("median_profit_rate", "mean_profit_rate",
+                    "median_profit_amt", "mean_profit_amt"):
+            assert (f"ADD COLUMN IF NOT EXISTS {col} DOUBLE PRECISION"
+                    in _TP_COMPARE_DDL)
 
 
 # ===== API：/api/funds/dca/tp 三端点契约 =====
@@ -474,6 +510,56 @@ class TestDcaTpRoutes:
         assert any("tp = %s" in s for s in sqls)
         assert any("full_xirr_nom" in s for s in sqls)   # 排序列带口径后缀
 
+    def test_tp_list_profit_amount_column_and_sort(self, client, monkeypatch):
+        """总收益额列（2026-11-27）：行 SELECT 带 r.full_invested（行内额=
+        总收益率×总投入，前端计算）；sort=full_profit_amt 白名单放行，
+        ORDER BY 落在 费率口径总收益率×总投入 表达式上。"""
+        import app.dca_api as dca_mod
+        conn = FakeConnOne((None, None, None))
+        _patch_connect(monkeypatch, dca_mod, conn)
+        resp = client.get("/api/funds/dca/tp",
+                          params={"sort": "full_profit_amt", "fee": "nom"})
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "up"
+        list_sql = [q for q in conn.executed
+                    if "FROM fund_dca_tp_result" in q and "ORDER BY" in q][0]
+        assert "r.full_invested" in list_sql
+        assert "r.full_profit_rate_nom * r.full_invested" in list_sql
+
+    def test_tp_stats_sql_includes_profit_metrics(self, client, monkeypatch):
+        """统计卡 SQL 形状（2026-11-27）：总收益率五聚合（P25/P50/P75/P90/
+        为正占比）随费用口径后缀替换；宇宙门仍为年化非空（与年化分位同
+        宇宙，不做收益侧二次过滤）。"""
+        import app.dca_api as dca_mod
+        conn = _ListDispatchConn((13557,) + (None,) * 11)
+        _patch_connect(monkeypatch, dca_mod, conn)
+        resp = client.get("/api/funds/dca/tp", params={"fee": "nom"})
+        assert resp.status_code == 200
+        norm = [" ".join(q.split()) for q, _ in conn.executed]
+        stats_sql = [q for q in norm if "percentile_cont" in q][0]
+        for p in ("0.25", "0.5", "0.75", "0.9"):
+            assert (f"percentile_cont({p}) WITHIN GROUP "
+                    "(ORDER BY r.full_profit_rate_nom)") in stats_sql, p
+        assert "avg((r.full_profit_rate_nom > 0)::int)::float" in stats_sql
+        assert "r.full_xirr_nom IS NOT NULL" in stats_sql
+
+    def test_tp_stats_profit_keys_in_response(self, client, monkeypatch):
+        """统计卡响应：总收益五键（pr_p25/pr_median/pr_p75/pr_p90/
+        pr_positive_share）随 stats 一并返回。"""
+        import app.dca_api as dca_mod
+        stats_row = (13557, 0.01, 0.02, 0.03, 0.04, 0.5, 0.6,
+                     0.11, 0.12, 0.13, 0.14, 0.15)
+        conn = _ListDispatchConn(stats_row)
+        _patch_connect(monkeypatch, dca_mod, conn)
+        resp = client.get("/api/funds/dca/tp", params={"fee": "nom"})
+        assert resp.status_code == 200
+        st = resp.json()["stats"]
+        assert st["count"] == 13557
+        assert st["median"] == 0.02
+        assert st["pr_p25"] == 0.11 and st["pr_median"] == 0.12
+        assert st["pr_p75"] == 0.13 and st["pr_p90"] == 0.14
+        assert st["pr_positive_share"] == 0.15
+
     def test_tp_compare_registered_and_degrades(self, client, monkeypatch):
         import app.dca_api as dca_mod
         monkeypatch.setattr("app.config.DATABASE_URL", DEAD_DSN)
@@ -494,16 +580,23 @@ class TestDcaTpRoutes:
         assert "w10_xirr" not in cmp_sql[0]   # 退役列不得残留
 
     def _snap_row(self, tp=0.20):
-        """快照表一行（9 元组：7 聚合列已圆整 + computed_at），列序同
-        _TP_COMPARE_SNAP_SQL。"""
+        """快照表一行（13 元组：7 聚合列已圆整 + 总收益四列 + computed_at），
+        列序同 _TP_COMPARE_SNAP_SQL（与现算行前 12 列同序，末列为快照时间）。"""
         import datetime as dtm
         return (tp, 15029, 0.1235, 0.2346, 0.3457, 0.4568, 1.93, 703.1,
+                0.1111, 0.2222, 12345.67, 23456.78,
                 dtm.datetime(2026, 11, 25, 12, 0, 0,
                              tzinfo=dtm.timezone.utc))
 
+    def _live_row(self, tp=0.20):
+        """现算聚合一行（13 元组：tp + count + 11 聚合列，总收益列未圆整），
+        列序同 /api/funds/dca/tp/compare 现算 SQL。"""
+        return (tp, 15029, 0.1235, 0.2346, 0.3457, 0.4568, 1.93, 703.1,
+                0.111123, 0.222234, 12345.678, 23456.789)
+
     def test_compare_snapshot_hit_skips_live_sql(self, client, monkeypatch):
         """快照满八档：只查 fund_dca_tp_compare 一条 SQL（不落百万行现算），
-        source=snapshot、computed_at 透传、行值原样返回。"""
+        source=snapshot、computed_at 透传、行值原样返回（含总收益四键）。"""
         import app.dca_api as dca_mod
         rows = [self._snap_row(tp) for tp in (0.05, 0.10, 0.15, 0.20, 0.25,
                                               0.30, 0.35, 0.40)]
@@ -521,14 +614,21 @@ class TestDcaTpRoutes:
         assert r["median"] == 0.1235 and r["mean"] == 0.2346
         assert r["positive_share"] == 0.3457 and r["success_share"] == 0.4568
         assert r["avg_rounds"] == 1.93 and r["avg_gap_days"] == 703.1
+        assert r["median_profit_rate"] == 0.1111
+        assert r["mean_profit_rate"] == 0.2222
+        assert r["median_profit_amt"] == 12345.67
+        assert r["mean_profit_amt"] == 23456.78
         assert len(conn.executed) == 1 and "GROUP BY tp" not in conn.executed[0]
         assert "fund_dca_tp_compare" in conn.executed[0]
+        # 快照查询带总收益四列（列序扩员后旧 9 元组查询不得回潮）
+        assert "median_profit_rate" in conn.executed[0]
+        assert "mean_profit_amt" in conn.executed[0]
 
     def test_compare_snapshot_incomplete_falls_back_live(self,
                                                          client, monkeypatch):
         """快照该组合不满八档（部署早期/重建中断）：回落现算聚合仍 up。"""
         import app.dca_api as dca_mod
-        conn = FakeConnOne((None,), rows=[self._snap_row()])
+        conn = FakeConnOne((None,), rows=[self._live_row()])
         _patch_connect(monkeypatch, dca_mod, conn)
         resp = client.get("/api/funds/dca/tp/compare", params={"fee": "nom"})
         assert resp.status_code == 200
@@ -551,13 +651,41 @@ class TestDcaTpRoutes:
                         "relation does not exist")
                 self.executed.append(query)
 
-        conn = SnapFailConn((None,), rows=[self._snap_row()])
+        conn = SnapFailConn((None,), rows=[self._live_row()])
         _patch_connect(monkeypatch, dca_mod, conn)
         resp = client.get("/api/funds/dca/tp/compare", params={"fee": "nom"})
         assert resp.status_code == 200
         body = resp.json()
         assert body["status"] == "up" and body["source"] == "live"
         assert body["rows"][0]["count"] == 15029
+
+    def test_compare_live_sql_has_profit_aggregates(self, client, monkeypatch):
+        """现算 SQL 形状：总收益四聚合（三口径带后缀）进 GROUP BY tp 查询。"""
+        import app.dca_api as dca_mod
+        conn = FakeConnOne((None,), rows=[self._live_row()])
+        _patch_connect(monkeypatch, dca_mod, conn)
+        resp = client.get("/api/funds/dca/tp/compare", params={"fee": "nom"})
+        assert resp.status_code == 200
+        cmp_sql = [s for s in conn.executed if "GROUP BY tp" in s][0]
+        assert ("percentile_cont(0.5) WITHIN GROUP "
+                "(ORDER BY full_profit_rate_nom)") in cmp_sql
+        assert "avg(full_profit_rate_nom)" in cmp_sql
+        assert ("percentile_cont(0.5) WITHIN GROUP "
+                "(ORDER BY full_profit_rate_nom * full_invested)") in cmp_sql
+        assert "avg(full_profit_rate_nom * full_invested)" in cmp_sql
+
+    def test_compare_live_row_maps_profit_keys(self, client, monkeypatch):
+        """现算行映射：总收益四键输出并按现算精度圆整（率 4 位 / 金额 2 位）。"""
+        import app.dca_api as dca_mod
+        conn = FakeConnOne((None,), rows=[self._live_row()])
+        _patch_connect(monkeypatch, dca_mod, conn)
+        resp = client.get("/api/funds/dca/tp/compare", params={"fee": "nom"})
+        assert resp.status_code == 200
+        r = resp.json()["rows"][0]
+        assert r["median_profit_rate"] == 0.1111
+        assert r["mean_profit_rate"] == 0.2222
+        assert r["median_profit_amt"] == 12345.68
+        assert r["mean_profit_amt"] == 23456.79
 
     def test_compare_equity_pool_includes_commodity(self):
         """对比池口径（2026-11-15 用户确认）：权益 8 类 + QDII-商品 + 商品。"""
@@ -650,3 +778,38 @@ class FakeConnOne:
 
     def fetchall(self):
         return self.rows
+
+
+class _ListDispatchConn:
+    """按查询内容分发的连接桩（tp 列表端点一次请求四次 fetchone：参考日 /
+    count / 统计卡聚合 / meta，各回各的值——FakeConnOne 恒返同一元组会
+    让 meta 解析踩到统计行形状）。"""
+
+    def __init__(self, stats_row):
+        self.stats_row = stats_row
+        self.executed: list = []
+
+    def cursor(self):
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, query, params=None):
+        self.executed.append((query, params))
+
+    def fetchone(self):
+        q = self.executed[-1][0]
+        if "max(full_end)" in q:
+            return (None,)                  # 参考日
+        if "percentile_cont" in q:
+            return self.stats_row           # 统计卡聚合
+        if "fund_dca_meta" in q:
+            return (None, None, None)       # meta（表名无 tp 前缀）
+        return (0,)                         # count(*)
+
+    def fetchall(self):
+        return []

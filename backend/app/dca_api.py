@@ -24,7 +24,7 @@ _DCA_REF_SQL = "SELECT max(full_end) FROM fund_dca_tp_result"
 
 # 排序白名单：前端传列名，只允许这些键进 ORDER BY（防注入）
 _SORTABLE = {
-    "full_xirr", "full_profit_rate",
+    "full_xirr", "full_profit_rate", "full_profit_amt",
     "w10_rounds", "full_rounds", "scale_yi", "code", "full_start",
     "gap_avg_days", "age_years",   # 运作年限列 field 别名 → ORDER BY full_start
     "dd_current", "days_since_peak",   # 时机列（LEFT JOIN fund_dip_timing）
@@ -52,7 +52,10 @@ _RM_SORTABLE = {"vol_all", "vol_down_all", "mdd_all", "sharpe_all",
 
 def _list_sort_col(sort_base: str, suffix: str) -> str:
     """排行列表 ORDER BY 列：fee 口径字段带后缀，时机字段落 t 表、波动指标
-    字段落 rm 表，其余 r 表。"""
+    字段落 rm 表，其余 r 表。full_profit_amt（总收益额）为派生排序：落
+    总收益率{口径后缀}×总投入 表达式（总投入与费率无关，2026-11-27）。"""
+    if sort_base == "full_profit_amt":
+        return f"r.full_profit_rate{suffix} * r.full_invested"
     if sort_base in _FEE_SORTABLE:
         return f"r.{sort_base}{suffix}"
     if sort_base in _T_SORTABLE:
@@ -119,7 +122,8 @@ _LIST_COLS = ["code", "name", "fund_type", "alive", "scale_yi",
               "scale_date", "w10_start", "w10_end", "w10_months",
               "w10_rounds", "w10_invested", "w10_final_value",
               "full_xirr",
-              "full_rounds", "full_profit_rate", "full_months",
+              "full_rounds", "full_profit_rate", "full_invested",
+              "full_months",
               "full_start", "gap_avg_days",
               "full_xirr_disc",
               "full_xirr_nom", "w10_rounds_disc", "w10_rounds_nom",
@@ -437,7 +441,8 @@ _TP_LIST_SQL = """
 SELECT r.tp, r.code, r.name, r.fund_type, r.alive, r.scale_yi, r.scale_date,
        r.w10_start, r.w10_end, r.w10_months, r.w10_rounds,
        r.w10_invested, r.w10_final_value,
-       r.full_xirr, r.full_rounds, r.full_profit_rate, r.full_months,
+       r.full_xirr, r.full_rounds, r.full_profit_rate, r.full_invested,
+       r.full_months,
        r.full_start, r.gap_avg_days,
        r.full_xirr_disc, r.full_xirr_nom,
        r.w10_rounds_disc, r.w10_rounds_nom, r.full_rounds_disc, r.full_rounds_nom,
@@ -489,7 +494,12 @@ SELECT count(*),
        percentile_cont(0.75) WITHIN GROUP (ORDER BY {xirr_col}),
        percentile_cont(0.9)  WITHIN GROUP (ORDER BY {xirr_col}),
        avg(({xirr_col} > 0)::int)::float,
-       avg(({rounds_col} > 0)::int)::float
+       avg(({rounds_col} > 0)::int)::float,
+       percentile_cont(0.25) WITHIN GROUP (ORDER BY {pr_col}),
+       percentile_cont(0.5)  WITHIN GROUP (ORDER BY {pr_col}),
+       percentile_cont(0.75) WITHIN GROUP (ORDER BY {pr_col}),
+       percentile_cont(0.9)  WITHIN GROUP (ORDER BY {pr_col}),
+       avg(({pr_col} > 0)::int)::float
 FROM fund_dca_tp_result r
 WHERE r.alive AND r.tp = %s AND r.method = %s AND {xirr_col} IS NOT NULL
   AND {age_clause}
@@ -504,7 +514,11 @@ SELECT tp, count(*),
        percentile_cont(0.5) WITHIN GROUP (ORDER BY {fx}),
        avg({fx}), avg(({fx} > 0)::int)::float,
        avg(({wr} > 0)::int)::float, avg({wr}),
-       avg({gap})
+       avg({gap}),
+       percentile_cont(0.5) WITHIN GROUP (ORDER BY {pr}),
+       avg({pr}),
+       percentile_cont(0.5) WITHIN GROUP (ORDER BY {pr} * {inv}),
+       avg({pr} * {inv})
 FROM fund_dca_tp_result
 WHERE alive AND method = %s AND {fx} IS NOT NULL{equity_clause}
 GROUP BY tp ORDER BY tp
@@ -518,7 +532,9 @@ TP_COMPARE_EQUITY_TYPES = EQUITY_TYPES + ("QDII-商品", "商品")
 # 重建）：值已按现算同精度圆整，读出即返回；computed_at 随行取 max
 _TP_COMPARE_SNAP_SQL = """
 SELECT tp, sample_count, median, mean, positive_share, success_share,
-       avg_rounds, avg_gap_days, computed_at
+       avg_rounds, avg_gap_days,
+       median_profit_rate, mean_profit_rate,
+       median_profit_amt, mean_profit_amt, computed_at
 FROM fund_dca_tp_compare
 WHERE method = %s AND equity = %s AND fee = %s ORDER BY tp
 """
@@ -604,6 +620,7 @@ def fetch_dca_tp_list(dsn: str, *, tp: float = TAKE_PROFIT, q: str = "",
                 stats_sql = (_TP_STATS_SQL
                              .replace("{xirr_col}", f"r.full_xirr{suffix}")
                              .replace("{rounds_col}", f"r.w10_rounds{suffix}")
+                             .replace("{pr_col}", f"r.full_profit_rate{suffix}")
                              .replace("{age_clause}", age_clause)
                              .replace("{scale_clause}", scale_clause)
                              .replace("{equity_clause}", equity_clause))
@@ -627,6 +644,9 @@ def fetch_dca_tp_list(dsn: str, *, tp: float = TAKE_PROFIT, q: str = "",
             for k in _LIST_ROUND4:
                 r[k] = round(r[k], 4) if r[k] is not None else None
             r["scale_yi"] = round(r["scale_yi"], 2) if r["scale_yi"] is not None else None
+            # 总收益额 = 总收益率×总投入（前端行内计算）的分母，2 位即可
+            r["full_invested"] = (round(r["full_invested"], 2)
+                                  if r["full_invested"] is not None else None)
             r["age_years"] = (round((ref - r["full_start"]).days / 365.25, 1)
                               if ref and r["full_start"] else None)
             r.pop("full_start", None)
@@ -638,7 +658,10 @@ def fetch_dca_tp_list(dsn: str, *, tp: float = TAKE_PROFIT, q: str = "",
         if s and s[0]:
             stats = {"count": s[0], "p25": s[1], "median": s[2],
                      "p75": s[3], "p90": s[4],
-                     "positive_share": s[5], "take_profit_share": s[6]}
+                     "positive_share": s[5], "take_profit_share": s[6],
+                     # 总收益率五分位（2026-11-27，全史窗口，与年化同宇宙）
+                     "pr_p25": s[7], "pr_median": s[8], "pr_p75": s[9],
+                     "pr_p90": s[10], "pr_positive_share": s[11]}
         meta = None
         if m:
             meta = {"generated_at": m[0].isoformat() if m[0] else None,
@@ -658,8 +681,9 @@ def fetch_dca_tp_compare(dsn: str, *, fee: str = "nom", equity: bool = True,
                          method: str = "amount") -> dict:
     """八档阈值市场级对比聚合（权益类+商品池，alive 且 w10 年化非空宇宙）。
 
-    每阈值一行：样本数 / w10 年化 P25~P90 与均值 / 正收益占比 / 止盈成功率
-    （轮次>0 占比）/ 平均轮次 / 全史中位与均值 / 平均止盈间隔。
+    每阈值一行：样本数 / 年化中位与均值 / 正收益占比 / 止盈成功率
+    （轮次>0 占比）/ 平均轮次 / 平均止盈间隔 / 全史总收益率中位与均值 /
+    总收益额中位与均值（额=率×总投入，总投入与费率无关，2026-11-27）。
     fee 切换口径（gross/disc/nom），equity=False 切全市场对照，
     method 切定投方式（DCA_METHODS）。
 
@@ -674,13 +698,17 @@ def fetch_dca_tp_compare(dsn: str, *, fee: str = "nom", equity: bool = True,
     suffix = _LIST_FEE_SUFFIX[fee_val]
     cols = {"fx": f"full_xirr{suffix}",
             "wr": f"w10_rounds{suffix}", "fr": f"full_rounds{suffix}",
-            "gap": f"gap_avg_days{suffix}"}
+            "gap": f"gap_avg_days{suffix}",
+            "pr": f"full_profit_rate{suffix}", "inv": "full_invested"}
 
     def _snap_rows_to_out(snap):
         return [{"tp": r[0], "count": r[1],
                  "median": r[2], "mean": r[3],
                  "positive_share": r[4], "success_share": r[5],
-                 "avg_rounds": r[6], "avg_gap_days": r[7]} for r in snap]
+                 "avg_rounds": r[6], "avg_gap_days": r[7],
+                 "median_profit_rate": r[8], "mean_profit_rate": r[9],
+                 "median_profit_amt": r[10], "mean_profit_amt": r[11]}
+                for r in snap]
 
     def run():
         # 快照优先：缺表（部署早期）/库不可达一律回落现算，绝不 500
@@ -694,7 +722,7 @@ def fetch_dca_tp_compare(dsn: str, *, fee: str = "nom", equity: bool = True,
         except psycopg.Error:
             snap = None
         if snap is not None and len(snap) == len(TP_THRESHOLDS):
-            computed = max((r[8] for r in snap if r[8] is not None),
+            computed = max((r[12] for r in snap if r[12] is not None),
                            default=None)
             return {"status": "up", "fee": fee_val, "method": method_val,
                     "equity": bool(equity), "source": "snapshot",
@@ -712,6 +740,8 @@ def fetch_dca_tp_compare(dsn: str, *, fee: str = "nom", equity: bool = True,
                             .replace("{wr}", cols["wr"])
                             .replace("{fr}", cols["fr"])
                             .replace("{gap}", cols["gap"])
+                            .replace("{pr}", cols["pr"])
+                            .replace("{inv}", cols["inv"])
                             .replace("{equity_clause}", eq_clause), params)
                 rows = cur.fetchall()
         out = []
@@ -724,6 +754,14 @@ def fetch_dca_tp_compare(dsn: str, *, fee: str = "nom", equity: bool = True,
                 "success_share": round(r[5], 4) if r[5] is not None else None,
                 "avg_rounds": round(r[6], 2) if r[6] is not None else None,
                 "avg_gap_days": round(r[7], 1) if r[7] is not None else None,
+                "median_profit_rate":
+                    round(r[8], 4) if r[8] is not None else None,
+                "mean_profit_rate":
+                    round(r[9], 4) if r[9] is not None else None,
+                "median_profit_amt":
+                    round(r[10], 2) if r[10] is not None else None,
+                "mean_profit_amt":
+                    round(r[11], 2) if r[11] is not None else None,
             })
         return {"status": "up", "fee": fee_val, "method": method_val,
                 "equity": bool(equity), "source": "live", "computed_at": None,

@@ -557,11 +557,16 @@ function dcaStaticView() {
   })
   const off = dcaPage.value * DCA_PAGE_SIZE
   const xs = base.map(r => dcaFeeVal(r, 'full_xirr')).filter(v => v != null).sort((a, b) => a - b)
+  // 总收益率分位与年化同宇宙（年化非空行），口径与 server 端 _TP_STATS_SQL 一致
+  const prs = base.map(r => dcaFeeVal(r, 'full_profit_rate')).filter(v => v != null).sort((a, b) => a - b)
   const stats = xs.length ? {
     count: xs.length, p25: pctCont(xs, 0.25), median: pctCont(xs, 0.5),
     p75: pctCont(xs, 0.75), p90: pctCont(xs, 0.9),
     positive_share: xs.filter(v => v > 0).length / xs.length,
     take_profit_share: base.filter(r => (dcaFeeVal(r, 'w10_rounds') || 0) > 0).length / xs.length,
+    pr_p25: pctCont(prs, 0.25), pr_median: pctCont(prs, 0.5),
+    pr_p75: pctCont(prs, 0.75), pr_p90: pctCont(prs, 0.9),
+    pr_positive_share: prs.length ? prs.filter(v => v > 0).length / prs.length : null,
   } : null
   return { status: 'up', total: rows.length, rows: rows.slice(off, off + DCA_PAGE_SIZE),
            stats, meta: dcaStaticMeta }
@@ -719,6 +724,8 @@ const DCA_TOGGLE_COLS = [
   { key: 'gap_avg_days', label: '止盈间隔' },
   { key: 'w10_rounds', label: '止盈次数' },
   { key: 'full_xirr', label: '年化' },
+  { key: 'full_profit_rate', label: '总收益率' },
+  { key: 'full_profit_amt', label: '总收益额' },
   { key: 'full_cur_profit_rate', label: '止盈后收益率' },
   { key: 'full_cur_xirr', label: '止盈后年化' },
   { key: 'w10_range', label: '回测区间' },
@@ -828,6 +835,15 @@ function dcaFeeVal(row, f) {
   if (dcaFeeMode.value === 'gross') return row[f]
   const v = row[`${f}_${dcaFeeMode.value}`]
   return v === undefined ? row[f] : v
+}
+
+// 总收益额（元）= 当前口径总收益率 × 总投入（总投入与费率无关，每期固定
+// 现金；加码方式投入随档位变化已含在行内 full_invested）。任一分量缺失
+// 返回 null（显 —）
+function dcaProfitAmt(row) {
+  const rate = dcaFeeVal(row, 'full_profit_rate')
+  if (rate == null || row.full_invested == null) return null
+  return rate * row.full_invested
 }
 
 // 静态模式散点权益过滤：快照导出行的宇宙已随引擎排除收窄（权益类），
@@ -3674,13 +3690,18 @@ watch(
               <div class="card lm"><div class="lm-k">P90</div><div class="lm-v">{{ pctp(dca.stats.p90) }}</div></div>
               <div class="card lm"><div class="lm-k">年化为正</div><div class="lm-v">{{ pct0(dca.stats.positive_share) }}</div></div>
               <div class="card lm"><div class="lm-k">曾止盈</div><div class="lm-v">{{ pct0(dca.stats.take_profit_share) }}</div></div>
+              <div class="card lm" title="总收益率中位数（全史窗口：期末总市值/总投入-1，止盈重来含已落袋轮次；与年化分位同宇宙=年化非空在市基金，随费用口径切换）"><div class="lm-k">总收益中位</div><div class="lm-v">{{ pctp(dca.stats.pr_median) }}</div></div>
+              <div class="card lm" title="总收益率 P25（全史窗口，与年化分位同宇宙）"><div class="lm-k">收益 P25</div><div class="lm-v">{{ pctp(dca.stats.pr_p25) }}</div></div>
+              <div class="card lm" title="总收益率 P75（全史窗口，与年化分位同宇宙）"><div class="lm-k">收益 P75</div><div class="lm-v">{{ pctp(dca.stats.pr_p75) }}</div></div>
+              <div class="card lm" title="总收益率 P90（全史窗口，与年化分位同宇宙）"><div class="lm-k">收益 P90</div><div class="lm-v">{{ pctp(dca.stats.pr_p90) }}</div></div>
+              <div class="card lm" title="总收益率为正的基金占比（全史窗口总收益率，与年化分位同宇宙）"><div class="lm-k">总收益为正</div><div class="lm-v">{{ pct0(dca.stats.pr_positive_share) }}</div></div>
             </div>
             <!-- ===== 止盈点对比（市场级 5%~40% 八档，权益类+商品池；点击行/点切换排行阈值） ===== -->
             <div class="card" v-if="!STATIC_MODE && dcaTpCompare" style="margin-top: 16px; padding: 14px 16px 18px">
               <div class="toolbar" style="margin: 0 0 6px">
                 <div>
                   <h2 class="h1" style="font-size: 18px">止盈点对比：止盈线设多少更划算？<span class="dc-hint" style="margin-left: 6px">当前口径：{{ dcaModeLabel }}</span></h2>
-                  <p class="sub">同一「月定投（{{ dcaModeLabel }}）+ 止盈重来」策略只换止盈线（5%~40% 八档）在权益类在市基金上的整体表现 · 年化=XIRR 资金加权（钱在场的效率，跨阈值可比；总收益率天然偏向高阈值不作对比依据）· 每档采样 {{ dcaTpCompare.rows?.[0]?.count ?? 0 }} 只（在市且年化非空）· {{ dcaFeeLabel }}</p>
+                  <p class="sub">同一「月定投（{{ dcaModeLabel }}）+ 止盈重来」策略只换止盈线（5%~40% 八档）在权益类在市基金上的整体表现 · 年化=XIRR 资金加权（钱在场的效率，跨阈值可比）· 总收益率/总收益额为全史累计口径（高止盈线天然更高、受少数大赢家用拉动，作参考不作主对比依据）· 每档采样 {{ dcaTpCompare.rows?.[0]?.count ?? 0 }} 只（在市且年化非空）· {{ dcaFeeLabel }}</p>
                 </div>
                 <div class="toolbar-right">
                   <span v-if="dcaTpLoading" class="sub">重算中…</span>
@@ -3691,9 +3712,9 @@ watch(
               </div>
               <template v-else-if="dcaTpCompare.rows?.length">
                 <div style="overflow-x: auto">
-                  <table class="dca-matrix tp-compare" style="width: 100%; min-width: 640px">
+                  <table class="dca-matrix tp-compare" style="width: 100%; min-width: 1080px">
                     <thead><tr>
-                      <th>止盈点</th><th>中位年化</th><th>平均年化</th><th>年化为正</th><th>曾止盈</th><th>平均轮次</th><th>平均间隔</th>
+                      <th>止盈点</th><th>中位年化</th><th>平均年化</th><th>中位总收益率</th><th>平均总收益率</th><th>中位总收益额</th><th>平均总收益额</th><th>年化为正</th><th>曾止盈</th><th>平均轮次</th><th>平均间隔</th>
                     </tr></thead>
                     <tbody>
                       <tr v-for="r in dcaTpCompare.rows" :key="r.tp"
@@ -3703,6 +3724,10 @@ watch(
                         <td><b>{{ dcaTpLabel(r.tp) }}</b><span v-if="r.tp === 0.20" class="dc-hint" style="margin-left: 6px">默认</span></td>
                         <td><span :class="r.median >= 0 ? 'chg-up' : 'chg-down'">{{ pctp(r.median) }}</span></td>
                         <td>{{ pctp(r.mean) }}</td>
+                        <td><span :class="r.median_profit_rate != null ? (r.median_profit_rate >= 0 ? 'chg-up' : 'chg-down') : ''">{{ pctp(r.median_profit_rate) }}</span></td>
+                        <td>{{ pctp(r.mean_profit_rate) }}</td>
+                        <td><span :class="r.median_profit_amt != null ? (r.median_profit_amt >= 0 ? 'chg-up' : 'chg-down') : ''">{{ r.median_profit_amt != null ? fmt(Math.round(r.median_profit_amt)) + ' 元' : '—' }}</span></td>
+                        <td>{{ r.mean_profit_amt != null ? fmt(Math.round(r.mean_profit_amt)) + ' 元' : '—' }}</td>
                         <td>{{ pct0(r.positive_share) }}</td>
                         <td>{{ pct0(r.success_share) }}</td>
                         <td>{{ r.avg_rounds ?? '—' }}</td>
@@ -3724,7 +3749,7 @@ watch(
                     <text :x="p.x" :y="p.y - 9" text-anchor="middle" class="tp-v">{{ pctp(p.v) }}</text>
                   </g>
                 </svg>
-                <p class="note" style="margin: 10px 0 0">口径：权益类+商品池（权益 8 类白名单 + QDII-商品/商品；债基·FOF·货币·偏债·REITs 不在内——债基货基波动小到连 5% 都难触发，进平均会稀释阈值间差异）· 近 10 年窗口为主口径，「全史」自基金成立起 · 「曾止盈」= 窗口内触发过至少一轮止盈的基金占比 · 平均间隔按费用口径轮次聚合 · 点击表格行或折线圆点，排行表格切换到该止盈点；散点/分箱跟随顶部定投方式与止盈点开关 · 本区块为历史回测统计，不构成任何操作建议</p>
+                <p class="note" style="margin: 10px 0 0">口径：权益类+商品池（权益 8 类白名单 + QDII-商品/商品；债基·FOF·货币·偏债·REITs 不在内——债基货基波动小到连 5% 都难触发，进平均会稀释阈值间差异）· 近 10 年窗口为主口径，「全史」自基金成立起 · 「曾止盈」= 窗口内触发过至少一轮止盈的基金占比 · 平均间隔按费用口径轮次聚合 · 总收益率 = 全史窗口期末总市值/总投入-1（含已止盈落袋轮次）、总收益额 = 总收益率 × 总投入（每月 1000 元口径，加码方式投入随档位变化；率与额同费用口径，随顶部切换）· 点击表格行或折线圆点，排行表格切换到该止盈点；散点/分箱跟随顶部定投方式与止盈点开关 · 本区块为历史回测统计，不构成任何操作建议</p>
               </template>
               <div v-else class="browse-empty">多阈值对比数据尚未生成（日更回测首次写入后可用）</div>
             </div>
@@ -4019,6 +4044,24 @@ watch(
                   <template #body="{ data }">
                     <span v-if="dcaFeeVal(data, 'full_xirr') != null"
                       :class="dcaFeeVal(data, 'full_xirr') >= 0 ? 'chg-up' : 'chg-down'">{{ pct1(dcaFeeVal(data, 'full_xirr')) }}</span>
+                    <span v-else>—</span>
+                  </template>
+                </Column>
+                <!-- 全史窗口总收益率（2026-11-27）：期末总市值/总投入-1，止盈重来含已落袋轮次；
+                     总收益额 = 总收益率 × 总投入（行内计算，总投入与费率无关随口径取率） -->
+                <Column field="full_profit_rate" style="width: 104px" sortable bodyClass="num-col" v-if="colVisible('full_profit_rate')">
+                  <template #header><span title="总收益率（全史窗口）：定投止盈重来全程期末总市值/总投入-1（含已止盈落袋轮次与当前持仓），随费用口径与止盈点切换">总收益率</span></template>
+                  <template #body="{ data }">
+                    <span v-if="dcaFeeVal(data, 'full_profit_rate') != null"
+                      :class="dcaFeeVal(data, 'full_profit_rate') >= 0 ? 'chg-up' : 'chg-down'">{{ pct1(dcaFeeVal(data, 'full_profit_rate')) }}</span>
+                    <span v-else>—</span>
+                  </template>
+                </Column>
+                <Column field="full_profit_amt" style="width: 108px" sortable bodyClass="num-col" v-if="colVisible('full_profit_amt')">
+                  <template #header><span title="总收益额（全史窗口·每月 1000 元口径）：全窗口净赚金额 = 总收益率 × 总投入（加码方式投入随档位变化）；服务端排序同表达式">总收益额</span></template>
+                  <template #body="{ data }">
+                    <span v-if="dcaProfitAmt(data) != null"
+                      :class="dcaProfitAmt(data) >= 0 ? 'chg-up' : 'chg-down'">{{ fmt(Math.round(dcaProfitAmt(data))) }} 元</span>
                     <span v-else>—</span>
                   </template>
                 </Column>

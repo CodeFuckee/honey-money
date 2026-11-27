@@ -18,6 +18,11 @@
 - E2E-433 弹窗总收益率/年化卡：显示当前档位+费率口径的 w10 值，切档位/费率跟随；
 - E2E-434 弹窗费率切换：切 gross → rounds 请求带 fee=gross、卡值取原列，
   页面级费率按钮不受波及（弹窗局部状态）。
+- E2E-495 统计卡总收益五卡（2026-11-27）：总收益中位/收益 P25/P75/P90/
+  总收益为正 按 stats pr_* 渲染；
+- E2E-496 对比表总收益四列（2026-11-27）：中位/平均总收益率、中位/平均
+  总收益额 按行渲染（额千分位+元）；
+- E2E-497 排行表总收益率/总收益额列（2026-11-27）：行值渲染、额=率×投入。
 运行：python -m pytest tests/e2e/test_fund_dca_tp_page.py
 """
 
@@ -41,6 +46,7 @@ TP_LIST_BODY = {
          "w10_rounds": 11, "w10_invested": 36000, "w10_final_value": 42120,
          "w10_profit_rate": 0.17, "w10_xirr": 0.92, "gap_avg_days": 82.1,
          "full_xirr": 0.92, "full_rounds": 11, "full_profit_rate": 0.17,
+         "full_invested": 36000,
          "full_months": 36, "dd_current": -0.2712, "days_since_peak": 340,
          "dip_band": "25-30"},
         {"tp": 0.15, "code": "161725", "name": "招商中证白酒指数(LOF)A",
@@ -50,10 +56,13 @@ TP_LIST_BODY = {
          "w10_rounds": 13, "w10_invested": 121000, "w10_final_value": 114950,
          "w10_profit_rate": -0.05, "w10_xirr": -0.048, "gap_avg_days": None,
          "full_xirr": -0.041, "full_rounds": 13, "full_profit_rate": -0.05,
+         "full_invested": 121000,
          "full_months": 138},
     ],
     "stats": {"count": 13557, "p25": 0.03, "median": 0.055, "p75": 0.12,
-              "p90": 0.2, "positive_share": 0.86, "take_profit_share": 0.71},
+              "p90": 0.2, "positive_share": 0.86, "take_profit_share": 0.71,
+              "pr_p25": 0.02, "pr_median": 0.11, "pr_p75": 0.28,
+              "pr_p90": 0.65, "pr_positive_share": 0.78},
     "meta": {"generated_at": "2026-11-15T02:00:00+00:00", "fund_count": 13557,
              "params": {"amount": 1000, "thresholds": [0.05, 0.1, 0.15, 0.2,
                                                        0.25, 0.3],
@@ -66,7 +75,11 @@ def _cmp_row(tp: float, med: float) -> dict:
             "median": med, "mean": round(med * 0.95, 4),
             "positive_share": 0.8,
             "success_share": round(0.95 - tp, 4), "avg_rounds": 12.5,
-            "avg_gap_days": round(60 + tp * 300, 1)}
+            "avg_gap_days": round(60 + tp * 300, 1),
+            "median_profit_rate": round(med + 0.02, 4),
+            "mean_profit_rate": round(med + 0.015, 4),
+            "median_profit_amt": round(9000 + tp * 40000, 2),
+            "mean_profit_amt": round(8800 + tp * 38000, 2)}
 
 
 # 六档中位年化：非单调形状（5% 费耗拖累、30% 够不着），折线才有可读性
@@ -369,3 +382,48 @@ class TestDcaTp:
         assert rounds_calls, mock_tp
         page_fee_btn = page.locator('button[data-table-fee="nom"]')
         expect(page_fee_btn).to_have_class(re.compile("active"))
+
+    def test_stats_cards_profit_metrics(self, servers, page, mock_dca,
+                                        mock_tp):
+        """E2E-495：统计卡总收益五卡（总收益中位/收益 P25/P75/P90/总收益为正）
+        按 stats pr_* 渲染（2026-11-27）。"""
+        _, frontend_port = servers
+        open_dca(page, frontend_port)
+        cards = page.locator(".learn-metrics .card.lm")
+        expect(cards.filter(has_text="总收益中位")).to_contain_text("11.0%",
+                                                                  timeout=10_000)
+        expect(cards.filter(has_text="收益 P25")).to_contain_text("2.0%")
+        expect(cards.filter(has_text="收益 P75")).to_contain_text("28.0%")
+        expect(cards.filter(has_text="收益 P90")).to_contain_text("65.0%")
+        expect(cards.filter(has_text="总收益为正")).to_contain_text("78%")
+
+    def test_compare_table_profit_columns(self, servers, page, mock_dca,
+                                          mock_tp):
+        """E2E-496：对比表总收益四列（中位/平均总收益率、中位/平均总收益额）
+        表头与行值渲染；20% 行 额=9000+0.2×40000=17000 → 「17,000 元」。"""
+        _, frontend_port = servers
+        open_dca(page, frontend_port)
+        head = page.locator(".tp-compare thead tr")
+        for label in ("中位总收益率", "平均总收益率", "中位总收益额",
+                      "平均总收益额"):
+            expect(head).to_contain_text(label, timeout=10_000)
+        row = page.locator(".tp-compare tbody tr", has_text="20%")
+        expect(row).to_contain_text("9.0%")       # median_profit_rate=0.09
+        expect(row).to_contain_text("8.5%")       # mean_profit_rate=0.085
+        expect(row).to_contain_text("17,000 元")  # median_profit_amt
+        expect(row).to_contain_text("16,400 元")  # mean_profit_amt
+        # 旧行为不回退：年化列仍在
+        expect(row).to_contain_text("7.0%")
+
+    def test_rank_table_profit_rate_and_amount_columns(self, servers, page,
+                                                       mock_dca, mock_tp):
+        """E2E-497：排行表「总收益率」「总收益额」两列渲染，额=率×投入
+        （019387：0.17×36000=6,120 元；负收益率显负额）。"""
+        _, frontend_port = servers
+        open_dca(page, frontend_port)
+        row = page.locator(".browse-pv tbody tr", has_text="019387")
+        expect(row).to_contain_text("17.0%", timeout=10_000)  # 总收益率
+        expect(row).to_contain_text("6,120 元")               # 总收益额
+        row2 = page.locator(".browse-pv tbody tr", has_text="161725")
+        expect(row2).to_contain_text("-5.0%")
+        expect(row2).to_contain_text("-6,050 元")             # -0.05×121000

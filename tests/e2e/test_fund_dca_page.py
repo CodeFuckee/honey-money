@@ -43,6 +43,7 @@ LIST_BODY = {
          "w10_rounds": 6, "w10_invested": 36000, "w10_final_value": 42480,
          "gap_avg_days": 95.4, "full_xirr": 1.003,
          "full_rounds": 6, "full_profit_rate": 0.18,
+         "full_invested": 12000,
          "full_months": 36},
         {"code": "161725", "name": "招商中证白酒指数(LOF)A", "fund_type": "指数型-股票",
          "alive": True, "scale_yi": 209.0, "scale_date": "2026-09-30",
@@ -55,10 +56,13 @@ LIST_BODY = {
          "w10_rounds": 7, "w10_invested": 121000, "w10_final_value": 102850,
          "gap_avg_days": None, "full_xirr": -0.133,
          "full_rounds": 7, "full_profit_rate": -0.15,
+         "full_invested": 121000,
          "full_months": 138},
     ],
     "stats": {"count": 13557, "p25": 0.022, "median": 0.041, "p75": 0.114,
-              "p90": 0.192, "positive_share": 0.853, "take_profit_share": 0.54},
+              "p90": 0.192, "positive_share": 0.853, "take_profit_share": 0.54,
+              "pr_p25": 0.01, "pr_median": 0.06, "pr_p75": 0.19,
+              "pr_p90": 0.5, "pr_positive_share": 0.77},
     "meta": {"generated_at": "2026-10-29T14:39:32+00:00", "fund_count": 13981,
              "params": {"amount": 1000, "take_profit": 0.2, "min_age_years": 3,
                         "window_end": "2026-10-28"}},
@@ -154,7 +158,8 @@ def _list_body_for(fee: str) -> dict:
                     r[f"{k}_{f}"] = round(r[k] * s, 4)
     if b.get("stats"):
         factor = _FEE_SCALE.get(fee, 1.0)
-        for k in ("p25", "median", "p75", "p90"):
+        for k in ("p25", "median", "p75", "p90",
+                  "pr_p25", "pr_median", "pr_p75", "pr_p90"):
             if b["stats"].get(k) is not None:
                 b["stats"][k] = round(b["stats"][k] * factor, 4)
     return b
@@ -260,14 +265,24 @@ class TestFundDcaPage:
         （默认含费·申购名义口径，行值取 _nom 后缀字段）。"""
         _, frontend_port = servers
         open_dca(page, frontend_port)
-        expect(page.locator(".learn-metrics .lm")).to_have_count(7)
+        # 2026-11-27 统计卡 7→12（总收益中位/P25/P75/P90/为正 五卡加入）
+        expect(page.locator(".learn-metrics .lm")).to_have_count(12)
         expect(page.locator(".learn-metrics")).to_contain_text("3.8%")
+        # 默认 nom 口径：pr_median=0.06×0.92=0.0552 → 5.5%
+        expect(page.locator(".learn-metrics")).to_contain_text("5.5%")
         row = page.locator(".browse-pv tbody tr", has_text="中欧时代共赢")
         expect(row).to_contain_text("+92.3%")
-        expect(row.locator(".chg-up")).to_have_count(1)   # 年化
+        # 年化 + 总收益率 + 总收益额（2026-11-27 两新列）三处涨跌配色
+        expect(row.locator(".chg-up")).to_have_count(3)
         row2 = page.locator(".browse-pv tbody tr", has_text="白酒")
-        expect(row2.locator(".chg-down")).to_have_count(1)
+        expect(row2.locator(".chg-down")).to_have_count(3)
         expect(row2).to_contain_text("-12.2%")
+        # 总收益率/总收益额列（nom 口径：率×0.92，额=率×投入——
+        # 0.1656×12000=1,987 元 / -0.138×121000=-16,698 元）
+        expect(row).to_contain_text("+16.6%")
+        expect(row).to_contain_text("1,987 元")
+        expect(row2).to_contain_text("-13.8%")
+        expect(row2).to_contain_text("-16,698 元")
         # 运作年限列渲染（服务端按首条净值计算）+ 止盈间隔列
         expect(row).to_contain_text("2.9 年")
         expect(row).to_contain_text("≈2.9 月/次")
