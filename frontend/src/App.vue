@@ -557,16 +557,22 @@ function dcaStaticView() {
   })
   const off = dcaPage.value * DCA_PAGE_SIZE
   const xs = base.map(r => dcaFeeVal(r, 'full_xirr')).filter(v => v != null).sort((a, b) => a - b)
-  // 总收益率分位与年化同宇宙（年化非空行），口径与 server 端 _TP_STATS_SQL 一致
-  const prs = base.map(r => dcaFeeVal(r, 'full_profit_rate')).filter(v => v != null).sort((a, b) => a - b)
+  // 总收益金额分位（率×该基金投入逐基金排序）与投入中位，口径与 server 端
+  // _TP_STATS_SQL 一致（2026-11-27 二十五轮：统计卡显绝对金额）
+  const amts = base.map(r => {
+    const rate = dcaFeeVal(r, 'full_profit_rate')
+    return (rate != null && r.full_invested != null) ? rate * r.full_invested : null
+  }).filter(v => v != null).sort((a, b) => a - b)
+  const invs = base.map(r => r.full_invested).filter(v => v != null).sort((a, b) => a - b)
   const stats = xs.length ? {
     count: xs.length, p25: pctCont(xs, 0.25), median: pctCont(xs, 0.5),
     p75: pctCont(xs, 0.75), p90: pctCont(xs, 0.9),
     positive_share: xs.filter(v => v > 0).length / xs.length,
     take_profit_share: base.filter(r => (dcaFeeVal(r, 'w10_rounds') || 0) > 0).length / xs.length,
-    pr_p25: pctCont(prs, 0.25), pr_median: pctCont(prs, 0.5),
-    pr_p75: pctCont(prs, 0.75), pr_p90: pctCont(prs, 0.9),
-    pr_positive_share: prs.length ? prs.filter(v => v > 0).length / prs.length : null,
+    amt_p25: pctCont(amts, 0.25), amt_median: pctCont(amts, 0.5),
+    amt_p75: pctCont(amts, 0.75), amt_p90: pctCont(amts, 0.9),
+    pr_positive_share: amts.length ? amts.filter(v => v > 0).length / amts.length : null,
+    invested_median: pctCont(invs, 0.5),
   } : null
   return { status: 'up', total: rows.length, rows: rows.slice(off, off + DCA_PAGE_SIZE),
            stats, meta: dcaStaticMeta }
@@ -810,6 +816,7 @@ function onDcaSort(e) {
 const pct1 = v => v == null ? '—' : (v >= 0 ? '+' : '') + (v * 100).toFixed(1) + '%'
 const pctp = v => v == null ? '—' : (v * 100).toFixed(1) + '%'
 const pct0 = v => v == null ? '—' : (v * 100).toFixed(0) + '%'
+const fmtAmt = v => v == null ? '—' : fmt(Math.round(v)) + ' 元'
 
 // ===== 年限 × 规模 三维散点（/api/funds/dca/scatter：每基金一点 + 分箱统计） =====
 const dcaScatter = ref(null)
@@ -3690,11 +3697,12 @@ watch(
               <div class="card lm"><div class="lm-k">P90</div><div class="lm-v">{{ pctp(dca.stats.p90) }}</div></div>
               <div class="card lm"><div class="lm-k">年化为正</div><div class="lm-v">{{ pct0(dca.stats.positive_share) }}</div></div>
               <div class="card lm"><div class="lm-k">曾止盈</div><div class="lm-v">{{ pct0(dca.stats.take_profit_share) }}</div></div>
-              <div class="card lm" title="总收益率中位数（全史窗口：期末总市值/总投入-1，止盈重来含已落袋轮次；与年化分位同宇宙=年化非空在市基金，随费用口径切换）"><div class="lm-k">总收益中位</div><div class="lm-v">{{ pctp(dca.stats.pr_median) }}</div></div>
-              <div class="card lm" title="总收益率 P25（全史窗口，与年化分位同宇宙）"><div class="lm-k">收益 P25</div><div class="lm-v">{{ pctp(dca.stats.pr_p25) }}</div></div>
-              <div class="card lm" title="总收益率 P75（全史窗口，与年化分位同宇宙）"><div class="lm-k">收益 P75</div><div class="lm-v">{{ pctp(dca.stats.pr_p75) }}</div></div>
-              <div class="card lm" title="总收益率 P90（全史窗口，与年化分位同宇宙）"><div class="lm-k">收益 P90</div><div class="lm-v">{{ pctp(dca.stats.pr_p90) }}</div></div>
-              <div class="card lm" title="总收益率为正的基金占比（全史窗口总收益率，与年化分位同宇宙）"><div class="lm-k">总收益为正</div><div class="lm-v">{{ pct0(dca.stats.pr_positive_share) }}</div></div>
+              <div class="card lm" title="总收益额中位数（全史窗口净赚金额=总收益率×该基金总投入，每月 1000 元口径；止盈重来含已落袋轮次；金额分位按每基金逐个排序不可由率分位换算；与年化分位同宇宙=年化非空在市基金，随费用口径切换）"><div class="lm-k">总收益额中位</div><div class="lm-v">{{ fmtAmt(dca.stats.amt_median) }}</div></div>
+              <div class="card lm" title="总收益额 P25（全史窗口净赚金额，与年化分位同宇宙）"><div class="lm-k">收益额 P25</div><div class="lm-v">{{ fmtAmt(dca.stats.amt_p25) }}</div></div>
+              <div class="card lm" title="总收益额 P75（全史窗口净赚金额，与年化分位同宇宙）"><div class="lm-k">收益额 P75</div><div class="lm-v">{{ fmtAmt(dca.stats.amt_p75) }}</div></div>
+              <div class="card lm" title="总收益额 P90（全史窗口净赚金额，与年化分位同宇宙）"><div class="lm-k">收益额 P90</div><div class="lm-v">{{ fmtAmt(dca.stats.amt_p90) }}</div></div>
+              <div class="card lm" title="总收益为正的基金占比（全史口径金额为正=收益率为正，与年化分位同宇宙）"><div class="lm-k">总收益为正</div><div class="lm-v">{{ pct0(dca.stats.pr_positive_share) }}</div></div>
+              <div class="card lm" title="总投入中位数（每月 1000 元口径下定投周期一共投入的资金：月数×每期金额，加码方式随档位变化；金额卡的市场级参照——投入中位 × 收益率≈收益额；费率无关）"><div class="lm-k">投入中位</div><div class="lm-v">{{ fmtAmt(dca.stats.invested_median) }}</div></div>
             </div>
             <!-- ===== 止盈点对比（市场级 5%~40% 八档，权益类+商品池；点击行/点切换排行阈值） ===== -->
             <div class="card" v-if="!STATIC_MODE && dcaTpCompare" style="margin-top: 16px; padding: 14px 16px 18px">

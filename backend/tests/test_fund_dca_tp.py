@@ -527,28 +527,31 @@ class TestDcaTpRoutes:
         assert "r.full_profit_rate_nom * r.full_invested" in list_sql
 
     def test_tp_stats_sql_includes_profit_metrics(self, client, monkeypatch):
-        """统计卡 SQL 形状（2026-11-27）：总收益率五聚合（P25/P50/P75/P90/
-        为正占比）随费用口径后缀替换；宇宙门仍为年化非空（与年化分位同
-        宇宙，不做收益侧二次过滤）。"""
+        """统计卡 SQL 形状（2026-11-27 二十五轮改锚）：总收益分位改**金额
+        口径**（ORDER BY 率×总投入——每基金投入不同，金额分位不可由率分位
+        换算）+ 投入中位聚合；宇宙门仍为年化非空（与年化分位同宇宙，不做
+        收益侧二次过滤）。"""
         import app.dca_api as dca_mod
-        conn = _ListDispatchConn((13557,) + (None,) * 11)
+        conn = _ListDispatchConn((13557,) + (None,) * 12)
         _patch_connect(monkeypatch, dca_mod, conn)
         resp = client.get("/api/funds/dca/tp", params={"fee": "nom"})
         assert resp.status_code == 200
         norm = [" ".join(q.split()) for q, _ in conn.executed]
         stats_sql = [q for q in norm if "percentile_cont" in q][0]
         for p in ("0.25", "0.5", "0.75", "0.9"):
-            assert (f"percentile_cont({p}) WITHIN GROUP "
-                    "(ORDER BY r.full_profit_rate_nom)") in stats_sql, p
+            assert (f"percentile_cont({p}) WITHIN GROUP (ORDER BY "
+                    "r.full_profit_rate_nom * r.full_invested)") in stats_sql, p
+        assert ("percentile_cont(0.5) WITHIN GROUP "
+                "(ORDER BY r.full_invested)") in stats_sql   # 投入中位
         assert "avg((r.full_profit_rate_nom > 0)::int)::float" in stats_sql
         assert "r.full_xirr_nom IS NOT NULL" in stats_sql
 
     def test_tp_stats_profit_keys_in_response(self, client, monkeypatch):
-        """统计卡响应：总收益五键（pr_p25/pr_median/pr_p75/pr_p90/
-        pr_positive_share）随 stats 一并返回。"""
+        """统计卡响应（二十五轮改锚）：总收益**金额**四分位（amt_*）+ 投入
+        中位（invested_median）+ 为正占比随 stats 一并返回。"""
         import app.dca_api as dca_mod
         stats_row = (13557, 0.01, 0.02, 0.03, 0.04, 0.5, 0.6,
-                     0.11, 0.12, 0.13, 0.14, 0.15)
+                     1100.0, 1200.0, 1300.0, 1400.0, 0.15, 15000.0)
         conn = _ListDispatchConn(stats_row)
         _patch_connect(monkeypatch, dca_mod, conn)
         resp = client.get("/api/funds/dca/tp", params={"fee": "nom"})
@@ -556,9 +559,10 @@ class TestDcaTpRoutes:
         st = resp.json()["stats"]
         assert st["count"] == 13557
         assert st["median"] == 0.02
-        assert st["pr_p25"] == 0.11 and st["pr_median"] == 0.12
-        assert st["pr_p75"] == 0.13 and st["pr_p90"] == 0.14
+        assert st["amt_p25"] == 1100.0 and st["amt_median"] == 1200.0
+        assert st["amt_p75"] == 1300.0 and st["amt_p90"] == 1400.0
         assert st["pr_positive_share"] == 0.15
+        assert st["invested_median"] == 15000.0
 
     def test_tp_compare_registered_and_degrades(self, client, monkeypatch):
         import app.dca_api as dca_mod

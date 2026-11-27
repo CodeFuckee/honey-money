@@ -61,8 +61,9 @@ TP_LIST_BODY = {
     ],
     "stats": {"count": 13557, "p25": 0.03, "median": 0.055, "p75": 0.12,
               "p90": 0.2, "positive_share": 0.86, "take_profit_share": 0.71,
-              "pr_p25": 0.02, "pr_median": 0.11, "pr_p75": 0.28,
-              "pr_p90": 0.65, "pr_positive_share": 0.78},
+              "amt_p25": 900, "amt_median": 3600, "amt_p75": 9000,
+              "amt_p90": 26000, "pr_positive_share": 0.78,
+              "invested_median": 36000},
     "meta": {"generated_at": "2026-11-15T02:00:00+00:00", "fund_count": 13557,
              "params": {"amount": 1000, "thresholds": [0.05, 0.1, 0.15, 0.2,
                                                        0.25, 0.3],
@@ -385,17 +386,19 @@ class TestDcaTp:
 
     def test_stats_cards_profit_metrics(self, servers, page, mock_dca,
                                         mock_tp):
-        """E2E-495：统计卡总收益五卡（总收益中位/收益 P25/P75/P90/总收益为正）
-        按 stats pr_* 渲染（2026-11-27）。"""
+        """E2E-495（二十五轮改锚）：统计卡总收益**金额**卡（总收益额中位/
+        收益额 P25/P75/P90/总收益为正）+ 投入中位卡，按 stats amt_* 与
+        invested_median 渲染（2026-11-27）。"""
         _, frontend_port = servers
         open_dca(page, frontend_port)
         cards = page.locator(".learn-metrics .card.lm")
-        expect(cards.filter(has_text="总收益中位")).to_contain_text("11.0%",
-                                                                  timeout=10_000)
-        expect(cards.filter(has_text="收益 P25")).to_contain_text("2.0%")
-        expect(cards.filter(has_text="收益 P75")).to_contain_text("28.0%")
-        expect(cards.filter(has_text="收益 P90")).to_contain_text("65.0%")
+        expect(cards.filter(has_text="总收益额中位")).to_contain_text(
+            "3,600 元", timeout=10_000)
+        expect(cards.filter(has_text="收益额 P25")).to_contain_text("900 元")
+        expect(cards.filter(has_text="收益额 P75")).to_contain_text("9,000 元")
+        expect(cards.filter(has_text="收益额 P90")).to_contain_text("26,000 元")
         expect(cards.filter(has_text="总收益为正")).to_contain_text("78%")
+        expect(cards.filter(has_text="投入中位")).to_contain_text("36,000 元")
 
     def test_compare_table_profit_columns(self, servers, page, mock_dca,
                                           mock_tp):

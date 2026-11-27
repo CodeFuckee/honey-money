@@ -495,11 +495,12 @@ SELECT count(*),
        percentile_cont(0.9)  WITHIN GROUP (ORDER BY {xirr_col}),
        avg(({xirr_col} > 0)::int)::float,
        avg(({rounds_col} > 0)::int)::float,
-       percentile_cont(0.25) WITHIN GROUP (ORDER BY {pr_col}),
-       percentile_cont(0.5)  WITHIN GROUP (ORDER BY {pr_col}),
-       percentile_cont(0.75) WITHIN GROUP (ORDER BY {pr_col}),
-       percentile_cont(0.9)  WITHIN GROUP (ORDER BY {pr_col}),
-       avg(({pr_col} > 0)::int)::float
+       percentile_cont(0.25) WITHIN GROUP (ORDER BY {pr_col} * r.full_invested),
+       percentile_cont(0.5)  WITHIN GROUP (ORDER BY {pr_col} * r.full_invested),
+       percentile_cont(0.75) WITHIN GROUP (ORDER BY {pr_col} * r.full_invested),
+       percentile_cont(0.9)  WITHIN GROUP (ORDER BY {pr_col} * r.full_invested),
+       avg(({pr_col} > 0)::int)::float,
+       percentile_cont(0.5)  WITHIN GROUP (ORDER BY r.full_invested)
 FROM fund_dca_tp_result r
 WHERE r.alive AND r.tp = %s AND r.method = %s AND {xirr_col} IS NOT NULL
   AND {age_clause}
@@ -659,9 +660,12 @@ def fetch_dca_tp_list(dsn: str, *, tp: float = TAKE_PROFIT, q: str = "",
             stats = {"count": s[0], "p25": s[1], "median": s[2],
                      "p75": s[3], "p90": s[4],
                      "positive_share": s[5], "take_profit_share": s[6],
-                     # 总收益率五分位（2026-11-27，全史窗口，与年化同宇宙）
-                     "pr_p25": s[7], "pr_median": s[8], "pr_p75": s[9],
-                     "pr_p90": s[10], "pr_positive_share": s[11]}
+                     # 总收益金额四分位（2026-11-27 二十五轮改：用户要求统计卡
+                     # 显绝对金额——金额分位按 率×投入 逐基金排序，不可由率
+                     # 分位换算；投入中位=定投周期一共投入的市场级参照）
+                     "amt_p25": s[7], "amt_median": s[8], "amt_p75": s[9],
+                     "amt_p90": s[10], "pr_positive_share": s[11],
+                     "invested_median": s[12]}
         meta = None
         if m:
             meta = {"generated_at": m[0].isoformat() if m[0] else None,

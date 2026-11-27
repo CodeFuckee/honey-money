@@ -61,8 +61,9 @@ LIST_BODY = {
     ],
     "stats": {"count": 13557, "p25": 0.022, "median": 0.041, "p75": 0.114,
               "p90": 0.192, "positive_share": 0.853, "take_profit_share": 0.54,
-              "pr_p25": 0.01, "pr_median": 0.06, "pr_p75": 0.19,
-              "pr_p90": 0.5, "pr_positive_share": 0.77},
+              "amt_p25": 400, "amt_median": 6000, "amt_p75": 12000,
+              "amt_p90": 40000, "pr_positive_share": 0.77,
+              "invested_median": 36000},
     "meta": {"generated_at": "2026-10-29T14:39:32+00:00", "fund_count": 13981,
              "params": {"amount": 1000, "take_profit": 0.2, "min_age_years": 3,
                         "window_end": "2026-10-28"}},
@@ -158,8 +159,9 @@ def _list_body_for(fee: str) -> dict:
                     r[f"{k}_{f}"] = round(r[k] * s, 4)
     if b.get("stats"):
         factor = _FEE_SCALE.get(fee, 1.0)
+        # 金额分位随率同缩放（额=率×投入）；投入中位费率无关不缩放
         for k in ("p25", "median", "p75", "p90",
-                  "pr_p25", "pr_median", "pr_p75", "pr_p90"):
+                  "amt_p25", "amt_median", "amt_p75", "amt_p90"):
             if b["stats"].get(k) is not None:
                 b["stats"][k] = round(b["stats"][k] * factor, 4)
     return b
@@ -266,10 +268,12 @@ class TestFundDcaPage:
         _, frontend_port = servers
         open_dca(page, frontend_port)
         # 2026-11-27 统计卡 7→12（总收益中位/P25/P75/P90/为正 五卡加入）
-        expect(page.locator(".learn-metrics .lm")).to_have_count(12)
+        # 2026-11-27 统计卡 7→13（总收益额金额四分位+为正+投入中位 六卡加入）
+        expect(page.locator(".learn-metrics .lm")).to_have_count(13)
         expect(page.locator(".learn-metrics")).to_contain_text("3.8%")
-        # 默认 nom 口径：pr_median=0.06×0.92=0.0552 → 5.5%
-        expect(page.locator(".learn-metrics")).to_contain_text("5.5%")
+        # 默认 nom 口径：amt_median=6000×0.92=5520 → 5,520 元；投入中位 36,000 元
+        expect(page.locator(".learn-metrics")).to_contain_text("5,520 元")
+        expect(page.locator(".learn-metrics")).to_contain_text("36,000 元")
         row = page.locator(".browse-pv tbody tr", has_text="中欧时代共赢")
         expect(row).to_contain_text("+92.3%")
         # 年化 + 总收益率 + 总收益额（2026-11-27 两新列）三处涨跌配色
